@@ -26,7 +26,7 @@ DEFAULTS: dict[str, Any] = {
     "chunking_long_paragraph_threshold": 240,
     "chunking_llm_assist": False,
     "plain_text_mode": True,
-    "image_intent_mode": False,
+    "image_intent_mode": True,
     "interrupt_enabled": True,
     "experimental_thinking_merge_enabled": False,
     "interrupt_merge_strategy": "append",
@@ -223,7 +223,7 @@ class PluginConfig:
     chunking_long_paragraph_threshold: int = 240
     chunking_llm_assist: bool = False
     plain_text_mode: bool = True
-    image_intent_mode: bool = False
+    image_intent_mode: bool = True
     interrupt_enabled: bool = True
     experimental_thinking_merge_enabled: bool = False
     interrupt_merge_strategy: str = "append"

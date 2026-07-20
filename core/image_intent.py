@@ -27,29 +27,29 @@ def _get_image_component_class() -> type | None:
 
 
 def detect_images(event: Any) -> list[str]:
-    """检测事件消息链中的图片组件，返回图片标识列表。
-
-    依次尝试 event.message_obj.message 和 event.message_chain 两个路径，
-    兼容不同 AstrBot 版本。每个 Image 组件取 url/file/path 第一个非空值。
-    """
+    """检测事件消息链中的图片或表情组件，返回可诊断的组件标识。"""
     image_cls = _get_image_component_class()
-    if image_cls is None:
-        return []
-
     chain = _get_message_chain(event)
     if not chain:
         return []
 
     images: list[str] = []
-    for comp in chain:
-        if isinstance(comp, image_cls):
-            identifier = (
-                getattr(comp, "url", None)
-                or getattr(comp, "file", None)
-                or getattr(comp, "path", None)
-            )
-            if identifier:
-                images.append(str(identifier))
+    for index, comp in enumerate(chain):
+        component_name = type(comp).__name__.lower()
+        is_image = image_cls is not None and isinstance(comp, image_cls)
+        is_image_like = "image" in component_name or "sticker" in component_name
+        if not is_image and not is_image_like:
+            continue
+
+        identifier = (
+            getattr(comp, "url", None)
+            or getattr(comp, "file", None)
+            or getattr(comp, "path", None)
+            or getattr(comp, "file_id", None)
+            or getattr(comp, "id", None)
+            or f"{component_name}:{index}"
+        )
+        images.append(str(identifier))
     return images
 
 
@@ -59,17 +59,26 @@ def has_image(event: Any) -> bool:
 
 
 def _get_message_chain(event: Any) -> list[Any] | None:
-    """从事件对象获取消息链，兼容多种访问路径。"""
-    # 优先: event.message_obj.message（AstrBot 标准路径）
+    """从事件对象获取消息链，兼容不同版本和适配器。"""
+    candidates: list[Any] = []
     message_obj = getattr(event, "message_obj", None)
     if message_obj is not None:
-        chain = getattr(message_obj, "message", None)
+        candidates.append(getattr(message_obj, "message", None))
+    candidates.append(getattr(event, "message_chain", None))
+    try:
+        getter = getattr(event, "get_messages", None)
+        if callable(getter):
+            candidates.append(getter())
+    except Exception:
+        pass
+
+    for chain in candidates:
+        if chain is None or isinstance(chain, (str, bytes, dict)):
+            continue
         if isinstance(chain, list):
             return chain
-
-    # 兼容: event.message_chain
-    chain = getattr(event, "message_chain", None)
-    if isinstance(chain, list):
-        return chain
-
+        try:
+            return list(chain)
+        except (TypeError, ValueError):
+            continue
     return None

@@ -39,7 +39,7 @@ from .core.silence_judge import SilenceJudge
     "astrbot_plugin_conversation_flow",
     "Justice-ocr",
     "对话流控制：沉默判断、智能分段、插话中断",
-    "0.1.5",
+    "0.1.7",
 )
 class ConversationalFlowPlugin(Star):
     """对话流控制主插件类。"""
@@ -206,9 +206,8 @@ class ConversationalFlowPlugin(Star):
         if self.config.plain_text_mode:
             self._inject_plain_text_instruction(req)
 
-        # 图片意图判断：检测到图片时注入判断指令
-        if self.config.image_intent_mode:
-            self._inject_image_intent_instruction(event, req, seq)
+        # 图片意图判断：始终检测，开启时注入，关闭时输出诊断日志
+        self._inject_image_intent_instruction(event, req, seq)
 
     # ------------------------------------------------------------------
     # 主钩子：on_llm_response
@@ -682,6 +681,13 @@ class ConversationalFlowPlugin(Star):
 
         if not images:
             return
+        if not self.config.image_intent_mode:
+            self.logger.info(
+                "[conv-flow] seq=%s detected %s image(s), image intent is disabled",
+                seq,
+                len(images),
+            )
+            return
 
         self.logger.info(
             "[conv-flow] seq=%s detected %s image(s), injecting intent instruction",
@@ -689,6 +695,7 @@ class ConversationalFlowPlugin(Star):
             len(images),
         )
         instruction = IMAGE_INTENT_INSTRUCTION.format(marker=self.config.silence_marker)
+        injected = False
         try:
             parts = getattr(req, "extra_user_content_parts", None)
             if parts is not None:
@@ -696,21 +703,27 @@ class ConversationalFlowPlugin(Star):
                     from astrbot.core.agent.message import TextPart
 
                     parts.append(TextPart(text=instruction))
-                    return
                 except Exception:
                     parts.append({"type": "text", "text": instruction})
-                    return
+                injected = True
         except Exception as exc:
             self.logger.debug(
                 "[conv-flow] image intent inject via parts failed: %s", exc
             )
-        # 降级到 system_prompt
+
         try:
             current = getattr(req, "system_prompt", None) or ""
             req.system_prompt = current + "\n\n" + instruction
+            injected = True
         except Exception as exc:
-            self.logger.warning(
+            self.logger.debug(
                 "[conv-flow] image intent inject via system_prompt failed: %s", exc
+            )
+
+        if not injected:
+            self.logger.warning(
+                "[conv-flow] seq=%s image intent instruction could not be injected",
+                seq,
             )
 
     async def _silence_event(

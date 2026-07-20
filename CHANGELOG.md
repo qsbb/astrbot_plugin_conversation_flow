@@ -1,5 +1,19 @@
 # Changelog
 
+## v0.1.7 - 2026-07-21
+
+### Fixed
+
+- 图片意图判断默认改为开启，避免安装或更新后功能看似无效。
+- 只要消息链中存在 Image/Sticker 类组件就触发判断，不再要求组件必须包含 `url/file/path`；兼容仅提供 `file_id/id` 或完全没有可读标识的表情包。
+- 消息链读取兼容 `event.message_obj.message`、`event.message_chain`、`event.get_messages()` 及非 list 的可迭代 MessageChain。
+- 检测到图片但开关关闭时输出明确诊断日志。
+- 修正插件装饰器版本残留为 `0.1.5` 的问题。
+
+### Upgrade note
+
+- 已生成的旧配置不会自动采用新的默认值。升级后请确认 `image_intent_mode=true`，再重载插件或重启 AstrBot。
+
 ## v0.1.6 - 2026-07-21
 
 ### Added

@@ -116,7 +116,7 @@
     "type": "bool",
     "description": "图片意图判断",
     "hint": "开启后检测到用户发送图片时，按对话作用判断为话题收口型、社交互动型、观点态度型或信息内容型。卖萌/撒娇/求关注会简短互动，只有明确结束话题才沉默。依赖 AstrBot 原生图片识别，不接管图片识别本身。",
-    "default": false
+    "default": true
   },
   "interrupt_enabled": {
     "type": "bool",

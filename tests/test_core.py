@@ -113,6 +113,10 @@ class ConfigTests(unittest.TestCase):
         cfg = build_plugin_config({})
         self.assertFalse(cfg.experimental_thinking_merge_enabled)
 
+    def test_image_intent_defaults_on(self) -> None:
+        cfg = build_plugin_config({})
+        self.assertTrue(cfg.image_intent_mode)
+
     def test_experimental_thinking_merge_can_be_enabled(self) -> None:
         cfg = build_plugin_config({"experimental_thinking_merge_enabled": True})
         self.assertTrue(cfg.experimental_thinking_merge_enabled)
@@ -198,6 +202,11 @@ class ImageIntentTests(unittest.TestCase):
         chain = [_MockImage(url="http://example.com/a.png")]
         event = _ImageEvent(chain)
         self.assertEqual(detect_images(event), ["http://example.com/a.png"])
+        self.assertTrue(has_image(event))
+
+    def test_detects_image_without_identifier(self) -> None:
+        event = _ImageEvent([_MockImage()])
+        self.assertEqual(detect_images(event), ["_mockimage:0"])
         self.assertTrue(has_image(event))
 
     def test_detects_multiple_images(self) -> None:
