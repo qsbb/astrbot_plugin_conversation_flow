@@ -1,5 +1,19 @@
 # Changelog
 
+## v0.1.10 - 2026-07-21
+
+### Fixed
+
+- 修复图片意图指令在 LLM 实际看不到图片时仍被注入，导致 bot 回复"这张图好像没加载出来呢"的问题。
+- 新增 `is_image_visible_to_llm` 检测函数：只有 `req.image_urls` 非空（LLM 直接能看到图片）或 prompt/contexts/system_prompt 中检测到视觉摘要关键字（如其他插件注入的"图片类型："、"可见内容："、"图像描述："等）时才注入图片意图指令。
+- 消息链中存在图片但 `req.image_urls` 为空且无视觉摘要时跳过注入并输出 `WARN` 日志，避免 LLM 困惑。
+- 该修复兼容其他视觉插件（如 `astrbot_plugin_private_companion`）：当其他插件已把视觉摘要注入到 prompt/contexts 中时，conv-flow 仍能正确识别图片可见并注入意图指令。
+
+### Diagnosis
+
+- 图片请求且 LLM 能看到时：`[conv-flow] seq=N image visible from req.image_urls, injecting intent instruction` 或 `from visual_summary:...`。
+- 图片请求但 LLM 看不到时：`[conv-flow] seq=N image in message chain but not visible to LLM ..., skip intent injection`。
+
 ## v0.1.9 - 2026-07-21
 
 ### Fixed

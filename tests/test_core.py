@@ -55,6 +55,7 @@ from astrbot_plugin_conversation_flow.core.image_intent import (  # noqa: E402
     detect_images,
     detect_request_images,
     has_image,
+    is_image_visible_to_llm,
 )
 
 
@@ -195,9 +196,11 @@ class _ImageEvent:
 
 
 class _ProviderRequest:
-    def __init__(self, image_urls=None, prompt=""):
+    def __init__(self, image_urls=None, prompt="", system_prompt="", contexts=None):
         self.image_urls = image_urls or []
         self.prompt = prompt
+        self.system_prompt = system_prompt
+        self.contexts = contexts or []
 
 
 class ImageIntentTests(unittest.TestCase):
@@ -266,6 +269,47 @@ class ImageIntentTests(unittest.TestCase):
     def test_no_message_chain_returns_empty(self) -> None:
         event = _ImageEvent(None)
         self.assertEqual(detect_images(event), [])
+
+    def test_visible_when_image_urls_present(self) -> None:
+        event = _ImageEvent(None)
+        req = _ProviderRequest(image_urls=["http://example.com/a.png"])
+        visible, source = is_image_visible_to_llm(req, event)
+        self.assertTrue(visible)
+        self.assertEqual(source, "req.image_urls")
+
+    def test_visible_when_prompt_contains_visual_summary(self) -> None:
+        event = _ImageEvent(None)
+        req = _ProviderRequest(
+            prompt="用户消息",
+            system_prompt="图片类型：GIF 可见内容：1.玩偶靠在枕头上",
+        )
+        visible, source = is_image_visible_to_llm(req, event)
+        self.assertTrue(visible)
+        self.assertTrue(source.startswith("visual_summary:"))
+
+    def test_visible_when_contexts_contain_visual_summary(self) -> None:
+        event = _ImageEvent(None)
+        req = _ProviderRequest(
+            prompt="用户消息",
+            contexts=["图像描述：米黄色兔耳毛绒玩偶"],
+        )
+        visible, source = is_image_visible_to_llm(req, event)
+        self.assertTrue(visible)
+        self.assertTrue(source.startswith("visual_summary:"))
+
+    def test_not_visible_when_image_in_chain_but_no_summary(self) -> None:
+        event = _ImageEvent([_MockImage(url="http://example.com/a.png")])
+        req = _ProviderRequest(prompt="用户消息")
+        visible, source = is_image_visible_to_llm(req, event)
+        self.assertFalse(visible)
+        self.assertEqual(source, "image_in_chain_but_not_visible")
+
+    def test_not_visible_when_no_image_at_all(self) -> None:
+        event = _ImageEvent(None)
+        req = _ProviderRequest(prompt="普通文本消息")
+        visible, source = is_image_visible_to_llm(req, event)
+        self.assertFalse(visible)
+        self.assertEqual(source, "no_image")
 
 
 class ConversationTrackerTests(unittest.TestCase):

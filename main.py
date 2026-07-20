@@ -39,7 +39,7 @@ from .core.silence_judge import SilenceJudge
     "astrbot_plugin_conversation_flow",
     "Justice-ocr",
     "对话流控制：沉默判断、智能分段、插话中断",
-    "0.1.9",
+    "0.1.10",
 )
 class ConversationalFlowPlugin(Star):
     """对话流控制主插件类。"""
@@ -80,7 +80,7 @@ class ConversationalFlowPlugin(Star):
         }
 
         self.logger.info(
-            "[conv-flow] plugin loaded: version=0.1.9, silence=%s/%s, "
+            "[conv-flow] plugin loaded: version=0.1.10, silence=%s/%s, "
             "chunking=%s, image_intent=%s, interrupt=%s/%s",
             self.config.silence_enabled,
             self.config.silence_strategy,
@@ -687,33 +687,40 @@ class ConversationalFlowPlugin(Star):
     def _inject_image_intent_instruction(
         self, event: AstrMessageEvent, req: Any, seq: Any
     ) -> None:
-        """检测用户消息是否包含图片，包含则注入图片意图判断指令。"""
+        """检测用户消息是否包含图片，包含则注入图片意图判断指令。
+
+        只有 LLM 实际能看到图片（req.image_urls 非空或视觉摘要已注入）
+        时才注入意图指令，避免 LLM 看不到图片却收到图片意图指令而回复"图片没加载出来"。
+        """
         try:
-            from .core.image_intent import detect_request_images
+            from .core.image_intent import is_image_visible_to_llm
 
-            images, image_source = detect_request_images(event, req)
+            visible, source = is_image_visible_to_llm(req, event)
         except Exception as exc:
-            self.logger.debug("[conv-flow] image detect failed: %s", exc)
+            self.logger.debug("[conv-flow] image visibility check failed: %s", exc)
             return
 
-        if not images:
+        if not visible:
+            if source == "image_in_chain_but_not_visible":
+                self.logger.warning(
+                    "[conv-flow] seq=%s image in message chain but not visible to LLM "
+                    "(image_urls empty and no visual summary), skip intent injection",
+                    seq,
+                )
             return
+
         if not self.config.image_intent_mode:
             self.logger.info(
-                "[conv-flow] seq=%s detected %s image(s) from %s, "
-                "image intent is disabled",
+                "[conv-flow] seq=%s image visible from %s, image intent is disabled",
                 seq,
-                len(images),
-                image_source,
+                source,
             )
             return
 
         self.logger.info(
-            "[conv-flow] seq=%s detected %s image(s) from %s, "
-            "injecting intent instruction",
+            "[conv-flow] seq=%s image visible from %s, injecting intent instruction",
             seq,
-            len(images),
-            image_source,
+            source,
         )
         instruction = IMAGE_INTENT_INSTRUCTION.format(marker=self.config.silence_marker)
         injected = False

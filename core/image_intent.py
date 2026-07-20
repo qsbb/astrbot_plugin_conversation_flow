@@ -70,6 +70,58 @@ def detect_request_images(event: Any, req: Any) -> tuple[list[str], str]:
     return [], "none"
 
 
+# 视觉摘要关键字：其他插件（如 private_companion）或 AstrBot 自带视觉模块
+# 把图片描述注入到 prompt/contexts/system_prompt 时常用的字段标记。
+# 检测到这些关键字说明 LLM 间接看到了图片内容。
+VISUAL_SUMMARY_KEYWORDS: tuple[str, ...] = (
+    "图片类型：",
+    "可见内容：",
+    "图像表达意图：",
+    "图像归属判断：",
+    "图片描述：",
+    "图像描述：",
+    "图片内容：",
+    "图像内容：",
+)
+
+
+def is_image_visible_to_llm(req: Any, event: Any) -> tuple[bool, str]:
+    """判断 LLM 是否实际能看到图片内容（直接或通过视觉摘要）。
+
+    返回 (visible, source)：
+    - ``req.image_urls``：LLM 直接能看到图片 URL
+    - ``visual_summary:<keyword>``：prompt/contexts/system_prompt 中检测到视觉摘要
+    - ``image_in_chain_but_not_visible``：消息链有图片但 LLM 实际看不到
+    - ``no_image``：没有图片
+    """
+    request_images = [str(item) for item in (getattr(req, "image_urls", None) or [])]
+    if request_images:
+        return True, "req.image_urls"
+
+    combined_parts: list[str] = []
+    for name in ("prompt", "system_prompt"):
+        value = getattr(req, name, None)
+        if value:
+            combined_parts.append(str(value))
+    contexts = getattr(req, "contexts", None)
+    if isinstance(contexts, list):
+        for ctx in contexts:
+            try:
+                combined_parts.append(str(ctx))
+            except Exception:
+                continue
+    combined = "\n".join(combined_parts)
+
+    for keyword in VISUAL_SUMMARY_KEYWORDS:
+        if keyword in combined:
+            return True, f"visual_summary:{keyword.rstrip('：:')}"
+
+    if detect_images(event):
+        return False, "image_in_chain_but_not_visible"
+
+    return False, "no_image"
+
+
 def has_image(event: Any) -> bool:
     """检测事件消息链中是否包含至少一张图片。"""
     return bool(detect_images(event))
