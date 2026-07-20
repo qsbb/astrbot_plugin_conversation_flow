@@ -1,5 +1,17 @@
 # Changelog
 
+## v0.1.4 - 2026-07-21
+
+### Added
+
+- 新增图片意图判断功能（`image_intent_mode`，默认关闭）。
+- 检测到用户发送图片时，注入指令让主 LLM 判断图片属于三类之一：无意义表情包/贴图、表达观点/态度的表情包、包含信息的图片，并据此决定回复方向。
+- 无意义表情包可触发 `<SILENCE/>` 沉默，与现有沉默判断协同。
+- 不接管 AstrBot 原生图片识别，依赖其识别结果（已自动出现在 LLM 上下文中）。
+- 兼容 `event.message_obj.message` 和 `event.message_chain` 两种消息链访问路径，兼容 Image 组件的 `url`/`file`/`path` 属性。
+- `/convflow status` 显示图片意图判断开关状态。
+- 新增 5 项图片检测单元测试。
+
 ## v0.1.3 - 2026-07-21
 
 ### Added

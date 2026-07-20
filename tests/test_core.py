@@ -17,8 +17,24 @@ astrbot_module = types.ModuleType("astrbot")
 astrbot_api_module = types.ModuleType("astrbot.api")
 astrbot_api_module.logger = _Logger()
 astrbot_module.api = astrbot_api_module
+
+# mock astrbot.api.message_components.Image
+astrbot_mc_module = types.ModuleType("astrbot.api.message_components")
+
+
+class _MockImage:
+    def __init__(self, url=None, file=None, path=None):
+        self.url = url
+        self.file = file
+        self.path = path
+
+
+astrbot_mc_module.Image = _MockImage
+astrbot_api_module.message_components = astrbot_mc_module
+
 sys.modules.setdefault("astrbot", astrbot_module)
 sys.modules.setdefault("astrbot.api", astrbot_api_module)
+sys.modules.setdefault("astrbot.api.message_components", astrbot_mc_module)
 
 from astrbot_plugin_conversation_flow.core.chunker import Chunker  # noqa: E402
 from astrbot_plugin_conversation_flow.core.config import build_plugin_config  # noqa: E402
@@ -31,6 +47,10 @@ from astrbot_plugin_conversation_flow.core.interrupt_tracker import (  # noqa: E
 )
 from astrbot_plugin_conversation_flow.core.plain_text import (  # noqa: E402
     strip_markdown_format,
+)
+from astrbot_plugin_conversation_flow.core.image_intent import (  # noqa: E402
+    detect_images,
+    has_image,
 )
 
 
@@ -138,6 +158,49 @@ class PlainTextTests(unittest.TestCase):
 
     def test_preserves_underscores_in_words(self) -> None:
         self.assertEqual(strip_markdown_format("my_var_name"), "my_var_name")
+
+
+class _MessageObj:
+    def __init__(self, chain=None):
+        self.message = chain
+
+
+class _ImageEvent:
+    """带消息链的事件 mock，用于图片检测测试。"""
+
+    def __init__(self, chain=None):
+        self.message_obj = _MessageObj(chain)
+
+
+class ImageIntentTests(unittest.TestCase):
+    def test_detects_image_with_url(self) -> None:
+        chain = [_MockImage(url="http://example.com/a.png")]
+        event = _ImageEvent(chain)
+        self.assertEqual(detect_images(event), ["http://example.com/a.png"])
+        self.assertTrue(has_image(event))
+
+    def test_detects_multiple_images(self) -> None:
+        chain = [
+            _MockImage(url="http://example.com/1.png"),
+            _MockImage(file="/tmp/2.png"),
+        ]
+        event = _ImageEvent(chain)
+        self.assertEqual(len(detect_images(event)), 2)
+
+    def test_no_image_returns_empty(self) -> None:
+        chain = []
+        event = _ImageEvent(chain)
+        self.assertEqual(detect_images(event), [])
+        self.assertFalse(has_image(event))
+
+    def test_falls_back_to_file_and_path(self) -> None:
+        chain = [_MockImage(file="/local/path/img.jpg")]
+        event = _ImageEvent(chain)
+        self.assertEqual(detect_images(event), ["/local/path/img.jpg"])
+
+    def test_no_message_chain_returns_empty(self) -> None:
+        event = _ImageEvent(None)
+        self.assertEqual(detect_images(event), [])
 
 
 class ConversationTrackerTests(unittest.TestCase):

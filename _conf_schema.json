@@ -112,6 +112,12 @@
     "hint": "开启后向 LLM 注入指令要求用纯文本聊天（不用 Markdown 格式），并在分段发送前剥离残留的 **加粗**、# 标题、- 列表等标记。代码块内容不受影响。推荐开启。",
     "default": true
   },
+  "image_intent_mode": {
+    "type": "bool",
+    "description": "图片意图判断",
+    "hint": "开启后检测到用户发送图片时，注入指令让主 LLM 判断图片属于无意义表情包/观点表情包/信息图片，并据此决定回复方向。依赖 AstrBot 原生图片识别已开启（识别结果会自动出现在 LLM 上下文中）。不接管图片识别本身。",
+    "default": false
+  },
   "interrupt_enabled": {
     "type": "bool",
     "description": "启用插话中断处理",

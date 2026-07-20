@@ -24,6 +24,7 @@ from .core.interrupt_tracker import ConversationTracker
 from .core.llm_service import LLMService
 from .core.plain_text import strip_markdown_format
 from .core.prompts import (
+    IMAGE_INTENT_INSTRUCTION,
     INTERRUPT_MERGE_APPEND_TEMPLATE,
     INTERRUPT_MERGE_DISCARD_HINT,
     INTERRUPT_MERGE_REWRITE_SYSTEM,
@@ -37,7 +38,7 @@ from .core.silence_judge import SilenceJudge
     "astrbot_plugin_conversation_flow",
     "Justice-ocr",
     "对话流控制：沉默判断、智能分段、插话中断",
-    "0.1.3",
+    "0.1.4",
 )
 class ConversationalFlowPlugin(Star):
     """对话流控制主插件类。"""
@@ -201,6 +202,10 @@ class ConversationalFlowPlugin(Star):
         # 纯文本模式：注入纯文本回复指令
         if self.config.plain_text_mode:
             self._inject_plain_text_instruction(req)
+
+        # 图片意图判断：检测到图片时注入判断指令
+        if self.config.image_intent_mode:
+            self._inject_image_intent_instruction(event, req, seq)
 
     # ------------------------------------------------------------------
     # 主钩子：on_llm_response
@@ -412,6 +417,7 @@ class ConversationalFlowPlugin(Star):
             f"(min={self.config.chunking_min_length}, max={self.config.chunking_max_segments})\n"
             f"- 分段延迟: {self._delay_status_text()}\n"
             f"- 纯文本模式: {'on' if self.config.plain_text_mode else 'off'}\n"
+            f"- 图片意图: {'on' if self.config.image_intent_mode else 'off'}\n"
             f"- 插话中断: {'on' if self.config.interrupt_enabled else 'off'} "
             f"({self.config.interrupt_merge_strategy})\n"
             f"- 活跃会话: {active_sessions} (本次清理过期 {stale_cleaned})\n"
@@ -625,6 +631,51 @@ class ConversationalFlowPlugin(Star):
         except Exception as exc:
             self.logger.warning(
                 "[conv-flow] plain text inject via system_prompt failed: %s", exc
+            )
+
+    def _inject_image_intent_instruction(
+        self, event: AstrMessageEvent, req: Any, seq: Any
+    ) -> None:
+        """检测用户消息是否包含图片，包含则注入图片意图判断指令。"""
+        try:
+            from .core.image_intent import detect_images
+
+            images = detect_images(event)
+        except Exception as exc:
+            self.logger.debug("[conv-flow] image detect failed: %s", exc)
+            return
+
+        if not images:
+            return
+
+        self.logger.info(
+            "[conv-flow] seq=%s detected %s image(s), injecting intent instruction",
+            seq,
+            len(images),
+        )
+        instruction = IMAGE_INTENT_INSTRUCTION.format(marker=self.config.silence_marker)
+        try:
+            parts = getattr(req, "extra_user_content_parts", None)
+            if parts is not None:
+                try:
+                    from astrbot.core.agent.message import TextPart
+
+                    parts.append(TextPart(text=instruction))
+                    return
+                except Exception:
+                    parts.append({"type": "text", "text": instruction})
+                    return
+        except Exception as exc:
+            self.logger.debug(
+                "[conv-flow] image intent inject via parts failed: %s", exc
+            )
+        # 降级到 system_prompt
+        try:
+            current = getattr(req, "system_prompt", None) or ""
+            req.system_prompt = current + "\n\n" + instruction
+        except Exception as exc:
+            self.logger.warning(
+                "[conv-flow] image intent inject via system_prompt failed: %s", exc
             )
 
     async def _silence_event(

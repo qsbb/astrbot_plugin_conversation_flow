@@ -1,7 +1,7 @@
 # 对话流控制插件 - 实现计划
 
 > 插件名：`astrbot_plugin_conversation_flow`
-> 版本：v0.1.3
+> 版本：v0.1.4
 > 适用 AstrBot：>=4.16.0, <5
 
 ## 0. 官方依据与审查结论
@@ -93,6 +93,7 @@ astrbot_plugin_conversation_flow/
     ├── silence_judge.py          # 沉默判断逻辑
     ├── chunker.py                # 智能分段切分
     ├── plain_text.py             # Markdown 格式剥离（纯文本模式兜底）
+    ├── image_intent.py           # 图片检测（图片意图判断）
     └── interrupt_tracker.py      # 会话级 in-flight 状态管理
 ```
 
@@ -410,7 +411,8 @@ async def on_llm_request(self, event, req):
 
 ## 6. 版本路线
 
-- **v0.1.3**（本次）：新增纯文本回复模式（`plain_text_mode`），通过提示词注入 + 后处理兜底两层保障，控制 LLM 不输出 Markdown 格式标记，代码块不受影响。
+- **v0.1.4**（本次）：新增图片意图判断（`image_intent_mode`），检测到用户发送图片时注入指令让主 LLM 判断图片属于无意义表情包/观点表情包/信息图片并决定回复方向。不接管 AstrBot 原生图片识别。
+- **v0.1.3**：新增纯文本回复模式（`plain_text_mode`），通过提示词注入 + 后处理兜底两层保障，控制 LLM 不输出 Markdown 格式标记，代码块不受影响。
 - **v0.1.2**：分段发送支持固定延迟与按有效字符数延迟，默认 35ms/字并限制在 500～4000ms。
 - **v0.1.1**：完成官方 API 对照、自检修复、结构化插话状态、候选分段与分段发送期间中断检查。
 - **v0.2.0**（计划）：基于真实 AstrBot 运行环境验证更多适配器，并评估官方 `on_waiting_llm_request` 是否能提供更早的请求级协调点。

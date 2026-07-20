@@ -26,6 +26,7 @@ DEFAULTS: dict[str, Any] = {
     "chunking_long_paragraph_threshold": 240,
     "chunking_llm_assist": False,
     "plain_text_mode": True,
+    "image_intent_mode": False,
     "interrupt_enabled": True,
     "interrupt_merge_strategy": "append",
     "interrupt_window_ms": 30000,
@@ -160,6 +161,9 @@ def normalize_config(raw: dict[str, Any] | None) -> dict[str, Any]:
     out["plain_text_mode"] = _coerce_bool(
         raw.get("plain_text_mode"), DEFAULTS["plain_text_mode"]
     )
+    out["image_intent_mode"] = _coerce_bool(
+        raw.get("image_intent_mode"), DEFAULTS["image_intent_mode"]
+    )
     out["interrupt_enabled"] = _coerce_bool(
         raw.get("interrupt_enabled"), DEFAULTS["interrupt_enabled"]
     )
@@ -214,6 +218,7 @@ class PluginConfig:
     chunking_long_paragraph_threshold: int = 240
     chunking_llm_assist: bool = False
     plain_text_mode: bool = True
+    image_intent_mode: bool = False
     interrupt_enabled: bool = True
     interrupt_merge_strategy: str = "append"
     interrupt_window_ms: int = 30000
