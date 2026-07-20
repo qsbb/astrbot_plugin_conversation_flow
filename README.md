@@ -57,6 +57,16 @@
 | `chunking_long_paragraph_threshold` | `240` | 超过此长度的自然段才继续按句子切分 |
 | `chunking_llm_assist` | `false` | 超长文本启用 LLM 辅助切分（额外消耗 token） |
 
+#### 纯文本模式
+
+| 字段 | 默认 | 说明 |
+|---|---|---|
+| `plain_text_mode` | `true` | 开启后向 LLM 注入纯文本回复指令，并在分段发送前剥离残留 Markdown 标记（代码块不受影响） |
+
+开启后会有两层保障：
+1. **提示词注入**（主）：在 `on_llm_request` 阶段注入指令，让 LLM 像真人聊天一样用纯文本回复，不使用 `**加粗**`、`# 标题`、`- 列表` 等 Markdown 格式标记。
+2. **后处理兜底**（辅）：在 `on_decorating_result` 阶段剥离 LLM 仍然输出的残留标记（加粗、斜体、删除线、行内代码、标题、列表符号、引用），代码块内容原样保留。
+
 #### 插话中断
 
 | 字段 | 默认 | 说明 |
@@ -191,6 +201,7 @@ astrbot_plugin_conversation_flow/
     ├── llm_service.py            # 4 层 provider fallback
     ├── silence_judge.py          # 沉默判断（inject/prejudge/both）
     ├── chunker.py                # 智能分段切分
+    ├── plain_text.py             # Markdown 格式剥离（纯文本模式）
     └── interrupt_tracker.py      # 会话级 in-flight 状态管理
 ```
 

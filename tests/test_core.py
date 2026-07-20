@@ -29,6 +29,9 @@ from astrbot_plugin_conversation_flow.core.delay import (  # noqa: E402
 from astrbot_plugin_conversation_flow.core.interrupt_tracker import (  # noqa: E402
     ConversationTracker,
 )
+from astrbot_plugin_conversation_flow.core.plain_text import (  # noqa: E402
+    strip_markdown_format,
+)
 
 
 class _Event:
@@ -101,6 +104,40 @@ class DelayTests(unittest.TestCase):
         cfg = build_plugin_config({})
         self.assertEqual(calculate_segment_delay_ms("字", cfg), 500)
         self.assertEqual(calculate_segment_delay_ms("字" * 500, cfg), 4000)
+
+
+class PlainTextTests(unittest.TestCase):
+    def test_strips_bold_and_italic(self) -> None:
+        self.assertEqual(strip_markdown_format("**重要**内容"), "重要内容")
+        self.assertEqual(strip_markdown_format("*斜体*文字"), "斜体文字")
+
+    def test_strips_heading_and_list_markers(self) -> None:
+        self.assertEqual(strip_markdown_format("# 标题\n正文"), "标题\n正文")
+        self.assertEqual(strip_markdown_format("- 项目一\n- 项目二"), "项目一\n项目二")
+        self.assertEqual(strip_markdown_format("1. 第一\n2. 第二"), "第一\n第二")
+
+    def test_strips_quote_and_strikethrough(self) -> None:
+        self.assertEqual(strip_markdown_format("> 引用内容"), "引用内容")
+        self.assertEqual(strip_markdown_format("~~废弃~~"), "废弃")
+
+    def test_preserves_code_blocks(self) -> None:
+        text = "**前文**\n```python\nprint('**不被剥离**')\n```\n**后文**"
+        result = strip_markdown_format(text)
+        # 代码块内容保留
+        self.assertIn("print('**不被剥离**')", result)
+        # 代码块外的 Markdown 被剥离
+        self.assertNotIn("**前文**", result)
+        self.assertNotIn("**后文**", result)
+        self.assertIn("前文", result)
+        self.assertIn("后文", result)
+
+    def test_plain_text_unchanged(self) -> None:
+        self.assertEqual(
+            strip_markdown_format("普通纯文本，没有格式。"), "普通纯文本，没有格式。"
+        )
+
+    def test_preserves_underscores_in_words(self) -> None:
+        self.assertEqual(strip_markdown_format("my_var_name"), "my_var_name")
 
 
 class ConversationTrackerTests(unittest.TestCase):

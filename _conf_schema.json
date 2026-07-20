@@ -106,6 +106,12 @@
     "hint": "仅当启发式切分得到超过 max_segments 段时启用，调用一次轻量 LLM 重新规划。会额外消耗 token。",
     "default": false
   },
+  "plain_text_mode": {
+    "type": "bool",
+    "description": "纯文本回复模式",
+    "hint": "开启后向 LLM 注入指令要求用纯文本聊天（不用 Markdown 格式），并在分段发送前剥离残留的 **加粗**、# 标题、- 列表等标记。代码块内容不受影响。推荐开启。",
+    "default": true
+  },
   "interrupt_enabled": {
     "type": "bool",
     "description": "启用插话中断处理",

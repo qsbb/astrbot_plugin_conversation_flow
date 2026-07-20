@@ -22,11 +22,13 @@ from .core.config import PluginConfig, build_plugin_config, normalize_config
 from .core.delay import calculate_segment_delay_ms
 from .core.interrupt_tracker import ConversationTracker
 from .core.llm_service import LLMService
+from .core.plain_text import strip_markdown_format
 from .core.prompts import (
     INTERRUPT_MERGE_APPEND_TEMPLATE,
     INTERRUPT_MERGE_DISCARD_HINT,
     INTERRUPT_MERGE_REWRITE_SYSTEM,
     INTERRUPT_MERGE_REWRITE_USER_TEMPLATE,
+    PLAIN_TEXT_INSTRUCTION,
 )
 from .core.silence_judge import SilenceJudge
 
@@ -35,7 +37,7 @@ from .core.silence_judge import SilenceJudge
     "astrbot_plugin_conversation_flow",
     "Justice-ocr",
     "对话流控制：沉默判断、智能分段、插话中断",
-    "0.1.2",
+    "0.1.3",
 )
 class ConversationalFlowPlugin(Star):
     """对话流控制主插件类。"""
@@ -196,6 +198,10 @@ class ConversationalFlowPlugin(Star):
             if not ok:
                 self.logger.warning("[conv-flow] seq=%s silence inject failed", seq)
 
+        # 纯文本模式：注入纯文本回复指令
+        if self.config.plain_text_mode:
+            self._inject_plain_text_instruction(req)
+
     # ------------------------------------------------------------------
     # 主钩子：on_llm_response
     # ------------------------------------------------------------------
@@ -283,13 +289,50 @@ class ConversationalFlowPlugin(Star):
             self.tracker.cancel_request(event)
             return
 
-        # 4) 智能分段
+        # 4) 纯文本模式：剥离 Markdown 格式标记
+        text_modified = False
+        if self.config.plain_text_mode:
+            stripped = strip_markdown_format(text)
+            if stripped != text:
+                text = stripped
+                text_modified = True
+            if not text or not text.strip():
+                return
+
+        # 5) 智能分段
         if not self.config.chunking_enabled:
+            if text_modified:
+                # 文本被剥离过，需要主动发送替换后的纯文本
+                self._clear_result(event)
+                self._set_extra(event, self.SENT_CHUNKS_KEY, True)
+                try:
+                    event.stop_event()
+                except Exception:
+                    pass
+                try:
+                    await event.send(event.plain_result(text))
+                except Exception as exc:
+                    self.logger.warning(
+                        "[conv-flow] failed to send stripped text: %s", exc
+                    )
             self.tracker.finish_response(event, bot_text=text)
             return
 
         candidates = self.chunker.split_candidates(text)
         if len(candidates) <= 1:
+            if text_modified:
+                self._clear_result(event)
+                self._set_extra(event, self.SENT_CHUNKS_KEY, True)
+                try:
+                    event.stop_event()
+                except Exception:
+                    pass
+                try:
+                    await event.send(event.plain_result(text))
+                except Exception as exc:
+                    self.logger.warning(
+                        "[conv-flow] failed to send stripped text: %s", exc
+                    )
             self.tracker.finish_response(event, bot_text=text)
             return
 
@@ -368,6 +411,7 @@ class ConversationalFlowPlugin(Star):
             f"- 智能分段: {'on' if self.config.chunking_enabled else 'off'} "
             f"(min={self.config.chunking_min_length}, max={self.config.chunking_max_segments})\n"
             f"- 分段延迟: {self._delay_status_text()}\n"
+            f"- 纯文本模式: {'on' if self.config.plain_text_mode else 'off'}\n"
             f"- 插话中断: {'on' if self.config.interrupt_enabled else 'off'} "
             f"({self.config.interrupt_merge_strategy})\n"
             f"- 活跃会话: {active_sessions} (本次清理过期 {stale_cleaned})\n"
@@ -557,6 +601,30 @@ class ConversationalFlowPlugin(Star):
         except Exception as exc:
             self.logger.warning(
                 "[conv-flow] merge inject via system_prompt failed: %s", exc
+            )
+
+    def _inject_plain_text_instruction(self, req: Any) -> None:
+        """注入纯文本回复指令到 req.extra_user_content_parts。"""
+        try:
+            parts = getattr(req, "extra_user_content_parts", None)
+            if parts is not None:
+                try:
+                    from astrbot.core.agent.message import TextPart
+
+                    parts.append(TextPart(text=PLAIN_TEXT_INSTRUCTION))
+                    return
+                except Exception:
+                    parts.append({"type": "text", "text": PLAIN_TEXT_INSTRUCTION})
+                    return
+        except Exception as exc:
+            self.logger.debug("[conv-flow] plain text inject via parts failed: %s", exc)
+        # 降级到 system_prompt
+        try:
+            current = getattr(req, "system_prompt", None) or ""
+            req.system_prompt = current + "\n\n" + PLAIN_TEXT_INSTRUCTION
+        except Exception as exc:
+            self.logger.warning(
+                "[conv-flow] plain text inject via system_prompt failed: %s", exc
             )
 
     async def _silence_event(
