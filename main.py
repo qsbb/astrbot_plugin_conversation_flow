@@ -19,6 +19,7 @@ from astrbot.api.star import Context, Star, StarTools, register
 
 from .core.chunker import Chunker
 from .core.config import PluginConfig, build_plugin_config, normalize_config
+from .core.delay import calculate_segment_delay_ms
 from .core.interrupt_tracker import ConversationTracker
 from .core.llm_service import LLMService
 from .core.prompts import (
@@ -34,7 +35,7 @@ from .core.silence_judge import SilenceJudge
     "astrbot_plugin_conversation_flow",
     "Justice-ocr",
     "对话流控制：沉默判断、智能分段、插话中断",
-    "0.1.1",
+    "0.1.2",
 )
 class ConversationalFlowPlugin(Star):
     """对话流控制主插件类。"""
@@ -315,16 +316,24 @@ class ConversationalFlowPlugin(Star):
             pass
 
         sent_text_parts: list[str] = []
-        interval = max(0, self.config.chunking_segment_interval_ms) / 1000.0
         for idx, seg in enumerate(segments):
+            seg = seg.strip()
+            if not seg:
+                continue
+            if idx > 0:
+                delay_ms = calculate_segment_delay_ms(seg, self.config)
+                if delay_ms > 0:
+                    try:
+                        await asyncio.sleep(delay_ms / 1000)
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception:
+                        pass
             if self.config.interrupt_enabled and self.tracker.is_discarded(event):
                 self.logger.info(
                     "[conv-flow] seq=%s chunk send stopped by interruption", seq
                 )
                 break
-            seg = seg.strip()
-            if not seg:
-                continue
             try:
                 await event.send(event.plain_result(seg))
                 sent_text_parts.append(seg)
@@ -332,13 +341,6 @@ class ConversationalFlowPlugin(Star):
                 self.logger.warning(
                     "[conv-flow] failed to send segment %s: %s", idx, exc
                 )
-            if idx < len(segments) - 1 and interval > 0:
-                try:
-                    await asyncio.sleep(interval)
-                except asyncio.CancelledError:
-                    raise
-                except Exception:
-                    pass
 
         self._stats["chunked"] += 1
         self.logger.info(
@@ -365,6 +367,7 @@ class ConversationalFlowPlugin(Star):
             f"- 沉默判断: {'on' if self.config.silence_enabled else 'off'} ({self.config.silence_strategy})\n"
             f"- 智能分段: {'on' if self.config.chunking_enabled else 'off'} "
             f"(min={self.config.chunking_min_length}, max={self.config.chunking_max_segments})\n"
+            f"- 分段延迟: {self._delay_status_text()}\n"
             f"- 插话中断: {'on' if self.config.interrupt_enabled else 'off'} "
             f"({self.config.interrupt_merge_strategy})\n"
             f"- 活跃会话: {active_sessions} (本次清理过期 {stale_cleaned})\n"
@@ -623,6 +626,14 @@ class ConversationalFlowPlugin(Star):
         if isinstance(response, str):
             return response
         return ""
+
+    def _delay_status_text(self) -> str:
+        if self.config.chunking_delay_mode == "fixed":
+            return f"fixed/{self.config.chunking_segment_interval_ms}ms"
+        return (
+            f"per_char/{self.config.chunking_delay_per_char_ms}ms每字 "
+            f"({self.config.chunking_delay_min_ms}-{self.config.chunking_delay_max_ms}ms)"
+        )
 
     def _try_parse_value(self, key: str, value: str) -> Any:
         """根据 schema 默认值类型解析用户输入。"""

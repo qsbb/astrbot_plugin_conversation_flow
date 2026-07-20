@@ -22,6 +22,10 @@ sys.modules.setdefault("astrbot.api", astrbot_api_module)
 
 from astrbot_plugin_conversation_flow.core.chunker import Chunker  # noqa: E402
 from astrbot_plugin_conversation_flow.core.config import build_plugin_config  # noqa: E402
+from astrbot_plugin_conversation_flow.core.delay import (  # noqa: E402
+    calculate_segment_delay_ms,
+    count_effective_chars,
+)
 from astrbot_plugin_conversation_flow.core.interrupt_tracker import (  # noqa: E402
     ConversationTracker,
 )
@@ -76,6 +80,27 @@ class ChunkerTests(unittest.TestCase):
         candidates = chunker.split_candidates(text)
         self.assertGreater(len(candidates), 2)
         self.assertLessEqual(len(chunker.split(text)), 2)
+
+
+class DelayTests(unittest.TestCase):
+    def test_effective_chars_ignore_whitespace(self) -> None:
+        self.assertEqual(count_effective_chars("你 好\n世界"), 4)
+
+    def test_fixed_delay(self) -> None:
+        cfg = build_plugin_config(
+            {"chunking_delay_mode": "fixed", "chunking_segment_interval_ms": 1250}
+        )
+        self.assertEqual(calculate_segment_delay_ms("任意长度", cfg), 1250)
+
+    def test_per_char_delay_uses_recommended_value(self) -> None:
+        cfg = build_plugin_config({})
+        self.assertEqual(calculate_segment_delay_ms("测试文本共十个有效字符", cfg), 500)
+        self.assertEqual(calculate_segment_delay_ms("字" * 40, cfg), 1400)
+
+    def test_per_char_delay_is_clamped(self) -> None:
+        cfg = build_plugin_config({})
+        self.assertEqual(calculate_segment_delay_ms("字", cfg), 500)
+        self.assertEqual(calculate_segment_delay_ms("字" * 500, cfg), 4000)
 
 
 class ConversationTrackerTests(unittest.TestCase):

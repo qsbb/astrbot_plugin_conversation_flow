@@ -1,7 +1,7 @@
 # 对话流控制插件 - 实现计划
 
 > 插件名：`astrbot_plugin_conversation_flow`
-> 版本：v0.1.1
+> 版本：v0.1.2
 > 适用 AstrBot：>=4.16.0, <5
 
 ## 0. 官方依据与审查结论
@@ -234,11 +234,13 @@ async def on_decorating_result(self, event):
 
     # 4. 清空原结果，主动发送多段
     event.clear_result()
-    event.stop_event()  # 阻止框架默认发送（已被 clear 也无内容）
+    event.stop_event()
     for i, seg in enumerate(segments):
+        if i > 0:
+            delay_ms = calculate_segment_delay_ms(seg, self.cfg)
+            if delay_ms > 0:
+                await asyncio.sleep(delay_ms / 1000)
         await event.send(event.plain_result(seg))
-        if i < len(segments) - 1 and self.cfg.chunking_segment_interval_ms > 0:
-            await asyncio.sleep(self.cfg.chunking_segment_interval_ms / 1000)
 
     # 5. 标记本次回复完成
     self.tracker.finish_response(event)
@@ -407,6 +409,7 @@ async def on_llm_request(self, event, req):
 
 ## 6. 版本路线
 
-- **v0.1.1**（本次）：完成官方 API 对照、自检修复、结构化插话状态、候选分段与分段发送期间中断检查。
+- **v0.1.2**（本次）：分段发送支持固定延迟与按有效字符数延迟，默认 35ms/字并限制在 500～4000ms。
+- **v0.1.1**：完成官方 API 对照、自检修复、结构化插话状态、候选分段与分段发送期间中断检查。
 - **v0.2.0**（计划）：基于真实 AstrBot 运行环境验证更多适配器，并评估官方 `on_waiting_llm_request` 是否能提供更早的请求级协调点。
 - **v0.3.0**（计划）：若 AstrBot 官方暴露稳定取消 API，再增加真正的 Provider 任务取消；否则继续维持结果级中断语义。

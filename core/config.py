@@ -16,7 +16,11 @@ DEFAULTS: dict[str, Any] = {
     "chunking_enabled": True,
     "chunking_min_length": 60,
     "chunking_max_segments": 5,
+    "chunking_delay_mode": "per_char",
     "chunking_segment_interval_ms": 800,
+    "chunking_delay_per_char_ms": 35,
+    "chunking_delay_min_ms": 500,
+    "chunking_delay_max_ms": 4000,
     "chunking_protect_code_block": True,
     "chunking_preserve_paragraphs": True,
     "chunking_long_paragraph_threshold": 240,
@@ -31,6 +35,7 @@ DEFAULTS: dict[str, Any] = {
 
 _VALID_STRATEGIES = {"inject", "prejudge", "both"}
 _VALID_MERGE = {"append", "rewrite", "discard_old"}
+_VALID_DELAY_MODES = {"fixed", "per_char"}
 _VALID_LOG_LEVELS = {"DEBUG", "INFO", "WARNING", "ERROR"}
 
 
@@ -99,11 +104,38 @@ def normalize_config(raw: dict[str, Any] | None) -> dict[str, Any]:
             raw.get("chunking_max_segments"), DEFAULTS["chunking_max_segments"]
         ),
     )
+    delay_mode = _coerce_str(
+        raw.get("chunking_delay_mode"), DEFAULTS["chunking_delay_mode"]
+    )
+    out["chunking_delay_mode"] = (
+        delay_mode
+        if delay_mode in _VALID_DELAY_MODES
+        else DEFAULTS["chunking_delay_mode"]
+    )
     out["chunking_segment_interval_ms"] = max(
         0,
         _coerce_int(
             raw.get("chunking_segment_interval_ms"),
             DEFAULTS["chunking_segment_interval_ms"],
+        ),
+    )
+    out["chunking_delay_per_char_ms"] = max(
+        0,
+        _coerce_int(
+            raw.get("chunking_delay_per_char_ms"),
+            DEFAULTS["chunking_delay_per_char_ms"],
+        ),
+    )
+    out["chunking_delay_min_ms"] = max(
+        0,
+        _coerce_int(
+            raw.get("chunking_delay_min_ms"), DEFAULTS["chunking_delay_min_ms"]
+        ),
+    )
+    out["chunking_delay_max_ms"] = max(
+        out["chunking_delay_min_ms"],
+        _coerce_int(
+            raw.get("chunking_delay_max_ms"), DEFAULTS["chunking_delay_max_ms"]
         ),
     )
     out["chunking_protect_code_block"] = _coerce_bool(
@@ -168,7 +200,11 @@ class PluginConfig:
     chunking_enabled: bool = True
     chunking_min_length: int = 60
     chunking_max_segments: int = 5
+    chunking_delay_mode: str = "per_char"
     chunking_segment_interval_ms: int = 800
+    chunking_delay_per_char_ms: int = 35
+    chunking_delay_min_ms: int = 500
+    chunking_delay_max_ms: int = 4000
     chunking_protect_code_block: bool = True
     chunking_preserve_paragraphs: bool = True
     chunking_long_paragraph_threshold: int = 240

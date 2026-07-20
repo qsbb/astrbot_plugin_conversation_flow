@@ -54,11 +54,34 @@
     "hint": "超过此数量时会合并末尾的多段为一段，避免刷屏。",
     "default": 5
   },
+  "chunking_delay_mode": {
+    "type": "string",
+    "description": "分段延迟模式",
+    "options": ["fixed", "per_char"],
+    "hint": "fixed=每段固定延迟；per_char=按下一段有效字数乘以每字延迟，并受最小/最大值限制。推荐 per_char。",
+    "default": "per_char"
+  },
   "chunking_segment_interval_ms": {
     "type": "int",
-    "description": "分段发送间隔（毫秒）",
-    "hint": "模拟真人打字停顿。设为 0 则无间隔立即发送。",
+    "description": "固定分段延迟（毫秒）",
+    "hint": "仅在 fixed 模式生效。默认 800ms。设为 0 则无间隔立即发送。",
     "default": 800
+  },
+  "chunking_delay_per_char_ms": {
+    "type": "int",
+    "description": "按字数延迟系数（毫秒/字）",
+    "hint": "仅在 per_char 模式生效。推荐 35ms/字。",
+    "default": 35
+  },
+  "chunking_delay_min_ms": {
+    "type": "int",
+    "description": "按字数模式最小延迟（毫秒）",
+    "default": 500
+  },
+  "chunking_delay_max_ms": {
+    "type": "int",
+    "description": "按字数模式最大延迟（毫秒）",
+    "default": 4000
   },
   "chunking_protect_code_block": {
     "type": "bool",
