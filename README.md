@@ -83,6 +83,10 @@
 
 **不接管 AstrBot 原生图片识别**。插件只检测消息链中是否包含 Image 组件，图片内容描述由 AstrBot 原生图片识别阶段提供（需在 AstrBot 设置中开启图片识别）。如果图片识别关闭，插件仍会注入判断指令，但主 LLM 无法看到图片内容，会根据上下文降级处理。
 
+> 从 v0.1.6 或更早版本升级时，已有配置文件不会自动采用新的默认值。请在插件配置中确认 `image_intent_mode=true`，保存后重载插件或重启 AstrBot。
+>
+> v0.1.8 在 AstrBot v4.26.7 上优先读取 `ProviderRequest.image_urls`。正常加载后日志应出现 `[conv-flow] plugin loaded: version=0.1.8`；发送图片时应出现 `detected 1 image(s) from req.image_urls`。如果两条日志都不存在，说明当前 AstrBot 实例没有加载此插件或仍在运行旧版本。
+
 #### 插话中断
 
 | 字段 | 默认 | 说明 |

@@ -1,5 +1,18 @@
 # Changelog
 
+## v0.1.8 - 2026-07-21
+
+### Fixed
+
+- 按 AstrBot v4.26.7 官方 `ProviderRequest` 结构，图片检测改为优先读取 `req.image_urls`，事件消息链作为兼容兜底。
+- 纯图片请求兼容 AstrBot 自动生成的 `[图片]` prompt 占位符，即使其他阶段清空图片列表也能触发图片意图。
+- 启动日志显示插件版本和 `image_intent` 开关；图片日志显示检测来源（`req.image_urls`、消息链或文本占位符）。
+- 社交表情回复进一步禁止“这个……的样子……”“图里……”“看起来……”等画面解说，改为直接对用户接情绪和互动。
+
+### Diagnosis
+
+- 正常加载后应看到 `[conv-flow] plugin loaded: version=0.1.8`；图片请求应看到 `detected ... from req.image_urls`。如果均不存在，说明当前 AstrBot 实例没有加载该插件或新版本。
+
 ## v0.1.7 - 2026-07-21
 
 ### Fixed

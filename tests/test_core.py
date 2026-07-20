@@ -53,6 +53,7 @@ from astrbot_plugin_conversation_flow.core.prompts import (  # noqa: E402
 )
 from astrbot_plugin_conversation_flow.core.image_intent import (  # noqa: E402
     detect_images,
+    detect_request_images,
     has_image,
 )
 
@@ -185,8 +186,18 @@ class _MessageObj:
 class _ImageEvent:
     """带消息链的事件 mock，用于图片检测测试。"""
 
-    def __init__(self, chain=None):
+    def __init__(self, chain=None, message_text=""):
         self.message_obj = _MessageObj(chain)
+        self.message_text = message_text
+
+    def get_message_str(self):
+        return self.message_text
+
+
+class _ProviderRequest:
+    def __init__(self, image_urls=None, prompt=""):
+        self.image_urls = image_urls or []
+        self.prompt = prompt
 
 
 class ImageIntentTests(unittest.TestCase):
@@ -196,6 +207,30 @@ class ImageIntentTests(unittest.TestCase):
         self.assertIn("回复最多保留 1～2 句", IMAGE_INTENT_INSTRUCTION)
         self.assertIn(
             "不要提及“图片意图判断”、图片识别、视觉模型", IMAGE_INTENT_INSTRUCTION
+        )
+
+    def test_request_images_prefer_provider_field(self) -> None:
+        event = _ImageEvent([_MockImage(url="event.png")])
+        req = _ProviderRequest(image_urls=["request.png"])
+        self.assertEqual(
+            detect_request_images(event, req),
+            (["request.png"], "req.image_urls"),
+        )
+
+    def test_request_images_fall_back_to_event_chain(self) -> None:
+        event = _ImageEvent([_MockImage(url="event.png")])
+        req = _ProviderRequest()
+        self.assertEqual(
+            detect_request_images(event, req),
+            (["event.png"], "event.message_chain"),
+        )
+
+    def test_request_images_fall_back_to_placeholder(self) -> None:
+        event = _ImageEvent(None)
+        req = _ProviderRequest(prompt="[图片]")
+        self.assertEqual(
+            detect_request_images(event, req),
+            (["image-placeholder"], "text-placeholder"),
         )
 
     def test_detects_image_with_url(self) -> None:

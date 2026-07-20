@@ -1,7 +1,7 @@
 # 对话流控制插件 - 实现计划
 
 > 插件名：`astrbot_plugin_conversation_flow`
-> 版本：v0.1.7
+> 版本：v0.1.8
 > 适用 AstrBot：>=4.16.0, <5
 
 ## 0. 官方依据与审查结论
@@ -411,7 +411,8 @@ async def on_llm_request(self, event, req):
 
 ## 6. 版本路线
 
-- **v0.1.7**（本次）：修复图片意图看似无效：默认开启图片意图，兼容无 URL/File 的 Image/Sticker 和可迭代 MessageChain，并增加开关关闭诊断日志。旧配置需手动确认 `image_intent_mode=true`。
+- **v0.1.8**（本次）：按 AstrBot v4.26.7 官方结构优先读取 `ProviderRequest.image_urls`，增加 `[图片]` 占位符兜底和检测来源日志；社交表情回复禁止画面解说，直接接用户情绪。
+- **v0.1.7**：修复图片意图看似无效：默认开启图片意图，兼容无 URL/File 的 Image/Sticker 和可迭代 MessageChain，并增加开关关闭诊断日志。旧配置需手动确认 `image_intent_mode=true`。
 - **v0.1.6**：新增实验性思考中断合并开关；旧回复仍在思考且未输出时抑制旧结果，读取 ProviderRequest 公开历史去重后合并到下一轮重新生成。当前无法取消 Provider 端旧推理，频繁插话会产生重复思考并消耗大量 Token，直至 AstrBot 提供真正的打断思考接口。
 - **v0.1.5**：修正社交互动型表情包误判，图片意图按对话作用分为话题收口型、社交互动型、观点态度型和信息内容型；卖萌/撒娇/求关注优先简短互动，不轻易沉默。
 - **v0.1.4**：新增图片意图判断（`image_intent_mode`），检测到用户发送图片时注入指令让主 LLM 判断图片属于无意义表情包/观点表情包/信息图片并决定回复方向。不接管 AstrBot 原生图片识别。

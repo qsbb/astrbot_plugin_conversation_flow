@@ -39,7 +39,7 @@ from .core.silence_judge import SilenceJudge
     "astrbot_plugin_conversation_flow",
     "Justice-ocr",
     "对话流控制：沉默判断、智能分段、插话中断",
-    "0.1.7",
+    "0.1.8",
 )
 class ConversationalFlowPlugin(Star):
     """对话流控制主插件类。"""
@@ -80,10 +80,12 @@ class ConversationalFlowPlugin(Star):
         }
 
         self.logger.info(
-            "[conv-flow] plugin loaded: silence=%s/%s, chunking=%s, interrupt=%s/%s",
+            "[conv-flow] plugin loaded: version=0.1.8, silence=%s/%s, "
+            "chunking=%s, image_intent=%s, interrupt=%s/%s",
             self.config.silence_enabled,
             self.config.silence_strategy,
             self.config.chunking_enabled,
+            self.config.image_intent_mode,
             self.config.interrupt_enabled,
             self.config.interrupt_merge_strategy,
         )
@@ -672,9 +674,9 @@ class ConversationalFlowPlugin(Star):
     ) -> None:
         """检测用户消息是否包含图片，包含则注入图片意图判断指令。"""
         try:
-            from .core.image_intent import detect_images
+            from .core.image_intent import detect_request_images
 
-            images = detect_images(event)
+            images, image_source = detect_request_images(event, req)
         except Exception as exc:
             self.logger.debug("[conv-flow] image detect failed: %s", exc)
             return
@@ -683,16 +685,20 @@ class ConversationalFlowPlugin(Star):
             return
         if not self.config.image_intent_mode:
             self.logger.info(
-                "[conv-flow] seq=%s detected %s image(s), image intent is disabled",
+                "[conv-flow] seq=%s detected %s image(s) from %s, "
+                "image intent is disabled",
                 seq,
                 len(images),
+                image_source,
             )
             return
 
         self.logger.info(
-            "[conv-flow] seq=%s detected %s image(s), injecting intent instruction",
+            "[conv-flow] seq=%s detected %s image(s) from %s, "
+            "injecting intent instruction",
             seq,
             len(images),
+            image_source,
         )
         instruction = IMAGE_INTENT_INSTRUCTION.format(marker=self.config.silence_marker)
         injected = False

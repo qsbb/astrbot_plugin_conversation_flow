@@ -53,6 +53,23 @@ def detect_images(event: Any) -> list[str]:
     return images
 
 
+def detect_request_images(event: Any, req: Any) -> tuple[list[str], str]:
+    """按 AstrBot 请求字段、事件消息链、文本占位符的顺序检测图片。"""
+    request_images = [str(item) for item in (getattr(req, "image_urls", None) or [])]
+    if request_images:
+        return request_images, "req.image_urls"
+
+    event_images = detect_images(event)
+    if event_images:
+        return event_images, "event.message_chain"
+
+    prompt = str(getattr(req, "prompt", None) or "")
+    message_text = str(event.get_message_str() or "")
+    if "[图片]" in prompt or "[图片]" in message_text:
+        return ["image-placeholder"], "text-placeholder"
+    return [], "none"
+
+
 def has_image(event: Any) -> bool:
     """检测事件消息链中是否包含至少一张图片。"""
     return bool(detect_images(event))
