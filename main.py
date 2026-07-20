@@ -39,7 +39,7 @@ from .core.silence_judge import SilenceJudge
     "astrbot_plugin_conversation_flow",
     "Justice-ocr",
     "对话流控制：沉默判断、智能分段、插话中断",
-    "0.1.8",
+    "0.1.9",
 )
 class ConversationalFlowPlugin(Star):
     """对话流控制主插件类。"""
@@ -80,7 +80,7 @@ class ConversationalFlowPlugin(Star):
         }
 
         self.logger.info(
-            "[conv-flow] plugin loaded: version=0.1.8, silence=%s/%s, "
+            "[conv-flow] plugin loaded: version=0.1.9, silence=%s/%s, "
             "chunking=%s, image_intent=%s, interrupt=%s/%s",
             self.config.silence_enabled,
             self.config.silence_strategy,
@@ -145,8 +145,23 @@ class ConversationalFlowPlugin(Star):
         )
 
     # ------------------------------------------------------------------
-    # 主钩子：on_llm_request
+    # 主钩子：等待会话锁 / on_llm_request
     # ------------------------------------------------------------------
+
+    @filter.on_waiting_llm_request()
+    async def on_waiting_llm_request(self, event: AstrMessageEvent) -> None:
+        """会话锁外登记请求，使后续消息能及时使旧请求失效。"""
+        seq = self.tracker.begin_request(
+            event,
+            detect_interrupt=self.config.interrupt_enabled,
+            experimental_thinking_merge=self.config.experimental_thinking_merge_enabled,
+        )
+        self.logger.info(
+            "[conv-flow] waiting request registered: seq=%s, umo=%s, text=%r",
+            seq,
+            self.tracker._get_umo(event),
+            self.tracker._get_user_text(event)[:80],
+        )
 
     @filter.on_llm_request()
     async def on_llm_request(self, event: AstrMessageEvent, req: Any) -> None:
@@ -178,6 +193,9 @@ class ConversationalFlowPlugin(Star):
             )
             return
 
+        # 图片意图必须在空文本判断前执行，纯图片消息的 user_text 通常为空
+        self._inject_image_intent_instruction(event, req, seq)
+
         if not user_text:
             return
 
@@ -207,9 +225,6 @@ class ConversationalFlowPlugin(Star):
         # 纯文本模式：注入纯文本回复指令
         if self.config.plain_text_mode:
             self._inject_plain_text_instruction(req)
-
-        # 图片意图判断：始终检测，开启时注入，关闭时输出诊断日志
-        self._inject_image_intent_instruction(event, req, seq)
 
     # ------------------------------------------------------------------
     # 主钩子：on_llm_response

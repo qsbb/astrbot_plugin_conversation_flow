@@ -16,6 +16,7 @@ class PendingRequest:
     started_at: float
     finished: bool = False
     response_started: bool = False
+    user_texts: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -78,6 +79,10 @@ class ConversationTracker:
         experimental_thinking_merge: bool = False,
     ) -> int:
         """登记请求并按需标记同一会话中仍在生成的旧请求。"""
+        existing_seq = self._get_extra(event, self.SEQ_EXTRA_KEY)
+        if isinstance(existing_seq, int):
+            return existing_seq
+
         umo = self._get_umo(event)
         state = self.get_state(umo)
 
@@ -88,6 +93,7 @@ class ConversationTracker:
         state.next_seq += 1
         user_text = self._get_user_text(event) or ""
         merge_hint: dict[str, Any] | None = None
+        old_texts: list[str] = []
         active_pending = [
             p
             for p in state.pending.values()
@@ -99,10 +105,15 @@ class ConversationTracker:
             merge_candidates = [
                 pending
                 for pending in active_pending
-                if pending.user_text.strip()
+                if pending.user_texts
                 and (pending.response_started or experimental_thinking_merge)
             ]
-            old_texts = [pending.user_text for pending in merge_candidates]
+            old_texts = [
+                text
+                for pending in merge_candidates
+                for text in pending.user_texts
+                if text.strip()
+            ]
             if old_texts and user_text.strip():
                 merge_hint = self._build_merge_hint(
                     old_texts,
@@ -116,8 +127,12 @@ class ConversationTracker:
                     ),
                 )
 
+        inherited_texts = old_texts if merge_hint else []
         state.pending[seq] = PendingRequest(
-            seq=seq, user_text=user_text, started_at=time.time()
+            seq=seq,
+            user_text=user_text,
+            started_at=time.time(),
+            user_texts=[*inherited_texts, user_text] if user_text else inherited_texts,
         )
         state.last_user_text = user_text
         state.last_active_ts = time.time()
@@ -236,7 +251,17 @@ class ConversationTracker:
                 return str(text)
         except Exception:
             pass
-        return getattr(event, "message_str", "") or ""
+        text = getattr(event, "message_str", "") or ""
+        if text:
+            return str(text)
+        try:
+            from .image_intent import detect_images
+
+            if detect_images(event):
+                return "[图片]"
+        except Exception:
+            pass
+        return ""
 
     def _set_extra(self, event: Any, key: str, value: Any) -> None:
         setter = getattr(event, "set_extra", None)

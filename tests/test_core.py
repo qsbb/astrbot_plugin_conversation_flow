@@ -338,6 +338,33 @@ class ConversationTrackerTests(unittest.TestCase):
         tracker.cancel_request(event)
         self.assertEqual(tracker.get_state("session").pending, {})
 
+    def test_begin_request_is_idempotent_for_same_event(self) -> None:
+        tracker = ConversationTracker()
+        event = _Event("session", "同一条消息")
+        first_seq = tracker.begin_request(event)
+        second_seq = tracker.begin_request(event)
+        self.assertEqual(first_seq, second_seq)
+        state = tracker.get_state("session")
+        self.assertEqual(len(state.pending), 1)
+
+    def test_user_texts_aggregates_across_thinking_merge_chain(self) -> None:
+        tracker = ConversationTracker()
+        first = _Event("session", "第一句")
+        second = _Event("session", "第二句")
+        third = _Event("session", "第三句")
+        tracker.begin_request(first, experimental_thinking_merge=True)
+        tracker.begin_request(second, experimental_thinking_merge=True)
+        tracker.begin_request(third, experimental_thinking_merge=True)
+        hint = tracker.get_merge_hint(third)
+        self.assertEqual(hint["old_texts"], ["第一句", "第二句"])
+        self.assertEqual(hint["new_text"], "第三句")
+
+    def test_user_text_falls_back_to_image_placeholder(self) -> None:
+        tracker = ConversationTracker()
+        event = _ImageEvent([_MockImage(url="http://example.com/a.png")])
+        text = tracker._get_user_text(event)
+        self.assertEqual(text, "[图片]")
+
 
 if __name__ == "__main__":
     unittest.main()

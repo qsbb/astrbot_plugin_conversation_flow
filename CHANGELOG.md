@@ -1,5 +1,24 @@
 # Changelog
 
+## v0.1.9 - 2026-07-21
+
+### Fixed
+
+- 修复防抖/插话不生效：新增 `on_waiting_llm_request` 钩子，在会话锁之前登记请求，使同一会话后续消息能及时把旧请求标记为 `discarded`。原 `on_llm_request` 在 `session_lock_manager.acquire_lock` 之后触发，同会话消息只能串行排队，无法看到后续消息。
+- `begin_request` 改为幂等：同一 event 重复调用返回相同 seq，避免 `on_waiting_llm_request` 与 `on_llm_request` 双重登记导致状态错乱。
+- `PendingRequest` 新增 `user_texts` 字段聚合思考中断合并链路中的所有历史消息，连续多条消息插话时一次性把前序文本作为 `old_texts` 注入合并提示，避免只看到最近一条。
+- 纯图片消息的 `user_text` 兜底返回 `[图片]`，避免 `_get_user_text` 在 `on_waiting_llm_request` 阶段返回空字符串导致状态登记不完整。
+- 图片意图注入从 `on_llm_request` 末尾移到空文本早退之前，确保纯图片消息即使 `user_text` 为空也能注入图片意图指令。
+
+### Diagnosis
+
+- 会话锁外登记后，每次请求开始应看到 `[conv-flow] waiting request registered: seq=N, umo=..., text=...`。
+- 同一 event 重复登记不会产生新 seq，pending 字典保持单条记录。
+
+### Notes
+
+- 当前 `on_waiting_llm_request` 仍位于视觉预处理之后；若 AstrBot 在该阶段前已清空图片字段，仍可能漏判。后续考虑在反馈不足时进一步前移到 `event_message_type(ALL)` 钩子。
+
 ## v0.1.8 - 2026-07-21
 
 ### Fixed
