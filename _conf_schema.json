@@ -115,13 +115,19 @@
   "image_intent_mode": {
     "type": "bool",
     "description": "图片意图判断",
-    "hint": "开启后检测到用户发送图片时，注入指令让主 LLM 判断图片属于无意义表情包/观点表情包/信息图片，并据此决定回复方向。依赖 AstrBot 原生图片识别已开启（识别结果会自动出现在 LLM 上下文中）。不接管图片识别本身。",
+    "hint": "开启后检测到用户发送图片时，按对话作用判断为话题收口型、社交互动型、观点态度型或信息内容型。卖萌/撒娇/求关注会简短互动，只有明确结束话题才沉默。依赖 AstrBot 原生图片识别，不接管图片识别本身。",
     "default": false
   },
   "interrupt_enabled": {
     "type": "bool",
     "description": "启用插话中断处理",
     "default": true
+  },
+  "experimental_thinking_merge_enabled": {
+    "type": "bool",
+    "description": "实验性：打断思考并合并到下一轮",
+    "hint": "实验性功能。开启后，用户在上一轮仍在思考且尚未输出时，会抑制旧结果、读取下一轮请求已有的公开历史并合并未回复消息重新生成。当前无法取消 Provider 端推理，频繁插话会让旧请求和新请求重复思考，可能消耗大量 Token；直至 AstrBot 提供真正的打断思考接口。",
+    "default": false
   },
   "interrupt_merge_strategy": {
     "type": "string",

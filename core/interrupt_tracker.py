@@ -15,6 +15,7 @@ class PendingRequest:
     user_text: str
     started_at: float
     finished: bool = False
+    response_started: bool = False
 
 
 @dataclass
@@ -70,7 +71,12 @@ class ConversationTracker:
             self._states.pop(umo, None)
         return len(stale)
 
-    def begin_request(self, event: Any, detect_interrupt: bool = True) -> int:
+    def begin_request(
+        self,
+        event: Any,
+        detect_interrupt: bool = True,
+        experimental_thinking_merge: bool = False,
+    ) -> int:
         """登记请求并按需标记同一会话中仍在生成的旧请求。"""
         umo = self._get_umo(event)
         state = self.get_state(umo)
@@ -90,13 +96,25 @@ class ConversationTracker:
         if detect_interrupt and active_pending:
             for pending in active_pending:
                 state.discarded.add(pending.seq)
-            old_texts = [
-                pending.user_text
+            merge_candidates = [
+                pending
                 for pending in active_pending
                 if pending.user_text.strip()
+                and (pending.response_started or experimental_thinking_merge)
             ]
+            old_texts = [pending.user_text for pending in merge_candidates]
             if old_texts and user_text.strip():
-                merge_hint = self._build_merge_hint(old_texts, user_text)
+                merge_hint = self._build_merge_hint(
+                    old_texts,
+                    user_text,
+                    previous_state=(
+                        "thinking"
+                        if any(
+                            not pending.response_started for pending in merge_candidates
+                        )
+                        else "response_started"
+                    ),
+                )
 
         state.pending[seq] = PendingRequest(
             seq=seq, user_text=user_text, started_at=time.time()
@@ -107,6 +125,28 @@ class ConversationTracker:
         if merge_hint:
             self._set_extra(event, self.MERGE_HINT_EXTRA_KEY, merge_hint)
         return seq
+
+    def mark_response_started(self, event: Any) -> None:
+        """标记请求已经返回模型内容，后续插话不再属于纯思考阶段。"""
+        seq = self._get_extra(event, self.SEQ_EXTRA_KEY)
+        if seq is None:
+            return
+        state = self._states.get(self._get_umo(event))
+        if state is None:
+            return
+        pending = state.pending.get(seq)
+        if pending:
+            pending.response_started = True
+        state.last_active_ts = time.time()
+
+    def is_thinking(self, event: Any) -> bool:
+        """判断请求是否仍在思考且尚未返回模型内容。"""
+        seq = self._get_extra(event, self.SEQ_EXTRA_KEY)
+        if seq is None:
+            return False
+        state = self._states.get(self._get_umo(event))
+        pending = state.pending.get(seq) if state else None
+        return bool(pending and not pending.finished and not pending.response_started)
 
     def cancel_request(self, event: Any) -> None:
         """请求在生成前被静默或停止时立即移除，避免污染后续插话判断。"""
@@ -161,8 +201,17 @@ class ConversationTracker:
             state.last_bot_text = bot_text
         state.last_active_ts = time.time()
 
-    def _build_merge_hint(self, old_texts: list[str], new_text: str) -> dict[str, Any]:
-        return {"old_texts": old_texts, "new_text": new_text}
+    def _build_merge_hint(
+        self,
+        old_texts: list[str],
+        new_text: str,
+        previous_state: str = "response_started",
+    ) -> dict[str, Any]:
+        return {
+            "old_texts": old_texts,
+            "new_text": new_text,
+            "previous_state": previous_state,
+        }
 
     def _get_umo(self, event: Any) -> str:
         umo = getattr(event, "unified_msg_origin", None)

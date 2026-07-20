@@ -28,6 +28,7 @@ DEFAULTS: dict[str, Any] = {
     "plain_text_mode": True,
     "image_intent_mode": False,
     "interrupt_enabled": True,
+    "experimental_thinking_merge_enabled": False,
     "interrupt_merge_strategy": "append",
     "interrupt_window_ms": 30000,
     "interrupt_state_ttl_ms": 600000,
@@ -167,6 +168,10 @@ def normalize_config(raw: dict[str, Any] | None) -> dict[str, Any]:
     out["interrupt_enabled"] = _coerce_bool(
         raw.get("interrupt_enabled"), DEFAULTS["interrupt_enabled"]
     )
+    out["experimental_thinking_merge_enabled"] = _coerce_bool(
+        raw.get("experimental_thinking_merge_enabled"),
+        DEFAULTS["experimental_thinking_merge_enabled"],
+    )
     merge = _coerce_str(
         raw.get("interrupt_merge_strategy"), DEFAULTS["interrupt_merge_strategy"]
     )
@@ -220,6 +225,7 @@ class PluginConfig:
     plain_text_mode: bool = True
     image_intent_mode: bool = False
     interrupt_enabled: bool = True
+    experimental_thinking_merge_enabled: bool = False
     interrupt_merge_strategy: str = "append"
     interrupt_window_ms: int = 30000
     interrupt_state_ttl_ms: int = 600000

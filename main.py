@@ -29,6 +29,7 @@ from .core.prompts import (
     INTERRUPT_MERGE_DISCARD_HINT,
     INTERRUPT_MERGE_REWRITE_SYSTEM,
     INTERRUPT_MERGE_REWRITE_USER_TEMPLATE,
+    INTERRUPT_THINKING_HISTORY_TEMPLATE,
     PLAIN_TEXT_INSTRUCTION,
 )
 from .core.silence_judge import SilenceJudge
@@ -38,7 +39,7 @@ from .core.silence_judge import SilenceJudge
     "astrbot_plugin_conversation_flow",
     "Justice-ocr",
     "对话流控制：沉默判断、智能分段、插话中断",
-    "0.1.4",
+    "0.1.5",
 )
 class ConversationalFlowPlugin(Star):
     """对话流控制主插件类。"""
@@ -154,7 +155,9 @@ class ConversationalFlowPlugin(Star):
 
         # 1) 注册本次请求到 tracker，同时检测插话
         seq = self.tracker.begin_request(
-            event, detect_interrupt=self.config.interrupt_enabled
+            event,
+            detect_interrupt=self.config.interrupt_enabled,
+            experimental_thinking_merge=self.config.experimental_thinking_merge_enabled,
         )
 
         # 2) 如果检测到插话合并提示，先处理合并（注入到 req）
@@ -215,6 +218,7 @@ class ConversationalFlowPlugin(Star):
     async def on_llm_response(self, event: AstrMessageEvent, response: Any) -> None:
         """LLM 响应后：检查是否被插话取代、检查沉默标记。"""
         seq = event.get_extra(ConversationTracker.SEQ_EXTRA_KEY)
+        self.tracker.mark_response_started(event)
 
         # 1) 检查是否被插话取代
         if self.config.interrupt_enabled and self.tracker.is_discarded(event):
@@ -418,6 +422,8 @@ class ConversationalFlowPlugin(Star):
             f"- 分段延迟: {self._delay_status_text()}\n"
             f"- 纯文本模式: {'on' if self.config.plain_text_mode else 'off'}\n"
             f"- 图片意图: {'on' if self.config.image_intent_mode else 'off'}\n"
+            f"- 思考中断合并(实验性/高Token): "
+            f"{'on' if self.config.experimental_thinking_merge_enabled else 'off'}\n"
             f"- 插话中断: {'on' if self.config.interrupt_enabled else 'off'} "
             f"({self.config.interrupt_merge_strategy})\n"
             f"- 活跃会话: {active_sessions} (本次清理过期 {stale_cleaned})\n"
@@ -544,6 +550,7 @@ class ConversationalFlowPlugin(Star):
 
         old_texts = raw_hint.get("old_texts", [])
         new_text = str(raw_hint.get("new_text", "")).strip()
+        previous_state = str(raw_hint.get("previous_state", "response_started"))
         if not isinstance(old_texts, list) or not old_texts or not new_text:
             return
         old_text = " / ".join(
@@ -551,9 +558,21 @@ class ConversationalFlowPlugin(Star):
         )
         if not old_text:
             return
+        if (
+            previous_state == "thinking"
+            and not self.config.experimental_thinking_merge_enabled
+        ):
+            return
 
         strategy = self.config.interrupt_merge_strategy
-        if strategy == "discard_old":
+        history_contains_old = self._request_context_contains(req, old_texts)
+        if (
+            previous_state == "thinking"
+            and self.config.experimental_thinking_merge_enabled
+            and history_contains_old
+        ):
+            injection = INTERRUPT_THINKING_HISTORY_TEMPLATE.format(new_text=new_text)
+        elif strategy == "discard_old":
             injection = INTERRUPT_MERGE_DISCARD_HINT
         elif strategy == "rewrite":
             # 调用 LLM 重写
@@ -608,6 +627,22 @@ class ConversationalFlowPlugin(Star):
             self.logger.warning(
                 "[conv-flow] merge inject via system_prompt failed: %s", exc
             )
+
+    def _request_context_contains(self, req: Any, old_texts: list[Any]) -> bool:
+        """检查 ProviderRequest 公开上下文是否已包含所有旧用户消息。"""
+        values: list[str] = []
+        for name in ("prompt", "context", "contexts", "history", "messages"):
+            try:
+                value = getattr(req, name, None)
+            except Exception:
+                continue
+            if value:
+                values.append(str(value))
+        if not values:
+            return False
+        combined = "\n".join(values)
+        normalized = [str(text).strip() for text in old_texts if str(text).strip()]
+        return bool(normalized) and all(text in combined for text in normalized)
 
     def _inject_plain_text_instruction(self, req: Any) -> None:
         """注入纯文本回复指令到 req.extra_user_content_parts。"""

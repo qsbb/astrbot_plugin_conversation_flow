@@ -48,6 +48,9 @@ from astrbot_plugin_conversation_flow.core.interrupt_tracker import (  # noqa: E
 from astrbot_plugin_conversation_flow.core.plain_text import (  # noqa: E402
     strip_markdown_format,
 )
+from astrbot_plugin_conversation_flow.core.prompts import (  # noqa: E402
+    IMAGE_INTENT_INSTRUCTION,
+)
 from astrbot_plugin_conversation_flow.core.image_intent import (  # noqa: E402
     detect_images,
     has_image,
@@ -103,6 +106,16 @@ class ChunkerTests(unittest.TestCase):
         candidates = chunker.split_candidates(text)
         self.assertGreater(len(candidates), 2)
         self.assertLessEqual(len(chunker.split(text)), 2)
+
+
+class ConfigTests(unittest.TestCase):
+    def test_experimental_thinking_merge_defaults_off(self) -> None:
+        cfg = build_plugin_config({})
+        self.assertFalse(cfg.experimental_thinking_merge_enabled)
+
+    def test_experimental_thinking_merge_can_be_enabled(self) -> None:
+        cfg = build_plugin_config({"experimental_thinking_merge_enabled": True})
+        self.assertTrue(cfg.experimental_thinking_merge_enabled)
 
 
 class DelayTests(unittest.TestCase):
@@ -173,6 +186,14 @@ class _ImageEvent:
 
 
 class ImageIntentTests(unittest.TestCase):
+    def test_prompt_treats_cute_memes_as_social_interaction(self) -> None:
+        self.assertIn("卖萌/撒娇/求关注/希望互动", IMAGE_INTENT_INSTRUCTION)
+        self.assertIn("绝不能判为话题收口型", IMAGE_INTENT_INSTRUCTION)
+        self.assertIn("回复最多保留 1～2 句", IMAGE_INTENT_INSTRUCTION)
+        self.assertIn(
+            "不要提及“图片意图判断”、图片识别、视觉模型", IMAGE_INTENT_INSTRUCTION
+        )
+
     def test_detects_image_with_url(self) -> None:
         chain = [_MockImage(url="http://example.com/a.png")]
         event = _ImageEvent(chain)
@@ -208,11 +229,41 @@ class ConversationTrackerTests(unittest.TestCase):
         tracker = ConversationTracker()
         first = _Event("session", "旧消息包含|new=保留字")
         second = _Event("session", "新消息包含|old=保留字")
-        tracker.begin_request(first)
-        tracker.begin_request(second)
+        tracker.begin_request(first, experimental_thinking_merge=True)
+        tracker.begin_request(second, experimental_thinking_merge=True)
         hint = tracker.get_merge_hint(second)
         self.assertEqual(hint["old_texts"], ["旧消息包含|new=保留字"])
         self.assertEqual(hint["new_text"], "新消息包含|old=保留字")
+
+    def test_thinking_merge_is_disabled_by_default(self) -> None:
+        tracker = ConversationTracker()
+        first = _Event("session", "第一句")
+        second = _Event("session", "第二句")
+        tracker.begin_request(first)
+        tracker.begin_request(second)
+        self.assertTrue(tracker.is_discarded(first))
+        self.assertFalse(tracker.has_merge_hint(second))
+
+    def test_thinking_merge_marks_previous_state(self) -> None:
+        tracker = ConversationTracker()
+        first = _Event("session", "第一句")
+        second = _Event("session", "第二句")
+        tracker.begin_request(first, experimental_thinking_merge=True)
+        tracker.begin_request(second, experimental_thinking_merge=True)
+        hint = tracker.get_merge_hint(second)
+        self.assertEqual(hint["previous_state"], "thinking")
+        self.assertEqual(hint["old_texts"], ["第一句"])
+
+    def test_response_started_merges_without_experimental_flag(self) -> None:
+        tracker = ConversationTracker()
+        first = _Event("session", "第一句")
+        second = _Event("session", "第二句")
+        tracker.begin_request(first)
+        tracker.mark_response_started(first)
+        tracker.begin_request(second)
+        hint = tracker.get_merge_hint(second)
+        self.assertEqual(hint["previous_state"], "response_started")
+        self.assertEqual(hint["old_texts"], ["第一句"])
 
     def test_finished_discarded_request_does_not_pollute_next_request(self) -> None:
         tracker = ConversationTracker()
