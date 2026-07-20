@@ -1,0 +1,123 @@
+{
+  "silence_enabled": {
+    "type": "bool",
+    "description": "启用沉默/拒绝回应判断",
+    "hint": "开启后会在 LLM 请求前注入判断指令，由模型自主决定是否沉默。",
+    "default": true
+  },
+  "silence_strategy": {
+    "type": "string",
+    "description": "沉默判断策略",
+    "options": ["inject", "prejudge", "both"],
+    "hint": "inject=指令注入（省一次 LLM 调用，推荐）；prejudge=独立预判断（更可控但慢）；both=二者结合。",
+    "default": "inject"
+  },
+  "silence_marker": {
+    "type": "string",
+    "description": "沉默标记",
+    "hint": "LLM 在判断应沉默时输出此标记，插件检测到后清空回复。默认 <SILENCE/>。",
+    "default": "<SILENCE/>"
+  },
+  "silence_notify_text": {
+    "type": "string",
+    "description": "沉默时发送的提示文本",
+    "hint": "留空则完全静默；填写则会发送此文本作为暗示（如'…'）。仅在 silence_strategy=inject 时生效。",
+    "default": ""
+  },
+  "silence_prejudge_provider_id": {
+    "type": "string",
+    "_special": "select_provider",
+    "description": "预判断专用 LLM Provider（留空用当前对话模型）",
+    "hint": "仅在 silence_strategy=prejudge 或 both 时使用。建议选一个快且便宜的模型。",
+    "default": ""
+  },
+  "silence_prejudge_max_chars": {
+    "type": "int",
+    "description": "预判断输入文本最大字符数",
+    "hint": "超过此长度的用户消息不参与预判断（认为长文本通常需要正常回复）。",
+    "default": 200
+  },
+  "chunking_enabled": {
+    "type": "bool",
+    "description": "启用智能分段回复",
+    "default": true
+  },
+  "chunking_min_length": {
+    "type": "int",
+    "description": "触发分段的最小回复长度（字符数）",
+    "hint": "短于此长度的回复保持单条发送。",
+    "default": 60
+  },
+  "chunking_max_segments": {
+    "type": "int",
+    "description": "单次回复最大分段数",
+    "hint": "超过此数量时会合并末尾的多段为一段，避免刷屏。",
+    "default": 5
+  },
+  "chunking_segment_interval_ms": {
+    "type": "int",
+    "description": "分段发送间隔（毫秒）",
+    "hint": "模拟真人打字停顿。设为 0 则无间隔立即发送。",
+    "default": 800
+  },
+  "chunking_protect_code_block": {
+    "type": "bool",
+    "description": "保护代码块不被切分",
+    "default": true
+  },
+  "chunking_preserve_paragraphs": {
+    "type": "bool",
+    "description": "优先保持已有段落",
+    "hint": "短于长段落阈值的自然段视为完整段落，不再按句子拆开。",
+    "default": true
+  },
+  "chunking_long_paragraph_threshold": {
+    "type": "int",
+    "description": "需要进一步拆分的段落长度",
+    "hint": "仅超过此长度的自然段才按句末标点继续拆分。",
+    "default": 240
+  },
+  "chunking_llm_assist": {
+    "type": "bool",
+    "description": "对长文本启用 LLM 辅助切分",
+    "hint": "仅当启发式切分得到超过 max_segments 段时启用，调用一次轻量 LLM 重新规划。会额外消耗 token。",
+    "default": false
+  },
+  "interrupt_enabled": {
+    "type": "bool",
+    "description": "启用插话中断处理",
+    "default": true
+  },
+  "interrupt_merge_strategy": {
+    "type": "string",
+    "description": "插话合并策略",
+    "options": ["append", "rewrite", "discard_old"],
+    "hint": "append=把旧消息作为追加上下文注入；rewrite=让 LLM 重写为新语境；discard_old=直接丢弃旧响应不合并。",
+    "default": "append"
+  },
+  "interrupt_window_ms": {
+    "type": "int",
+    "description": "插话检测时间窗口（毫秒）",
+    "hint": "仅当上一条消息的 LLM 还在思考中（未触发 on_llm_response）时才算插话。本字段预留扩展，目前未启用超时控制。",
+    "default": 30000
+  },
+  "interrupt_state_ttl_ms": {
+    "type": "int",
+    "description": "会话状态保留时长（毫秒）",
+    "hint": "超过此时长未活动的会话状态会被清理，避免内存泄漏。",
+    "default": 600000
+  },
+  "llm_provider_id": {
+    "type": "string",
+    "_special": "select_provider",
+    "description": "插件专用 LLM Provider（留空用当前对话模型）",
+    "hint": "用于预判断、LLM 辅助切分等插件内部 LLM 调用。留空则按 4 层 fallback 解析。",
+    "default": ""
+  },
+  "log_level": {
+    "type": "string",
+    "description": "插件日志级别",
+    "options": ["DEBUG", "INFO", "WARNING", "ERROR"],
+    "default": "INFO"
+  }
+}
