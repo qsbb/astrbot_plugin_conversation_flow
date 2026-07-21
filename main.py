@@ -20,6 +20,7 @@ from astrbot.api.star import Context, Star, StarTools, register
 from .core.chunker import Chunker
 from .core.config import PluginConfig, build_plugin_config, normalize_config
 from .core.delay import calculate_segment_delay_ms
+from .core.intercept import InterceptJudge
 from .core.interrupt_tracker import ConversationTracker
 from .core.llm_service import LLMService
 from .core.plain_text import strip_markdown_format
@@ -39,7 +40,7 @@ from .core.silence_judge import SilenceJudge
     "astrbot_plugin_conversation_flow",
     "Justice-ocr",
     "对话流控制：沉默判断、智能分段、插话中断",
-    "0.1.10",
+    "0.1.11",
 )
 class ConversationalFlowPlugin(Star):
     """对话流控制主插件类。"""
@@ -70,24 +71,28 @@ class ConversationalFlowPlugin(Star):
         self.silence_judge = SilenceJudge(cfg=self.config, llm=self.llm)
         self.chunker = Chunker(cfg=self.config, llm=self.llm)
         self.tracker = ConversationTracker(ttl_ms=self.config.interrupt_state_ttl_ms)
+        self.intercept_judge = InterceptJudge(cfg=self.config, llm=self.llm)
 
         # 运行时统计
         self._stats = {
             "silenced": 0,
             "chunked": 0,
             "interrupted": 0,
+            "intercepted": 0,
             "total_requests": 0,
         }
 
         self.logger.info(
-            "[conv-flow] plugin loaded: version=0.1.10, silence=%s/%s, "
-            "chunking=%s, image_intent=%s, interrupt=%s/%s",
+            "[conv-flow] plugin loaded: version=0.1.11, silence=%s/%s, "
+            "chunking=%s, image_intent=%s, interrupt=%s/%s, intercept=%s/%s",
             self.config.silence_enabled,
             self.config.silence_strategy,
             self.config.chunking_enabled,
             self.config.image_intent_mode,
             self.config.interrupt_enabled,
             self.config.interrupt_merge_strategy,
+            self.config.intercept_enabled,
+            self.config.intercept_action,
         )
 
     # ------------------------------------------------------------------
@@ -140,6 +145,7 @@ class ConversationalFlowPlugin(Star):
         self.silence_judge.cfg = self.config
         self.chunker.cfg = self.config
         self.chunker.sync_config()
+        self.intercept_judge.cfg = self.config
         self.tracker._ttl_seconds = max(
             10.0, self.config.interrupt_state_ttl_ms / 1000.0
         )
@@ -198,6 +204,41 @@ class ConversationalFlowPlugin(Star):
 
         if not user_text:
             return
+
+        # 智能拦截：不良输入优先于沉默判断处理
+        if self.intercept_judge.should_check(umo):
+            try:
+                intercept, reason = await self.intercept_judge.prejudge(user_text, umo)
+                if intercept:
+                    self._stats["intercepted"] += 1
+                    self.logger.info(
+                        "[conv-flow] seq=%s intercepted, reason=%s, user_text=%r",
+                        seq,
+                        reason,
+                        user_text[:80],
+                    )
+                    if self.config.intercept_action == "silence":
+                        await self._silence_event(event)
+                        self.tracker.cancel_request(event)
+                        return
+                    # polite_reject：注入礼貌拒绝指令，让主 LLM 自主决定拒绝或输出 marker
+                    ok = self.intercept_judge.inject_reject_instruction(req)
+                    if not ok:
+                        self.logger.warning(
+                            "[conv-flow] seq=%s intercept inject failed, "
+                            "fallback to silence",
+                            seq,
+                        )
+                        await self._silence_event(event)
+                        self.tracker.cancel_request(event)
+                        return
+                    # 注入拒绝指令后不再做沉默判断（已注入相关指令）
+                    # 但仍注入纯文本指令保持回复风格
+                    if self.config.plain_text_mode:
+                        self._inject_plain_text_instruction(req)
+                    return
+            except Exception as exc:
+                self.logger.warning("[conv-flow] intercept prejudge failed: %s", exc)
 
         # prejudge 模式：先独立判断
         if self.silence_judge.should_prejudge():

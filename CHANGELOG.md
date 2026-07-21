@@ -1,5 +1,32 @@
 # Changelog
 
+## v0.1.11 - 2026-07-21
+
+### Added
+
+- 新增**智能拦截**功能（实验性，默认关闭）：通过 LLM 预判断识别用户输入中的色情、暴力、辱骂、违法、越狱等不良内容，命中后按配置方式处理：
+  - `polite_reject`（默认）：注入礼貌拒绝指令让主 LLM 委婉拒绝或输出 `silence_marker` 静默，由 LLM 自主决定回复方式
+  - `silence`：直接静默不注入指令
+- 新增**会话白名单**配置 `intercept_whitelist`：白名单中的会话完全跳过拦截检测，信任的私聊或指定群可加入白名单；支持列表或换行/逗号分隔的字符串
+- 新增配置项 `intercept_enabled`、`intercept_action`、`intercept_whitelist`、`intercept_provider_id`、`intercept_max_chars`
+
+### Design
+
+- 拦截优先于沉默判断执行：不良内容判定优先于无意义内容判定
+- `polite_reject` 模式下，LLM 若输出 `silence_marker` 会被 `silence_judge` 的 marker 检测机制在 `on_llm_response` / `on_decorating_result` 阶段捕获并静默；若希望此机制生效，需保持 `silence_enabled=true` 且 `silence_strategy` 包含 `inject`
+- 拦截预判断复用 `LLMService` 的 4 层 provider fallback，可单独配置 `intercept_provider_id`
+- 长文本（超过 `intercept_max_chars`）跳过预判断，认为长文本通常需要正常回复
+
+### Diagnosis
+
+- 拦截命中：`[conv-flow] seq=N intercepted, reason=..., user_text=...`
+- 插件加载日志新增 `intercept=true/false` 状态字段
+
+### Notes
+
+- 当前版本为实验性，预判断准确度依赖所选 LLM，建议配合便宜模型使用
+- 仅对用户输入做拦截，不对 LLM 输出做内容审核
+
 ## v0.1.10 - 2026-07-21
 
 ### Fixed
