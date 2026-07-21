@@ -14,7 +14,7 @@ import pathlib
 from typing import Any
 
 from astrbot.api import logger
-from astrbot.api.event import AstrMessageEvent, EventMessageType, filter
+from astrbot.api.event import AstrMessageEvent, filter
 from astrbot.api.star import Context, Star, StarTools, register
 
 from .core.chunker import Chunker
@@ -42,7 +42,7 @@ from .core.silence_judge import SilenceJudge
     "astrbot_plugin_conversation_flow",
     "Justice-ocr",
     "对话流控制：沉默判断、智能分段、插话中断",
-    "0.2.0",
+    "0.2.1",
 )
 class ConversationalFlowPlugin(Star):
     """对话流控制主插件类。"""
@@ -473,7 +473,7 @@ class ConversationalFlowPlugin(Star):
     # 群聊消息监听：缓存最近群聊消息供被唤醒时注入
     # ------------------------------------------------------------------
 
-    @filter.event_message_type(EventMessageType.GROUP_MESSAGE, priority=1000)
+    @filter.event_message_type(filter.EventMessageType.GROUP_MESSAGE, priority=1000)
     async def on_group_message(self, event: AstrMessageEvent) -> None:
         """记录群聊消息到上下文缓冲，供被唤醒时注入。"""
         if not self.config.group_context_enabled:

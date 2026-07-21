@@ -8,7 +8,7 @@ desc: >
   3) 插话中断处理：维护会话级 in-flight 状态，支持时间窗过滤和群聊中断作用域（room/sender/mention_or_sender）；实验性开关可在 bot 思考期间抑制旧结果并合并新旧公开上下文重新生成。当前不能取消 Provider 端推理，可能产生大量重复 Token 消耗。
   4) 群聊上下文注入：bot 在群聊中被@或回复时，自动获取最近若干条群聊消息作为背景上下文注入 LLM 请求，帮助 bot 理解群聊氛围。
   5) 结果所有权修复：不分段时直接 in-place 修改结果链，不调用 stop_event，避免与 TTS 等结果装饰插件冲突；分段发送失败时自动回退原始文本。
-version: v0.2.0
+version: v0.2.1
 author: Justice-ocr
 author_desc: >
   AstrBot 插件开发者，关注对话自然度、消息节奏与人机交互真实感。
