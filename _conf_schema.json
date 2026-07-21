@@ -139,7 +139,7 @@
   "interrupt_window_ms": {
     "type": "int",
     "description": "插话检测时间窗口（毫秒）",
-    "hint": "仅当上一条消息的 LLM 还在思考中（未触发 on_llm_response）时才算插话。本字段预留扩展，目前未启用超时控制。",
+    "hint": "仅当上一条消息在此时间窗口内且尚未完成回复时，新消息才算插话并中断旧回复。超过此时间的旧请求视为已完成，不会被打断。",
     "default": 30000
   },
   "interrupt_state_ttl_ms": {
@@ -147,6 +147,31 @@
     "description": "会话状态保留时长（毫秒）",
     "hint": "超过此时长未活动的会话状态会被清理，避免内存泄漏。",
     "default": 600000
+  },
+  "interrupt_scope": {
+    "type": "string",
+    "description": "群聊中断作用域",
+    "options": ["room", "sender", "mention_or_sender"],
+    "hint": "room=房间内任何新消息可中断旧回复；sender=仅同一发送者的新消息可中断（推荐）；mention_or_sender=同一发送者或明确@/回复bot时中断。",
+    "default": "sender"
+  },
+  "group_context_enabled": {
+    "type": "bool",
+    "description": "群聊被唤醒时注入最近群聊上下文",
+    "hint": "开启后，bot在群聊中被@或被回复时，会获取最近若干条群聊消息作为上下文注入到LLM请求，帮助bot理解群聊氛围。",
+    "default": true
+  },
+  "group_context_max_messages": {
+    "type": "int",
+    "description": "群聊上下文最大消息条数",
+    "hint": "被唤醒时获取的最近群聊消息条数上限。推荐10-20条。",
+    "default": 10
+  },
+  "group_context_only_when_woken": {
+    "type": "bool",
+    "description": "仅在被唤醒时注入群聊上下文",
+    "hint": "开启后只在bot被@或被回复时才注入群聊上下文；关闭则每次群聊消息都注入（消耗更多Token）。",
+    "default": true
   },
   "intercept_enabled": {
     "type": "bool",

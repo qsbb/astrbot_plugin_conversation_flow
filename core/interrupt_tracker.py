@@ -48,10 +48,18 @@ class ConversationTracker:
 
     SEQ_EXTRA_KEY = "conv_flow_seq"
     MERGE_HINT_EXTRA_KEY = "conv_flow_merge_hint"
+    UMO_EXTRA_KEY = "conv_flow_umo"
 
     def __init__(self, ttl_ms: int = 600000) -> None:
         self._states: dict[str, ConversationState] = {}
         self._ttl_seconds = max(10.0, ttl_ms / 1000.0)
+        self._interrupt_window_ms: int = 30000
+        self._scope: str = "sender"
+
+    def update_interrupt_config(self, window_ms: int, scope: str) -> None:
+        """更新插话检测时间窗和群聊中断作用域（运行时配置变更后调用）。"""
+        self._interrupt_window_ms = max(0, window_ms)
+        self._scope = scope
 
     def get_state(self, umo: str) -> ConversationState:
         state = self._states.get(umo)
@@ -77,13 +85,15 @@ class ConversationTracker:
         event: Any,
         detect_interrupt: bool = True,
         experimental_thinking_merge: bool = False,
+        is_wake: bool = False,
     ) -> int:
         """登记请求并按需标记同一会话中仍在生成的旧请求。"""
         existing_seq = self._get_extra(event, self.SEQ_EXTRA_KEY)
         if isinstance(existing_seq, int):
             return existing_seq
 
-        umo = self._get_umo(event)
+        umo = self._compute_scoped_umo(event, is_wake=is_wake)
+        self._set_extra(event, self.UMO_EXTRA_KEY, umo)
         state = self.get_state(umo)
 
         if len(self._states) > 50:
@@ -94,11 +104,33 @@ class ConversationTracker:
         user_text = self._get_user_text(event) or ""
         merge_hint: dict[str, Any] | None = None
         old_texts: list[str] = []
+        now = time.time()
+        window_s = self._interrupt_window_ms / 1000.0
         active_pending = [
             p
             for p in state.pending.values()
-            if not p.finished and p.seq not in state.discarded
+            if not p.finished
+            and p.seq not in state.discarded
+            and (window_s <= 0 or (now - p.started_at) <= window_s)
         ]
+
+        # mention_or_sender + 被唤醒：额外中断同群其他 sender 的 pending
+        if (
+            detect_interrupt
+            and self._scope == "mention_or_sender"
+            and is_wake
+            and "GroupMessage" in umo
+        ):
+            for other_umo, other_state in self._states.items():
+                if other_umo == umo or not other_umo.startswith(umo + ":"):
+                    continue
+                for p in other_state.pending.values():
+                    if (
+                        not p.finished
+                        and p.seq not in other_state.discarded
+                        and (window_s <= 0 or (now - p.started_at) <= window_s)
+                    ):
+                        other_state.discarded.add(p.seq)
         if detect_interrupt and active_pending:
             for pending in active_pending:
                 state.discarded.add(pending.seq)
@@ -229,20 +261,67 @@ class ConversationTracker:
         }
 
     def _get_umo(self, event: Any) -> str:
-        umo = getattr(event, "unified_msg_origin", None)
-        if umo:
-            return str(umo)
-        # 兜底：用 group_id + sender_id
-        group_id = ""
-        sender_id = ""
+        """读取已缓存的 UMO（由 begin_request 计算）。未缓存时用兜底逻辑。"""
+        cached = self._get_extra(event, self.UMO_EXTRA_KEY)
+        if cached and isinstance(cached, str):
+            return cached
+        return self._compute_scoped_umo(event, is_wake=False)
+
+    def _compute_scoped_umo(self, event: Any, is_wake: bool = False) -> str:
+        """根据 interrupt_scope 计算会话标识。
+
+        - room：直接用 unified_msg_origin（群号级别）
+        - sender：群聊中追加 sender_id，使不同用户互不影响
+        - mention_or_sender：同 sender；被唤醒时用 room 级
+        """
+        base_umo = getattr(event, "unified_msg_origin", None)
+        if not base_umo:
+            # 兜底：用 group_id + sender_id
+            group_id = ""
+            sender_id = ""
+            try:
+                message_obj = getattr(event, "message_obj", None)
+                if message_obj is not None:
+                    group_id = str(getattr(message_obj, "group_id", "") or "")
+                    sender_id = str(getattr(message_obj, "sender_id", "") or "")
+            except Exception:
+                pass
+            return f"{group_id}:{sender_id}"
+
+        umo = str(base_umo)
+        is_group = "GroupMessage" in umo or "GROUP" in umo.upper()
+
+        # 非群聊或 room 作用域：直接用基础 UMO
+        if not is_group or self._scope == "room":
+            return umo
+
+        # mention_or_sender + 被唤醒：用 room 级 UMO
+        if self._scope == "mention_or_sender" and is_wake:
+            return umo
+
+        # sender 或 mention_or_sender（未唤醒）：追加 sender_id
+        sender_id = self._get_sender_id(event)
+        if sender_id:
+            return f"{umo}:{sender_id}"
+        return umo
+
+    def _get_sender_id(self, event: Any) -> str:
+        """从事件对象安全提取发送者 ID。"""
         try:
             message_obj = getattr(event, "message_obj", None)
             if message_obj is not None:
-                group_id = str(getattr(message_obj, "group_id", "") or "")
-                sender_id = str(getattr(message_obj, "sender_id", "") or "")
+                sid = getattr(message_obj, "sender_id", None)
+                if sid:
+                    return str(sid)
         except Exception:
             pass
-        return f"{group_id}:{sender_id}"
+        try:
+            sid = getattr(event, "get_sender_id", None)
+            if callable(sid):
+                return str(sid() or "")
+        except Exception:
+            pass
+        return ""
 
     def _get_user_text(self, event: Any) -> str:
         try:

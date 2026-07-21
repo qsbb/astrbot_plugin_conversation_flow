@@ -14,17 +14,19 @@ import pathlib
 from typing import Any
 
 from astrbot.api import logger
-from astrbot.api.event import AstrMessageEvent, filter
+from astrbot.api.event import AstrMessageEvent, EventMessageType, filter
 from astrbot.api.star import Context, Star, StarTools, register
 
 from .core.chunker import Chunker
 from .core.config import PluginConfig, build_plugin_config, normalize_config
 from .core.delay import calculate_segment_delay_ms
+from .core.group_context import GroupContextManager
 from .core.intercept import InterceptJudge
 from .core.interrupt_tracker import ConversationTracker
 from .core.llm_service import LLMService
 from .core.plain_text import strip_markdown_format
 from .core.prompts import (
+    GROUP_CONTEXT_INSTRUCTION_TEMPLATE,
     IMAGE_INTENT_INSTRUCTION,
     INTERRUPT_MERGE_APPEND_TEMPLATE,
     INTERRUPT_MERGE_DISCARD_HINT,
@@ -40,7 +42,7 @@ from .core.silence_judge import SilenceJudge
     "astrbot_plugin_conversation_flow",
     "Justice-ocr",
     "对话流控制：沉默判断、智能分段、插话中断",
-    "0.1.13",
+    "0.2.0",
 )
 class ConversationalFlowPlugin(Star):
     """对话流控制主插件类。"""
@@ -57,13 +59,21 @@ class ConversationalFlowPlugin(Star):
 
         # 配置：兼容 dict / AstrBot config 对象 / 旧版无 config 注入
         self._raw_config = self._coerce_config(config)
-        self.config: PluginConfig = build_plugin_config(self._raw_config)
-        self._apply_log_level()
 
         # 数据目录（持久化配置与状态快照）
         self.data_dir = StarTools.get_data_dir("astrbot_plugin_conversation_flow")
         pathlib.Path(self.data_dir).mkdir(parents=True, exist_ok=True)
         self._config_file = pathlib.Path(self.data_dir) / "config.json"
+
+        # 加载本地持久化配置，合并到当前配置（Schema 配置优先级低于持久化值）
+        persisted = self._load_persisted_config()
+        if persisted:
+            self._raw_config = normalize_config(
+                {**normalize_config(self._raw_config), **persisted}
+            )
+
+        self.config: PluginConfig = build_plugin_config(self._raw_config)
+        self._apply_log_level()
 
         # 子模块
         self.llm = LLMService(
@@ -73,7 +83,13 @@ class ConversationalFlowPlugin(Star):
         self.silence_judge = SilenceJudge(cfg=self.config, llm=self.llm)
         self.chunker = Chunker(cfg=self.config, llm=self.llm)
         self.tracker = ConversationTracker(ttl_ms=self.config.interrupt_state_ttl_ms)
+        self.tracker.update_interrupt_config(
+            self.config.interrupt_window_ms, self.config.interrupt_scope
+        )
         self.intercept_judge = InterceptJudge(cfg=self.config, llm=self.llm)
+        self.group_context = GroupContextManager(
+            max_messages=self.config.group_context_max_messages
+        )
 
         # 运行时统计
         self._stats = {
@@ -85,14 +101,18 @@ class ConversationalFlowPlugin(Star):
         }
 
         self.logger.info(
-            "[conv-flow] plugin loaded: version=0.1.13, silence=%s/%s, "
-            "chunking=%s, image_intent=%s, interrupt=%s/%s, intercept=%s",
+            "[conv-flow] plugin loaded: version=0.2.0, silence=%s/%s, "
+            "chunking=%s, image_intent=%s, interrupt=%s/%s(scope=%s,window=%sms), "
+            "group_context=%s, intercept=%s",
             self.config.silence_enabled,
             self.config.silence_strategy,
             self.config.chunking_enabled,
             self.config.image_intent_mode,
             self.config.interrupt_enabled,
             self.config.interrupt_merge_strategy,
+            self.config.interrupt_scope,
+            self.config.interrupt_window_ms,
+            self.config.group_context_enabled,
             self.config.intercept_enabled,
         )
 
@@ -150,6 +170,10 @@ class ConversationalFlowPlugin(Star):
         self.tracker._ttl_seconds = max(
             10.0, self.config.interrupt_state_ttl_ms / 1000.0
         )
+        self.tracker.update_interrupt_config(
+            self.config.interrupt_window_ms, self.config.interrupt_scope
+        )
+        self.group_context.update_max(self.config.group_context_max_messages)
 
     # ------------------------------------------------------------------
     # 主钩子：等待会话锁 / on_llm_request
@@ -158,10 +182,12 @@ class ConversationalFlowPlugin(Star):
     @filter.on_waiting_llm_request()
     async def on_waiting_llm_request(self, event: AstrMessageEvent) -> None:
         """会话锁外登记请求，使后续消息能及时使旧请求失效。"""
+        is_wake = self._is_wake(event)
         seq = self.tracker.begin_request(
             event,
             detect_interrupt=self.config.interrupt_enabled,
             experimental_thinking_merge=self.config.experimental_thinking_merge_enabled,
+            is_wake=is_wake,
         )
         self.logger.info(
             "[conv-flow] waiting request registered: seq=%s, umo=%s, text=%r",
@@ -178,10 +204,12 @@ class ConversationalFlowPlugin(Star):
         user_text = (event.get_message_str() or "").strip()
 
         # 1) 注册本次请求到 tracker，同时检测插话
+        is_wake = self._is_wake(event)
         seq = self.tracker.begin_request(
             event,
             detect_interrupt=self.config.interrupt_enabled,
             experimental_thinking_merge=self.config.experimental_thinking_merge_enabled,
+            is_wake=is_wake,
         )
 
         # 2) 如果检测到插话合并提示，先处理合并（注入到 req）
@@ -202,6 +230,9 @@ class ConversationalFlowPlugin(Star):
 
         # 图片意图必须在空文本判断前执行，纯图片消息的 user_text 通常为空
         self._inject_image_intent_instruction(event, req, seq)
+
+        # 群聊上下文注入：被唤醒时获取最近群聊消息作为背景
+        self._inject_group_context(event, req, seq, is_wake)
 
         if not user_text:
             return
@@ -347,43 +378,25 @@ class ConversationalFlowPlugin(Star):
             if not text or not text.strip():
                 return
 
-        # 5) 智能分段
-        if not self.config.chunking_enabled:
-            if text_modified:
-                # 文本被剥离过，需要主动发送替换后的纯文本
-                self._clear_result(event)
-                self._set_extra(event, self.SENT_CHUNKS_KEY, True)
-                try:
-                    event.stop_event()
-                except Exception:
-                    pass
-                try:
-                    await event.send(event.plain_result(text))
-                except Exception as exc:
-                    self.logger.warning(
-                        "[conv-flow] failed to send stripped text: %s", exc
-                    )
+        # 5) 检查是否有非文本组件（图片、音频等），有则跳过分段和文本替换
+        has_non_text = self._has_non_text_components(event)
+
+        # 6) 不分段或仅有非文本组件：in-place 修改结果，不抢占发送权
+        if not self.config.chunking_enabled or has_non_text:
+            if text_modified and not has_non_text:
+                self._update_result_plain_text(event, text)
             self.tracker.finish_response(event, bot_text=text)
             return
 
         candidates = self.chunker.split_candidates(text)
         if len(candidates) <= 1:
+            # 只有一段：in-place 修改结果，不抢占发送权
             if text_modified:
-                self._clear_result(event)
-                self._set_extra(event, self.SENT_CHUNKS_KEY, True)
-                try:
-                    event.stop_event()
-                except Exception:
-                    pass
-                try:
-                    await event.send(event.plain_result(text))
-                except Exception as exc:
-                    self.logger.warning(
-                        "[conv-flow] failed to send stripped text: %s", exc
-                    )
+                self._update_result_plain_text(event, text)
             self.tracker.finish_response(event, bot_text=text)
             return
 
+        # 多段：需要主动发送
         if (
             self.config.chunking_llm_assist
             and len(candidates) > self.config.chunking_max_segments
@@ -397,9 +410,11 @@ class ConversationalFlowPlugin(Star):
         else:
             segments = self.chunker.split(text)
 
-        # 5) 清空原结果，主动发送多段
+        # 保存原始文本用于发送失败回退
+        original_text = text
+
+        # 清空原结果，主动发送多段
         self._clear_result(event)
-        # 标记已发送，防止框架默认发送空结果或被其他钩子再次处理
         self._set_extra(event, self.SENT_CHUNKS_KEY, True)
         try:
             event.stop_event()
@@ -433,11 +448,44 @@ class ConversationalFlowPlugin(Star):
                     "[conv-flow] failed to send segment %s: %s", idx, exc
                 )
 
+        # 发送失败回退：如果所有段都发送失败，尝试发送原始文本
+        if not sent_text_parts:
+            self.logger.warning(
+                "[conv-flow] seq=%s all segments failed, sending original text", seq
+            )
+            try:
+                await event.send(event.plain_result(original_text))
+                sent_text_parts.append(original_text)
+            except Exception as exc:
+                self.logger.warning(
+                    "[conv-flow] seq=%s fallback send also failed: %s", seq, exc
+                )
+
         self._stats["chunked"] += 1
         self.logger.info(
             "[conv-flow] seq=%s chunked into %s segments", seq, len(sent_text_parts)
         )
-        self.tracker.finish_response(event, bot_text="\n".join(sent_text_parts))
+        self.tracker.finish_response(
+            event, bot_text="\n".join(sent_text_parts) or original_text
+        )
+
+    # ------------------------------------------------------------------
+    # 群聊消息监听：缓存最近群聊消息供被唤醒时注入
+    # ------------------------------------------------------------------
+
+    @filter.event_message_type(EventMessageType.GROUP_MESSAGE, priority=1000)
+    async def on_group_message(self, event: AstrMessageEvent) -> None:
+        """记录群聊消息到上下文缓冲，供被唤醒时注入。"""
+        if not self.config.group_context_enabled:
+            return
+        group_id = self._get_group_id(event)
+        if not group_id:
+            return
+        sender_id = self.tracker._get_sender_id(event)
+        sender_name = self._get_sender_name(event)
+        text = (event.get_message_str() or "").strip()
+        if text:
+            self.group_context.record(group_id, sender_id, sender_name, text)
 
     # ------------------------------------------------------------------
     # 指令：/convflow
@@ -453,6 +501,9 @@ class ConversationalFlowPlugin(Star):
         """查看插件运行状态。"""
         active_sessions = sum(1 for s in self.tracker._states.values() if s.pending)
         stale_cleaned = self.tracker.cleanup_stale()
+        group_stale = self.group_context.cleanup_stale(
+            self.config.interrupt_state_ttl_ms / 1000.0
+        )
         text = (
             "对话流控制 - 运行状态\n"
             f"- 沉默判断: {'on' if self.config.silence_enabled else 'off'} ({self.config.silence_strategy})\n"
@@ -464,13 +515,19 @@ class ConversationalFlowPlugin(Star):
             f"- 思考中断合并(实验性/高Token): "
             f"{'on' if self.config.experimental_thinking_merge_enabled else 'off'}\n"
             f"- 插话中断: {'on' if self.config.interrupt_enabled else 'off'} "
-            f"({self.config.interrupt_merge_strategy})\n"
-            f"- 活跃会话: {active_sessions} (本次清理过期 {stale_cleaned})\n"
+            f"({self.config.interrupt_merge_strategy}, scope={self.config.interrupt_scope}, "
+            f"window={self.config.interrupt_window_ms}ms)\n"
+            f"- 群聊上下文: {'on' if self.config.group_context_enabled else 'off'} "
+            f"(max={self.config.group_context_max_messages}, "
+            f"woken_only={self.config.group_context_only_when_woken})\n"
+            f"- 智能拦截: {'on' if self.config.intercept_enabled else 'off'}\n"
+            f"- 活跃会话: {active_sessions} (清理过期 {stale_cleaned}, 群缓冲 {group_stale})\n"
             "统计:\n"
             f"- 总请求: {self._stats['total_requests']}\n"
             f"- 沉默次数: {self._stats['silenced']}\n"
             f"- 分段次数: {self._stats['chunked']}\n"
-            f"- 插话合并: {self._stats['interrupted']}"
+            f"- 插话合并: {self._stats['interrupted']}\n"
+            f"- 拦截命中: {self._stats['intercepted']}"
         )
         yield event.plain_result(text)
 
@@ -544,6 +601,7 @@ class ConversationalFlowPlugin(Star):
             "silenced": 0,
             "chunked": 0,
             "interrupted": 0,
+            "intercepted": 0,
             "total_requests": 0,
         }
         yield event.plain_result("统计已重置。")
@@ -776,6 +834,135 @@ class ConversationalFlowPlugin(Star):
                 "[conv-flow] seq=%s image intent instruction could not be injected",
                 seq,
             )
+
+    def _is_wake(self, event: AstrMessageEvent) -> bool:
+        """检测事件是否通过 @bot 或唤醒词触发。"""
+        is_wake = getattr(event, "is_at_or_wake_command", None)
+        if isinstance(is_wake, bool):
+            return is_wake
+        is_wake = getattr(event, "is_wake", None)
+        if isinstance(is_wake, bool):
+            return is_wake
+        return False
+
+    def _get_group_id(self, event: AstrMessageEvent) -> str:
+        """安全获取群聊 ID。"""
+        try:
+            gid = getattr(event, "get_group_id", None)
+            if callable(gid):
+                result = gid()
+                if result:
+                    return str(result)
+        except Exception:
+            pass
+        try:
+            message_obj = getattr(event, "message_obj", None)
+            if message_obj is not None:
+                gid = getattr(message_obj, "group_id", None)
+                if gid:
+                    return str(gid)
+        except Exception:
+            pass
+        return ""
+
+    def _get_sender_name(self, event: AstrMessageEvent) -> str:
+        """安全获取发送者昵称。"""
+        try:
+            message_obj = getattr(event, "message_obj", None)
+            if message_obj is not None:
+                sender = getattr(message_obj, "sender", None)
+                if sender is not None:
+                    nickname = getattr(sender, "nickname", None) or getattr(
+                        sender, "card", None
+                    )
+                    if nickname:
+                        return str(nickname)
+        except Exception:
+            pass
+        return self.tracker._get_sender_id(event)
+
+    def _inject_group_context(
+        self, event: AstrMessageEvent, req: Any, seq: Any, is_wake: bool
+    ) -> None:
+        """群聊被唤醒时注入最近群聊上下文。"""
+        if not self.config.group_context_enabled:
+            return
+        if self.config.group_context_only_when_woken and not is_wake:
+            return
+        group_id = self._get_group_id(event)
+        if not group_id:
+            return
+        context = self.group_context.get_recent_context(
+            group_id, self.config.group_context_max_messages
+        )
+        if not context:
+            return
+        instruction = GROUP_CONTEXT_INSTRUCTION_TEMPLATE.format(context=context)
+        injected = False
+        try:
+            parts = getattr(req, "extra_user_content_parts", None)
+            if parts is not None:
+                try:
+                    from astrbot.core.agent.message import TextPart
+
+                    parts.append(TextPart(text=instruction))
+                    injected = True
+                except Exception:
+                    parts.append({"type": "text", "text": instruction})
+                    injected = True
+        except Exception as exc:
+            self.logger.debug(
+                "[conv-flow] group context inject via parts failed: %s", exc
+            )
+        if not injected:
+            try:
+                current = getattr(req, "system_prompt", None) or ""
+                req.system_prompt = current + "\n\n" + instruction
+                injected = True
+            except Exception as exc:
+                self.logger.debug(
+                    "[conv-flow] group context inject via system_prompt failed: %s",
+                    exc,
+                )
+        if injected:
+            self.logger.info(
+                "[conv-flow] seq=%s group context injected (group=%s, is_wake=%s)",
+                seq,
+                group_id,
+                is_wake,
+            )
+
+    def _has_non_text_components(self, event: AstrMessageEvent) -> bool:
+        """检查结果链中是否有非 Plain 文本组件（图片、音频等）。"""
+        try:
+            from astrbot.api.message_components import Plain
+
+            result = event.get_result()
+            if result is None or not result.chain:
+                return False
+            return any(not isinstance(comp, Plain) for comp in result.chain)
+        except Exception:
+            return False
+
+    def _update_result_plain_text(self, event: AstrMessageEvent, text: str) -> bool:
+        """in-place 修改结果链中的纯文本，不抢占发送权。
+
+        如果结果链中有非 Plain 组件，返回 False 不修改。
+        """
+        try:
+            from astrbot.api.message_components import Plain
+
+            result = event.get_result()
+            if result is None:
+                return False
+            has_non_text = any(not isinstance(comp, Plain) for comp in result.chain)
+            if has_non_text:
+                return False
+            result.chain[:] = [Plain(text=text)]
+            return True
+        except Exception as exc:
+            self.logger.debug("[conv-flow] update result plain text failed: %s", exc)
+            return False
 
     async def _silence_event(
         self, event: AstrMessageEvent, send_notify: bool = True

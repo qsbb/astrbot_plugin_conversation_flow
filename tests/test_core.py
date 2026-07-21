@@ -45,10 +45,14 @@ from astrbot_plugin_conversation_flow.core.delay import (  # noqa: E402
 from astrbot_plugin_conversation_flow.core.interrupt_tracker import (  # noqa: E402
     ConversationTracker,
 )
+from astrbot_plugin_conversation_flow.core.group_context import (  # noqa: E402
+    GroupContextManager,
+)
 from astrbot_plugin_conversation_flow.core.plain_text import (  # noqa: E402
     strip_markdown_format,
 )
 from astrbot_plugin_conversation_flow.core.prompts import (  # noqa: E402
+    GROUP_CONTEXT_INSTRUCTION_TEMPLATE,
     IMAGE_INTENT_INSTRUCTION,
     INTERCEPT_INJECT_INSTRUCTION,
 )
@@ -507,6 +511,195 @@ class ConversationTrackerTests(unittest.TestCase):
         event = _ImageEvent([_MockImage(url="http://example.com/a.png")])
         text = tracker._get_user_text(event)
         self.assertEqual(text, "[图片]")
+
+
+class _GroupEvent:
+    """群聊事件 mock，带 sender_id。"""
+
+    def __init__(self, umo: str, sender_id: str, text: str = "") -> None:
+        self.unified_msg_origin = umo
+        self.message_str = text
+        self._extra = {}
+        group_id = umo.split(":")[-1] if ":" in umo else ""
+        self.message_obj = types.SimpleNamespace(
+            sender_id=sender_id,
+            group_id=group_id,
+            sender=types.SimpleNamespace(nickname=sender_id, card=""),
+        )
+
+    def get_message_str(self) -> str:
+        return self.message_str
+
+    def set_extra(self, key, value) -> None:
+        self._extra[key] = value
+
+    def get_extra(self, key):
+        return self._extra.get(key)
+
+
+class GroupContextManagerTests(unittest.TestCase):
+    def test_record_and_get_context(self) -> None:
+        mgr = GroupContextManager(max_messages=5)
+        mgr.record("group1", "user1", "Alice", "大家好")
+        mgr.record("group1", "user2", "Bob", "你好")
+        context = mgr.get_recent_context("group1")
+        self.assertIn("Alice: 大家好", context)
+        self.assertIn("Bob: 你好", context)
+
+    def test_max_messages_limit(self) -> None:
+        mgr = GroupContextManager(max_messages=2)
+        mgr.record("g", "u1", "A", "消息1")
+        mgr.record("g", "u2", "B", "消息2")
+        mgr.record("g", "u3", "C", "消息3")
+        context = mgr.get_recent_context("g")
+        self.assertIn("消息2", context)
+        self.assertIn("消息3", context)
+        self.assertNotIn("消息1", context)
+
+    def test_empty_text_skipped(self) -> None:
+        mgr = GroupContextManager()
+        mgr.record("g", "u1", "A", "")
+        mgr.record("g", "u1", "A", "   ")
+        self.assertEqual(mgr.get_recent_context("g"), "")
+
+    def test_different_groups_isolated(self) -> None:
+        mgr = GroupContextManager()
+        mgr.record("g1", "u1", "A", "群1消息")
+        mgr.record("g2", "u1", "A", "群2消息")
+        self.assertIn("群1消息", mgr.get_recent_context("g1"))
+        self.assertNotIn("群2消息", mgr.get_recent_context("g1"))
+
+    def test_get_n_messages(self) -> None:
+        mgr = GroupContextManager(max_messages=10)
+        for i in range(5):
+            mgr.record("g", f"u{i}", f"User{i}", f"消息{i}")
+        context = mgr.get_recent_context("g", n=2)
+        self.assertIn("消息3", context)
+        self.assertIn("消息4", context)
+        self.assertNotIn("消息0", context)
+
+    def test_cleanup_stale(self) -> None:
+        mgr = GroupContextManager()
+        mgr.record("g", "u1", "A", "消息")
+        cleaned = mgr.cleanup_stale(0)  # ttl=0 立即过期
+        self.assertEqual(cleaned, 1)
+        self.assertEqual(mgr.get_recent_context("g"), "")
+
+
+class InterruptWindowTests(unittest.TestCase):
+    def test_expired_pending_not_interrupted(self) -> None:
+        tracker = ConversationTracker()
+        tracker.update_interrupt_config(window_ms=1000, scope="room")
+        first = _Event("session", "第一句")
+        tracker.begin_request(first)
+        # 手动把 pending 的 started_at 设为很久以前
+        state = tracker.get_state("session")
+        for p in state.pending.values():
+            p.started_at = 0
+        second = _Event("session", "第二句")
+        tracker.begin_request(second)
+        self.assertFalse(tracker.is_discarded(first))
+
+    def test_within_window_pending_interrupted(self) -> None:
+        tracker = ConversationTracker()
+        tracker.update_interrupt_config(window_ms=60000, scope="room")
+        first = _Event("session", "第一句")
+        tracker.begin_request(first)
+        second = _Event("session", "第二句")
+        tracker.begin_request(second)
+        self.assertTrue(tracker.is_discarded(first))
+
+    def test_zero_window_disables_time_filter(self) -> None:
+        tracker = ConversationTracker()
+        tracker.update_interrupt_config(window_ms=0, scope="room")
+        first = _Event("session", "第一句")
+        tracker.begin_request(first)
+        state = tracker.get_state("session")
+        for p in state.pending.values():
+            p.started_at = 0
+        second = _Event("session", "第二句")
+        tracker.begin_request(second)
+        # window=0 表示不过滤时间
+        self.assertTrue(tracker.is_discarded(first))
+
+
+class InterruptScopeTests(unittest.TestCase):
+    def test_sender_scope_isolates_different_users(self) -> None:
+        tracker = ConversationTracker()
+        tracker.update_interrupt_config(window_ms=60000, scope="sender")
+        user1 = _GroupEvent("aiocqhttp:GroupMessage:123", "user1", "你好")
+        user2 = _GroupEvent("aiocqhttp:GroupMessage:123", "user2", "大家好")
+        tracker.begin_request(user1)
+        tracker.begin_request(user2)
+        self.assertFalse(tracker.is_discarded(user1))
+
+    def test_room_scope_interrupts_any_user(self) -> None:
+        tracker = ConversationTracker()
+        tracker.update_interrupt_config(window_ms=60000, scope="room")
+        user1 = _GroupEvent("aiocqhttp:GroupMessage:123", "user1", "你好")
+        user2 = _GroupEvent("aiocqhttp:GroupMessage:123", "user2", "大家好")
+        tracker.begin_request(user1)
+        tracker.begin_request(user2)
+        self.assertTrue(tracker.is_discarded(user1))
+
+    def test_mention_or_sender_normal_isolates(self) -> None:
+        tracker = ConversationTracker()
+        tracker.update_interrupt_config(window_ms=60000, scope="mention_or_sender")
+        user1 = _GroupEvent("aiocqhttp:GroupMessage:123", "user1", "你好")
+        user2 = _GroupEvent("aiocqhttp:GroupMessage:123", "user2", "大家好")
+        tracker.begin_request(user1, is_wake=False)
+        tracker.begin_request(user2, is_wake=False)
+        self.assertFalse(tracker.is_discarded(user1))
+
+    def test_mention_or_sender_wake_interrupts_other_senders(self) -> None:
+        tracker = ConversationTracker()
+        tracker.update_interrupt_config(window_ms=60000, scope="mention_or_sender")
+        user1 = _GroupEvent("aiocqhttp:GroupMessage:123", "user1", "你好")
+        user2 = _GroupEvent("aiocqhttp:GroupMessage:123", "user2", "@bot 问题")
+        tracker.begin_request(user1, is_wake=False)
+        tracker.begin_request(user2, is_wake=True)
+        self.assertTrue(tracker.is_discarded(user1))
+
+    def test_sender_scope_same_user_interrupts(self) -> None:
+        tracker = ConversationTracker()
+        tracker.update_interrupt_config(window_ms=60000, scope="sender")
+        msg1 = _GroupEvent("aiocqhttp:GroupMessage:123", "user1", "第一句")
+        msg2 = _GroupEvent("aiocqhttp:GroupMessage:123", "user1", "第二句")
+        tracker.begin_request(msg1)
+        tracker.begin_request(msg2)
+        self.assertTrue(tracker.is_discarded(msg1))
+
+
+class GroupContextPromptTests(unittest.TestCase):
+    def test_template_contains_context_placeholder(self) -> None:
+        self.assertIn("{context}", GROUP_CONTEXT_INSTRUCTION_TEMPLATE)
+
+    def test_template_does_not_mention_meta_words(self) -> None:
+        formatted = GROUP_CONTEXT_INSTRUCTION_TEMPLATE.format(context="测试")
+        self.assertIn("群聊", formatted)
+        self.assertIn("被唤醒", formatted)
+
+
+class NewConfigTests(unittest.TestCase):
+    def test_interrupt_scope_defaults_to_sender(self) -> None:
+        cfg = build_plugin_config({})
+        self.assertEqual(cfg.interrupt_scope, "sender")
+
+    def test_group_context_defaults_on(self) -> None:
+        cfg = build_plugin_config({})
+        self.assertTrue(cfg.group_context_enabled)
+        self.assertEqual(cfg.group_context_max_messages, 10)
+        self.assertTrue(cfg.group_context_only_when_woken)
+
+    def test_interrupt_scope_validates(self) -> None:
+        cfg = build_plugin_config({"interrupt_scope": "invalid"})
+        self.assertEqual(cfg.interrupt_scope, "sender")
+        cfg = build_plugin_config({"interrupt_scope": "room"})
+        self.assertEqual(cfg.interrupt_scope, "room")
+
+    def test_group_context_max_messages_clamped(self) -> None:
+        cfg = build_plugin_config({"group_context_max_messages": 0})
+        self.assertEqual(cfg.group_context_max_messages, 1)
 
 
 if __name__ == "__main__":
