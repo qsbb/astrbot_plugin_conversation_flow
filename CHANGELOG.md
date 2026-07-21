@@ -1,5 +1,28 @@
 # Changelog
 
+## v0.1.13 - 2026-07-21
+
+### Changed
+
+- **重构智能拦截为注入式**：删除独立 LLM 预判断（prejudge），改为向主 LLM 注入 `INTERCEPT_INJECT_INSTRUCTION` 指令，让模型在主对话思维链中一并判断用户输入是否为不良内容。命中则礼貌拒绝或输出 `silence_marker` 静默，正常则按原人设回复。
+- 此变更省去一次额外 LLM 调用，判断融入主对话思维链，与 `silence_judge` 的 inject 策略一致。
+
+### Removed
+
+- 删除配置项 `intercept_action`、`intercept_provider_id`、`intercept_max_chars`
+- 删除提示词 `INTERCEPT_PREJUDGE_SYSTEM`、`INTERCEPT_PREJUDGE_USER_TEMPLATE`、`INTERCEPT_REJECT_INSTRUCTION`
+- 删除 `InterceptJudge.prejudge` 方法和 `_InterceptLLM` 测试 mock
+
+### Design
+
+- 拦截判断不再独立于主对话，而是在主 LLM 生成回复时一并完成
+- `intercept_enabled` 与 `intercept_whitelist` 仍保留，白名单会话完全跳过注入
+- 响应阶段 marker 检测沿用 v0.1.12 的解耦机制（`INTERCEPTED_KEY` 标记 + `is_silence_response`）
+
+### Diagnosis
+
+- 注入成功：`[conv-flow] seq=N intercept instruction injected`
+
 ## v0.1.12 - 2026-07-21
 
 ### Fixed

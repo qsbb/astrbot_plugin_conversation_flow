@@ -34,10 +34,7 @@ DEFAULTS: dict[str, Any] = {
     "interrupt_window_ms": 30000,
     "interrupt_state_ttl_ms": 600000,
     "intercept_enabled": False,
-    "intercept_action": "polite_reject",
     "intercept_whitelist": [],
-    "intercept_provider_id": "",
-    "intercept_max_chars": 200,
     "llm_provider_id": "",
     "log_level": "INFO",
 }
@@ -45,7 +42,6 @@ DEFAULTS: dict[str, Any] = {
 _VALID_STRATEGIES = {"inject", "prejudge", "both"}
 _VALID_MERGE = {"append", "rewrite", "discard_old"}
 _VALID_DELAY_MODES = {"fixed", "per_char"}
-_VALID_INTERCEPT_ACTIONS = {"polite_reject", "silence"}
 _VALID_LOG_LEVELS = {"DEBUG", "INFO", "WARNING", "ERROR"}
 
 
@@ -198,10 +194,6 @@ def normalize_config(raw: dict[str, Any] | None) -> dict[str, Any]:
     out["intercept_enabled"] = _coerce_bool(
         raw.get("intercept_enabled"), DEFAULTS["intercept_enabled"]
     )
-    action = _coerce_str(raw.get("intercept_action"), DEFAULTS["intercept_action"])
-    out["intercept_action"] = (
-        action if action in _VALID_INTERCEPT_ACTIONS else DEFAULTS["intercept_action"]
-    )
     raw_whitelist = raw.get("intercept_whitelist")
     if isinstance(raw_whitelist, list):
         whitelist = [str(item) for item in raw_whitelist if item]
@@ -211,13 +203,6 @@ def normalize_config(raw: dict[str, Any] | None) -> dict[str, Any]:
     else:
         whitelist = list(DEFAULTS["intercept_whitelist"])
     out["intercept_whitelist"] = whitelist
-    out["intercept_provider_id"] = _coerce_str(
-        raw.get("intercept_provider_id"), DEFAULTS["intercept_provider_id"]
-    )
-    out["intercept_max_chars"] = max(
-        10,
-        _coerce_int(raw.get("intercept_max_chars"), DEFAULTS["intercept_max_chars"]),
-    )
 
     out["llm_provider_id"] = _coerce_str(
         raw.get("llm_provider_id"), DEFAULTS["llm_provider_id"]
@@ -261,10 +246,7 @@ class PluginConfig:
     interrupt_window_ms: int = 30000
     interrupt_state_ttl_ms: int = 600000
     intercept_enabled: bool = False
-    intercept_action: str = "polite_reject"
     intercept_whitelist: list[str] = field(default_factory=list)
-    intercept_provider_id: str = ""
-    intercept_max_chars: int = 200
     llm_provider_id: str = ""
     log_level: str = "INFO"
 

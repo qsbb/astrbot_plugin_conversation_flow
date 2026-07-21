@@ -40,7 +40,7 @@ from .core.silence_judge import SilenceJudge
     "astrbot_plugin_conversation_flow",
     "Justice-ocr",
     "对话流控制：沉默判断、智能分段、插话中断",
-    "0.1.12",
+    "0.1.13",
 )
 class ConversationalFlowPlugin(Star):
     """对话流控制主插件类。"""
@@ -85,8 +85,8 @@ class ConversationalFlowPlugin(Star):
         }
 
         self.logger.info(
-            "[conv-flow] plugin loaded: version=0.1.12, silence=%s/%s, "
-            "chunking=%s, image_intent=%s, interrupt=%s/%s, intercept=%s/%s",
+            "[conv-flow] plugin loaded: version=0.1.13, silence=%s/%s, "
+            "chunking=%s, image_intent=%s, interrupt=%s/%s, intercept=%s",
             self.config.silence_enabled,
             self.config.silence_strategy,
             self.config.chunking_enabled,
@@ -94,7 +94,6 @@ class ConversationalFlowPlugin(Star):
             self.config.interrupt_enabled,
             self.config.interrupt_merge_strategy,
             self.config.intercept_enabled,
-            self.config.intercept_action,
         )
 
     # ------------------------------------------------------------------
@@ -207,42 +206,18 @@ class ConversationalFlowPlugin(Star):
         if not user_text:
             return
 
-        # 智能拦截：不良输入优先于沉默判断处理
-        if self.intercept_judge.should_check(umo):
-            try:
-                intercept, reason = await self.intercept_judge.prejudge(user_text, umo)
-                if intercept:
-                    self._stats["intercepted"] += 1
-                    self.logger.info(
-                        "[conv-flow] seq=%s intercepted, reason=%s, user_text=%r",
-                        seq,
-                        reason,
-                        user_text[:80],
-                    )
-                    if self.config.intercept_action == "silence":
-                        await self._silence_event(event)
-                        self.tracker.cancel_request(event)
-                        return
-                    # polite_reject：注入礼貌拒绝指令，让主 LLM 自主决定拒绝或输出 marker
-                    ok = self.intercept_judge.inject_reject_instruction(req)
-                    if not ok:
-                        self.logger.warning(
-                            "[conv-flow] seq=%s intercept inject failed, "
-                            "fallback to silence",
-                            seq,
-                        )
-                        await self._silence_event(event)
-                        self.tracker.cancel_request(event)
-                        return
-                    # 标记本请求被拦截命中，响应阶段独立检测 marker 不依赖 silence_judge
-                    self._set_extra(event, self.INTERCEPTED_KEY, True)
-                    # 注入拒绝指令后不再做沉默判断（已注入相关指令）
-                    # 但仍注入纯文本指令保持回复风格
-                    if self.config.plain_text_mode:
-                        self._inject_plain_text_instruction(req)
-                    return
-            except Exception as exc:
-                self.logger.warning("[conv-flow] intercept prejudge failed: %s", exc)
+        # 智能拦截：注入指令让主 LLM 在主对话思维链中一并判断不良内容
+        # 不做独立 LLM 预判断，省一次调用
+        if self.intercept_judge.should_inject(umo):
+            ok = self.intercept_judge.inject_instruction(req)
+            if ok:
+                # 标记本请求已注入拦截指令，响应阶段独立检测 marker
+                self._set_extra(event, self.INTERCEPTED_KEY, True)
+                self.logger.info(
+                    "[conv-flow] seq=%s intercept instruction injected", seq
+                )
+            else:
+                self.logger.warning("[conv-flow] seq=%s intercept inject failed", seq)
 
         # prejudge 模式：先独立判断
         if self.silence_judge.should_prejudge():

@@ -50,8 +50,7 @@ from astrbot_plugin_conversation_flow.core.plain_text import (  # noqa: E402
 )
 from astrbot_plugin_conversation_flow.core.prompts import (  # noqa: E402
     IMAGE_INTENT_INSTRUCTION,
-    INTERCEPT_PREJUDGE_SYSTEM,
-    INTERCEPT_REJECT_INSTRUCTION,
+    INTERCEPT_INJECT_INSTRUCTION,
 )
 from astrbot_plugin_conversation_flow.core.image_intent import (  # noqa: E402
     detect_images,
@@ -323,46 +322,42 @@ class ImageIntentTests(unittest.TestCase):
         self.assertEqual(source, "no_image")
 
 
-class _InterceptLLM:
-    """拦截预判断 mock LLM，按预设返回 JSON。"""
-
-    def __init__(self, intercept: bool, reason: str = "") -> None:
-        self._intercept = intercept
-        self._reason = reason
+class _StubLLM:
+    """占位 LLM，拦截模块不再使用但构造函数需要。"""
 
     async def chat_json(self, prompt, system_prompt=None, umo="", provider_id=""):
-        return {"intercept": self._intercept, "reason": self._reason}
+        return {}
 
 
 class InterceptJudgeTests(unittest.TestCase):
     def test_prompt_covers_main_violation_categories(self) -> None:
-        self.assertIn("色情", INTERCEPT_PREJUDGE_SYSTEM)
-        self.assertIn("暴力", INTERCEPT_PREJUDGE_SYSTEM)
-        self.assertIn("辱骂", INTERCEPT_PREJUDGE_SYSTEM)
-        self.assertIn("越狱", INTERCEPT_PREJUDGE_SYSTEM)
-        self.assertIn("不要正面回答", INTERCEPT_REJECT_INSTRUCTION)
-        self.assertIn("礼貌", INTERCEPT_REJECT_INSTRUCTION)
+        self.assertIn("色情", INTERCEPT_INJECT_INSTRUCTION)
+        self.assertIn("暴力", INTERCEPT_INJECT_INSTRUCTION)
+        self.assertIn("辱骂", INTERCEPT_INJECT_INSTRUCTION)
+        self.assertIn("越狱", INTERCEPT_INJECT_INSTRUCTION)
+        self.assertIn("不要正面回答", INTERCEPT_INJECT_INSTRUCTION)
+        self.assertIn("礼貌", INTERCEPT_INJECT_INSTRUCTION)
 
     def test_disabled_by_default(self) -> None:
         cfg = build_plugin_config({})
         self.assertFalse(cfg.intercept_enabled)
-        judge = InterceptJudge(cfg, _InterceptLLM(True))
+        judge = InterceptJudge(cfg, _StubLLM())
         self.assertFalse(judge.is_enabled())
-        self.assertFalse(judge.should_check("any_session"))
+        self.assertFalse(judge.should_inject("any_session"))
 
-    def test_whitelist_skips_check(self) -> None:
+    def test_whitelist_skips_inject(self) -> None:
         cfg = build_plugin_config(
             {
                 "intercept_enabled": True,
                 "intercept_whitelist": ["aiocqhttp:FriendMessage:123"],
             }
         )
-        judge = InterceptJudge(cfg, _InterceptLLM(True))
+        judge = InterceptJudge(cfg, _StubLLM())
         self.assertTrue(judge.is_enabled())
         self.assertTrue(judge.is_whitelisted("aiocqhttp:FriendMessage:123"))
         self.assertFalse(judge.is_whitelisted("aiocqhttp:GroupMessage:456"))
-        self.assertFalse(judge.should_check("aiocqhttp:FriendMessage:123"))
-        self.assertTrue(judge.should_check("aiocqhttp:GroupMessage:456"))
+        self.assertFalse(judge.should_inject("aiocqhttp:FriendMessage:123"))
+        self.assertTrue(judge.should_inject("aiocqhttp:GroupMessage:456"))
 
     def test_whitelist_accepts_string_with_newlines(self) -> None:
         cfg = build_plugin_config(
@@ -376,36 +371,11 @@ class InterceptJudgeTests(unittest.TestCase):
             ["aiocqhttp:FriendMessage:1", "aiocqhttp:FriendMessage:2"],
         )
 
-    def test_prejudge_returns_intercept_flag(self) -> None:
+    def test_inject_instruction_appends_to_parts(self) -> None:
         cfg = build_plugin_config({"intercept_enabled": True})
-        judge_hit = InterceptJudge(cfg, _InterceptLLM(True, "色情暗示"))
-        judge_pass = InterceptJudge(cfg, _InterceptLLM(False, "正常聊天"))
-
-        import asyncio
-
-        hit, reason = asyncio.run(judge_hit.prejudge("不良内容", "session"))
-        self.assertTrue(hit)
-        self.assertEqual(reason, "色情暗示")
-
-        hit, reason = asyncio.run(judge_pass.prejudge("你好", "session"))
-        self.assertFalse(hit)
-
-    def test_prejudge_skips_long_text(self) -> None:
-        cfg = build_plugin_config(
-            {"intercept_enabled": True, "intercept_max_chars": 10}
-        )
-        judge = InterceptJudge(cfg, _InterceptLLM(True))
-        import asyncio
-
-        hit, _ = asyncio.run(judge.prejudge("a" * 100, "session"))
-        self.assertFalse(hit)
-
-    def test_inject_reject_instruction_appends_to_parts(self) -> None:
-        cfg = build_plugin_config({"intercept_enabled": True})
-        judge = InterceptJudge(cfg, _InterceptLLM(True))
+        judge = InterceptJudge(cfg, _StubLLM())
         req = _ProviderRequest(prompt="用户消息")
-        req.extra_user_content_parts = []
-        ok = judge.inject_reject_instruction(req)
+        ok = judge.inject_instruction(req)
         self.assertTrue(ok)
         self.assertEqual(len(req.extra_user_content_parts), 1)
 
@@ -420,23 +390,21 @@ class InterceptJudgeTests(unittest.TestCase):
         )
         self.assertTrue(cfg.intercept_enabled)
         self.assertFalse(cfg.silence_enabled)
-        # silence_judge.should_inject() 会返回 False，但 intercept 仍可工作
         from astrbot_plugin_conversation_flow.core.silence_judge import SilenceJudge
 
-        judge = SilenceJudge(cfg, _InterceptLLM(True))
+        judge = SilenceJudge(cfg, _StubLLM())
         self.assertFalse(judge.should_inject())
         # is_silence_response 仍可用于检测 marker（解耦后由 main.py 调用）
         self.assertTrue(judge.is_silence_response("<SILENCE/>"))
 
-    def test_reject_instruction_uses_silence_marker(self) -> None:
-        """礼貌拒绝指令应引用 silence_marker，便于 LLM 自主选择静默。"""
+    def test_inject_instruction_uses_silence_marker(self) -> None:
+        """拦截指令应引用 silence_marker，便于 LLM 自主选择静默。"""
         cfg = build_plugin_config(
             {"intercept_enabled": True, "silence_marker": "<SILENCE/>"}
         )
-        judge = InterceptJudge(cfg, _InterceptLLM(True))
+        judge = InterceptJudge(cfg, _StubLLM())
         req = _ProviderRequest(prompt="用户消息")
-        req.extra_user_content_parts = []
-        judge.inject_reject_instruction(req)
+        judge.inject_instruction(req)
         instruction = req.extra_user_content_parts[0]
         # TextPart 或 dict 两种形式都检查
         text = getattr(instruction, "text", None) or instruction.get("text", "")

@@ -151,34 +151,14 @@
   "intercept_enabled": {
     "type": "bool",
     "description": "启用智能拦截（实验性）",
-    "hint": "开启后在 on_llm_request 阶段调用 LLM 预判断用户输入是否为不良内容（色情/暴力/辱骂/违法/越狱等），命中后按 intercept_action 处理。白名单会话完全跳过。",
+    "hint": "开启后向主 LLM 注入拦截指令，让模型在主对话思维链中一并判断用户输入是否为不良内容（色情/暴力/辱骂/违法/越狱等），命中则礼貌拒绝或输出 silence_marker 静默。不做独立 LLM 预判断，不增加额外调用。白名单会话完全跳过。",
     "default": false
-  },
-  "intercept_action": {
-    "type": "string",
-    "description": "拦截命中后的处理方式",
-    "options": ["polite_reject", "silence"],
-    "hint": "polite_reject=注入礼貌拒绝指令让主 LLM 委婉拒绝或输出 silence_marker 静默（推荐）；silence=直接静默不注入指令。",
-    "default": "polite_reject"
   },
   "intercept_whitelist": {
     "type": "list",
     "description": "拦截白名单会话（unified_msg_origin）",
-    "hint": "白名单中的会话完全跳过拦截检测。格式如 'aiocqhttp:FriendMessage:123456'，每行一个。信任的私聊或指定群可以加入白名单。",
+    "hint": "白名单中的会话完全跳过拦截注入。格式如 'aiocqhttp:FriendMessage:123456'，每行一个。信任的私聊或指定群可以加入白名单。",
     "default": []
-  },
-  "intercept_provider_id": {
-    "type": "string",
-    "_special": "select_provider",
-    "description": "拦截预判断专用 LLM Provider（留空用当前对话模型）",
-    "hint": "建议选一个快且便宜的模型做拦截预判断。",
-    "default": ""
-  },
-  "intercept_max_chars": {
-    "type": "int",
-    "description": "拦截预判断输入文本最大字符数",
-    "hint": "超过此长度的用户消息不参与拦截预判断（认为长文本通常需要正常回复）。",
-    "default": 200
   },
   "llm_provider_id": {
     "type": "string",
