@@ -409,6 +409,39 @@ class InterceptJudgeTests(unittest.TestCase):
         self.assertTrue(ok)
         self.assertEqual(len(req.extra_user_content_parts), 1)
 
+    def test_intercept_can_be_enabled_independently_of_silence(self) -> None:
+        """拦截可独立于 silence_judge 启用，marker 检测在 main.py 中解耦。"""
+        cfg = build_plugin_config(
+            {
+                "intercept_enabled": True,
+                "silence_enabled": False,
+                "silence_strategy": "inject",
+            }
+        )
+        self.assertTrue(cfg.intercept_enabled)
+        self.assertFalse(cfg.silence_enabled)
+        # silence_judge.should_inject() 会返回 False，但 intercept 仍可工作
+        from astrbot_plugin_conversation_flow.core.silence_judge import SilenceJudge
+
+        judge = SilenceJudge(cfg, _InterceptLLM(True))
+        self.assertFalse(judge.should_inject())
+        # is_silence_response 仍可用于检测 marker（解耦后由 main.py 调用）
+        self.assertTrue(judge.is_silence_response("<SILENCE/>"))
+
+    def test_reject_instruction_uses_silence_marker(self) -> None:
+        """礼貌拒绝指令应引用 silence_marker，便于 LLM 自主选择静默。"""
+        cfg = build_plugin_config(
+            {"intercept_enabled": True, "silence_marker": "<SILENCE/>"}
+        )
+        judge = InterceptJudge(cfg, _InterceptLLM(True))
+        req = _ProviderRequest(prompt="用户消息")
+        req.extra_user_content_parts = []
+        judge.inject_reject_instruction(req)
+        instruction = req.extra_user_content_parts[0]
+        # TextPart 或 dict 两种形式都检查
+        text = getattr(instruction, "text", None) or instruction.get("text", "")
+        self.assertIn("<SILENCE/>", text)
+
 
 class ConversationTrackerTests(unittest.TestCase):
     def test_merge_hint_preserves_reserved_delimiters(self) -> None:

@@ -1,5 +1,21 @@
 # Changelog
 
+## v0.1.12 - 2026-07-21
+
+### Fixed
+
+- 解耦拦截 marker 检测与 `silence_judge` 配置：`polite_reject` 模式下 LLM 输出 `silence_marker` 时，即使 `silence_enabled=false` 或 `silence_strategy=prejudge` 也能被正确捕获并静默。
+- 在 `on_llm_request` 命中拦截时通过 `event.set_extra("conv_flow_intercepted", True)` 标记本请求，`on_llm_response` 和 `on_decorating_result` 检测到该标记时独立调用 `is_silence_response` 检测 marker。
+
+### Design
+
+- 拦截模块现在可完全独立于 `silence_judge` 工作：用户可关闭 `silence_enabled` 但单独启用 `intercept_enabled`，`polite_reject` 的静默路径仍生效。
+- `silence_judge.is_silence_response` 被复用为纯工具方法（不依赖 `should_inject`），由 main.py 在合适时机调用。
+
+### Diagnosis
+
+- 拦截命中且 LLM 输出 marker 时：`[conv-flow] seq=N silenced by inject marker, response='<SILENCE/>'`
+
 ## v0.1.11 - 2026-07-21
 
 ### Added

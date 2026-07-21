@@ -40,13 +40,15 @@ from .core.silence_judge import SilenceJudge
     "astrbot_plugin_conversation_flow",
     "Justice-ocr",
     "对话流控制：沉默判断、智能分段、插话中断",
-    "0.1.11",
+    "0.1.12",
 )
 class ConversationalFlowPlugin(Star):
     """对话流控制主插件类。"""
 
     # event extra 上用于标记"已发送分段"的 key
     SENT_CHUNKS_KEY = "conv_flow_sent_chunks"
+    # event extra 上用于标记"本请求被拦截命中（polite_reject 模式）"的 key
+    INTERCEPTED_KEY = "conv_flow_intercepted"
 
     def __init__(self, context: Context, config: Any = None) -> None:
         super().__init__(context)
@@ -83,7 +85,7 @@ class ConversationalFlowPlugin(Star):
         }
 
         self.logger.info(
-            "[conv-flow] plugin loaded: version=0.1.11, silence=%s/%s, "
+            "[conv-flow] plugin loaded: version=0.1.12, silence=%s/%s, "
             "chunking=%s, image_intent=%s, interrupt=%s/%s, intercept=%s/%s",
             self.config.silence_enabled,
             self.config.silence_strategy,
@@ -232,6 +234,8 @@ class ConversationalFlowPlugin(Star):
                         await self._silence_event(event)
                         self.tracker.cancel_request(event)
                         return
+                    # 标记本请求被拦截命中，响应阶段独立检测 marker 不依赖 silence_judge
+                    self._set_extra(event, self.INTERCEPTED_KEY, True)
                     # 注入拒绝指令后不再做沉默判断（已注入相关指令）
                     # 但仍注入纯文本指令保持回复风格
                     if self.config.plain_text_mode:
@@ -284,8 +288,11 @@ class ConversationalFlowPlugin(Star):
             self.tracker.finish_response(event)
             return
 
-        # 2) 检查沉默标记
-        if self.silence_judge.should_inject():
+        # 2) 检查沉默标记（silence_judge 注入模式 或 拦截命中时都需检测）
+        should_check_marker = self.silence_judge.should_inject() or (
+            event.get_extra(self.INTERCEPTED_KEY) is True
+        )
+        if should_check_marker:
             text = self._extract_response_text(response)
             if text and self.silence_judge.is_silence_response(text):
                 self.logger.info(
@@ -343,11 +350,11 @@ class ConversationalFlowPlugin(Star):
         if not text or not text.strip():
             return
 
-        # 3) 沉默标记二次校验
-        if (
-            self.silence_judge.should_inject()
-            and self.silence_judge.is_silence_response(text)
-        ):
+        # 3) 沉默标记二次校验（silence_judge 注入模式 或 拦截命中时都需检测）
+        should_check_marker = self.silence_judge.should_inject() or (
+            event.get_extra(self.INTERCEPTED_KEY) is True
+        )
+        if should_check_marker and self.silence_judge.is_silence_response(text):
             self.logger.info(
                 "[conv-flow] seq=%s silence marker found at decorating", seq
             )
