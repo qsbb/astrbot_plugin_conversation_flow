@@ -1,5 +1,59 @@
 # Changelog
 
+## v0.3.0 - 2026-07-22
+
+### Added
+
+- **智能分段优先级优化**：LLM 双空行分段（`\n\n`）视为强分段信号，每段保留不切；超长段落（> `long_paragraph_threshold`）才按句末标点切分；无双空行时整体按句末标点切分。尊重 LLM 主动分段意图。
+
+### Fixed
+
+- **B1 图片意图双重注入**：`_inject_image_intent_instruction` 成功追加到 `extra_user_content_parts` 后未 return，继续追加到 `system_prompt`，导致指令被注入两次。改为 `if not injected:` 守卫。
+- **B2 早退路径漏 finish_response**：`on_decorating_result` 的 `result is None` / `is_llm=False` / `text 为空` 三个早退分支直接 return 但未调用 `tracker.finish_response(event)`，pending 状态泄漏。已补齐调用。
+- **B3 版本号硬编码**：日志打印的版本号硬编码为 `0.2.0`，与 `@register` 不一致。改为使用模块级 `__version__` 变量。
+- **B4 list 配置项无法 set**：`_try_parse_value` 不支持 list 类型，`intercept_whitelist` 等 list 配置项无法通过 `/convflow set` 修改。新增 list 分支按换行/逗号分隔。
+- **D1 命令污染群聊上下文**：`/convflow status` 等命令消息会被记录到群聊上下文。已过滤以 `/` 开头的消息。
+
+### Changed
+
+- **D2 terminate 公开方法**：`terminate` 访问 `tracker._states.clear()` 私有属性。新增 `ConversationTracker.clear()` 公开方法。
+- **metadata desc 更新**：从"三段式"改为"多维度"，补充双空行分段和句末标点切分描述。
+
+### Tests
+
+- 新增 3 项 chunker 测试：LLM 双空行分段保留、句末标点切分、超长段落仍切分。共 70 项测试全部通过。
+
+## v0.2.3 - 2026-07-22
+
+### Fixed
+
+- 所有 LLM 钩子统一加 `*args, **kwargs` 兜底。AstrBot v4.26.6 调用 `on_waiting_llm_request` 传入 13 个位置参数、`on_llm_request` 传入 14 个，v0.2.2 只给部分钩子加兜底仍会报错。
+
+## v0.2.2 - 2026-07-22
+
+### Fixed
+
+- 兼容 AstrBot v4.26.6 钩子参数签名。`on_waiting_llm_request` / `on_decorating_result` / `on_group_message` 追加 `*args, **kwargs` 吸收框架额外传入的位置参数。
+
+## v0.2.1 - 2026-07-22
+
+### Fixed
+
+- 修复 `EventMessageType` 导入错误。改为通过 `filter.EventMessageType` 访问。
+
+## v0.2.0 - 2026-07-21
+
+### Added
+
+- **群聊上下文注入**：自行维护 deque，bot 被 @/回复时把最近群聊消息作为背景注入 LLM。
+- **中断作用域** `room`/`sender`/`mention_or_sender`（默认 `sender`，避免群里不同用户互相打断）。
+- **`interrupt_window_ms` 真正生效**：超时 pending 不再被打断。
+- **配置持久化**：`/convflow set` 写入 JSON，重启自动加载。
+
+### Fixed
+
+- **`on_decorating_result` 结果所有权修复**：不分段时 in-place 修改 `result.chain` 不调用 `stop_event`，避免与 TTS 等插件冲突；分段失败回退原始文本；含非文本组件时跳过替换。
+
 ## v0.1.13 - 2026-07-21
 
 ### Changed

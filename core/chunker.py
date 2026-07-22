@@ -110,14 +110,25 @@ class Chunker:
         return self.split(text)
 
     def _split_plain(self, text: str) -> list[str]:
-        """按段落 → 句末标点切分。"""
-        # 第一层：段落分隔
+        """按段落 → 句末标点切分。
+
+        优先级：
+        1. LLM 双空行分段（\\n\\n）视为强分段信号，每段保留不切；
+        2. 单段过长（> long_paragraph_threshold）才按句末标点切分；
+        3. 无双空行时整体按句末标点切分。
+        """
         paragraphs = _PARAGRAPH_SPLIT.split(text)
+        # 只有一段：没有双空行，整体按句末标点切
+        if len(paragraphs) <= 1:
+            return self._split_by_sentence(text.strip())
+
+        # 有双空行：LLM 主动分段，每段保留；超长段才按句号切
         segments: list[str] = []
         for para in paragraphs:
             para = para.strip()
             if not para:
                 continue
+            # 短段落或开启段落保留：直接作为一段
             if (
                 self._chunk_cfg.preserve_paragraphs
                 and len(para) <= self._chunk_cfg.long_paragraph_threshold
@@ -127,27 +138,35 @@ class Chunker:
             if len(para) <= self._chunk_cfg.min_length:
                 segments.append(para)
                 continue
-            # 第二层：句末标点切分
-            parts = _SENTENCE_END.split(para)
-            # re.split with capture group: ["text", "。", "text", "！", ...]
-            current = ""
-            i = 0
-            while i < len(parts):
-                chunk = parts[i]
-                if i + 1 < len(parts) and _SENTENCE_END.fullmatch(parts[i + 1] or ""):
-                    chunk = chunk + parts[i + 1]
-                    i += 2
-                else:
-                    i += 1
-                if not chunk:
-                    continue
-                current += chunk
-                # 累积到一定长度就成段
-                if len(current) >= self._chunk_cfg.min_length:
-                    segments.append(current.strip())
-                    current = ""
-            if current.strip():
+            # 超长段落：按句末标点继续切分
+            segments.extend(self._split_by_sentence(para))
+        return segments
+
+    def _split_by_sentence(self, text: str) -> list[str]:
+        """按句末标点（。！？!?…\\n）切分，累积到 min_length 成段。"""
+        if not text:
+            return []
+        parts = _SENTENCE_END.split(text)
+        # re.split with capture group: ["text", "。", "text", "！", ...]
+        current = ""
+        i = 0
+        segments: list[str] = []
+        while i < len(parts):
+            chunk = parts[i]
+            if i + 1 < len(parts) and _SENTENCE_END.fullmatch(parts[i + 1] or ""):
+                chunk = chunk + parts[i + 1]
+                i += 2
+            else:
+                i += 1
+            if not chunk:
+                continue
+            current += chunk
+            # 累积到一定长度就成段
+            if len(current) >= self._chunk_cfg.min_length:
                 segments.append(current.strip())
+                current = ""
+        if current.strip():
+            segments.append(current.strip())
         return segments
 
     def _split_with_code_protection(self, text: str) -> list[str]:

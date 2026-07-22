@@ -115,6 +115,69 @@ class ChunkerTests(unittest.TestCase):
         self.assertGreater(len(candidates), 2)
         self.assertLessEqual(len(chunker.split(text)), 2)
 
+    def test_llm_double_newline_preserves_segments(self) -> None:
+        """LLM 用双空行明确分段时，每段保留不切。"""
+        cfg = build_plugin_config(
+            {
+                "chunking_min_length": 20,
+                "chunking_preserve_paragraphs": True,
+                "chunking_long_paragraph_threshold": 100,
+            }
+        )
+        chunker = Chunker(cfg, _LLM())
+        text = (
+            "这是第一段独立的内容。\n\n这是第二段独立的内容。\n\n这是第三段独立的内容。"
+        )
+        result = chunker.split(text)
+        self.assertEqual(
+            result,
+            [
+                "这是第一段独立的内容。",
+                "这是第二段独立的内容。",
+                "这是第三段独立的内容。",
+            ],
+        )
+
+    def test_sentence_end_punctuation_split(self) -> None:
+        """无双空行时按句末标点（。！？）切分。"""
+        cfg = build_plugin_config(
+            {
+                "chunking_min_length": 10,
+                "chunking_preserve_paragraphs": False,
+                "chunking_long_paragraph_threshold": 100,
+            }
+        )
+        chunker = Chunker(cfg, _LLM())
+        # 每句 > _merge_short threshold(10)，避免被合并
+        text = (
+            "这是第一句足够长的话呀。这是第二句足够长的话呀！这是第三句足够长的话呀？"
+        )
+        result = chunker.split(text)
+        self.assertEqual(len(result), 3)
+        self.assertTrue(result[0].endswith("。"))
+        self.assertTrue(result[1].endswith("！"))
+        self.assertTrue(result[2].endswith("？"))
+
+    def test_long_paragraph_still_split_by_sentence(self) -> None:
+        """超长段落即使有双空行仍按句末标点切分。"""
+        cfg = build_plugin_config(
+            {
+                "chunking_min_length": 10,
+                "chunking_preserve_paragraphs": True,
+                "chunking_long_paragraph_threshold": 20,
+            }
+        )
+        chunker = Chunker(cfg, _LLM())
+        long_para = (
+            "这是第一句足够长的话呀。这是第二句足够长的话呀。这是第三句足够长的话呀。"
+        )
+        text = long_para + "\n\n这是短段但足够长的话。"
+        result = chunker.split(text)
+        # 长段被切分，段数 > 1
+        self.assertGreater(len(result), 1)
+        # 短段保留（>10 字符不会被 _merge_short 合并）
+        self.assertTrue(any("短段" in seg for seg in result))
+
 
 class ConfigTests(unittest.TestCase):
     def test_experimental_thinking_merge_defaults_off(self) -> None:

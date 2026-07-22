@@ -37,12 +37,14 @@ from .core.prompts import (
 )
 from .core.silence_judge import SilenceJudge
 
+__version__ = "0.3.0"
+
 
 @register(
     "astrbot_plugin_conversation_flow",
     "Justice-ocr",
     "对话流控制：沉默判断、智能分段、插话中断",
-    "0.2.3",
+    __version__,
 )
 class ConversationalFlowPlugin(Star):
     """对话流控制主插件类。"""
@@ -101,9 +103,10 @@ class ConversationalFlowPlugin(Star):
         }
 
         self.logger.info(
-            "[conv-flow] plugin loaded: version=0.2.0, silence=%s/%s, "
+            "[conv-flow] plugin loaded: version=%s, silence=%s/%s, "
             "chunking=%s, image_intent=%s, interrupt=%s/%s(scope=%s,window=%sms), "
             "group_context=%s, intercept=%s",
+            __version__,
             self.config.silence_enabled,
             self.config.silence_strategy,
             self.config.chunking_enabled,
@@ -342,6 +345,7 @@ class ConversationalFlowPlugin(Star):
         # 2) 获取结果文本
         result = self._get_result(event)
         if result is None:
+            self.tracker.finish_response(event)
             return
 
         # 仅对 LLM 生成的纯文本结果做处理
@@ -354,14 +358,17 @@ class ConversationalFlowPlugin(Star):
         except Exception:
             is_llm = False
         if not is_llm:
+            self.tracker.finish_response(event)
             return
 
         text = ""
         try:
             text = result.get_plain_text() or ""
         except Exception:
+            self.tracker.finish_response(event)
             return
         if not text or not text.strip():
+            self.tracker.finish_response(event)
             return
 
         # 3) 沉默标记二次校验（silence_judge 注入模式 或 拦截命中时都需检测）
@@ -494,7 +501,8 @@ class ConversationalFlowPlugin(Star):
         sender_id = self.tracker._get_sender_id(event)
         sender_name = self._get_sender_name(event)
         text = (event.get_message_str() or "").strip()
-        if text:
+        # 过滤命令消息，避免污染群聊上下文
+        if text and not text.startswith("/"):
             self.group_context.record(group_id, sender_id, sender_name, text)
 
     # ------------------------------------------------------------------
@@ -639,7 +647,7 @@ class ConversationalFlowPlugin(Star):
         """插件卸载时清理资源。"""
         try:
             # 释放所有 pending 状态
-            self.tracker._states.clear()
+            self.tracker.clear()
         except Exception:
             pass
         self.logger.info("[conv-flow] plugin terminated")
@@ -822,22 +830,24 @@ class ConversationalFlowPlugin(Star):
                     from astrbot.core.agent.message import TextPart
 
                     parts.append(TextPart(text=instruction))
+                    injected = True
                 except Exception:
                     parts.append({"type": "text", "text": instruction})
-                injected = True
+                    injected = True
         except Exception as exc:
             self.logger.debug(
                 "[conv-flow] image intent inject via parts failed: %s", exc
             )
 
-        try:
-            current = getattr(req, "system_prompt", None) or ""
-            req.system_prompt = current + "\n\n" + instruction
-            injected = True
-        except Exception as exc:
-            self.logger.debug(
-                "[conv-flow] image intent inject via system_prompt failed: %s", exc
-            )
+        if not injected:
+            try:
+                current = getattr(req, "system_prompt", None) or ""
+                req.system_prompt = current + "\n\n" + instruction
+                injected = True
+            except Exception as exc:
+                self.logger.debug(
+                    "[conv-flow] image intent inject via system_prompt failed: %s", exc
+                )
 
         if not injected:
             self.logger.warning(
@@ -1064,6 +1074,11 @@ class ConversationalFlowPlugin(Star):
                 return int(value)
             if isinstance(default, float):
                 return float(value)
+            if isinstance(default, list):
+                # list 配置项：按换行/逗号分隔
+                import re as _re
+
+                return [s.strip() for s in _re.split(r"[\n,]", value) if s.strip()]
             return str(value)
         except (TypeError, ValueError):
             return None

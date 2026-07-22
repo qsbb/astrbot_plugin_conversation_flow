@@ -69,7 +69,7 @@ class ConversationTracker:
         return state
 
     def cleanup_stale(self) -> int:
-        """清理超时会话状态，返回清理数量。"""
+        """清理过期会话状态，返回清理数量。"""
         now = time.time()
         stale = [
             umo
@@ -79,6 +79,10 @@ class ConversationTracker:
         for umo in stale:
             self._states.pop(umo, None)
         return len(stale)
+
+    def clear(self) -> None:
+        """清空所有会话状态（插件卸载/重载时调用）。"""
+        self._states.clear()
 
     def begin_request(
         self,
