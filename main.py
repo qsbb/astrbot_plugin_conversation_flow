@@ -42,7 +42,7 @@ from .core.silence_judge import SilenceJudge
     "astrbot_plugin_conversation_flow",
     "Justice-ocr",
     "对话流控制：沉默判断、智能分段、插话中断",
-    "0.2.2",
+    "0.2.3",
 )
 class ConversationalFlowPlugin(Star):
     """对话流控制主插件类。"""
@@ -199,7 +199,9 @@ class ConversationalFlowPlugin(Star):
         )
 
     @filter.on_llm_request()
-    async def on_llm_request(self, event: AstrMessageEvent, req: Any) -> None:
+    async def on_llm_request(
+        self, event: AstrMessageEvent, req: Any, *args: Any, **kwargs: Any
+    ) -> None:
         """LLM 请求前：注册会话状态、做沉默判断、注入插话合并上下文。"""
         self._stats["total_requests"] += 1
         umo = self.tracker._get_umo(event)
@@ -284,7 +286,9 @@ class ConversationalFlowPlugin(Star):
     # ------------------------------------------------------------------
 
     @filter.on_llm_response()
-    async def on_llm_response(self, event: AstrMessageEvent, response: Any) -> None:
+    async def on_llm_response(
+        self, event: AstrMessageEvent, response: Any, *args: Any, **kwargs: Any
+    ) -> None:
         """LLM 响应后：检查是否被插话取代、检查沉默标记。"""
         seq = event.get_extra(ConversationTracker.SEQ_EXTRA_KEY)
         self.tracker.mark_response_started(event)
