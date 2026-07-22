@@ -42,7 +42,7 @@ from .core.silence_judge import SilenceJudge
     "astrbot_plugin_conversation_flow",
     "Justice-ocr",
     "对话流控制：沉默判断、智能分段、插话中断",
-    "0.2.1",
+    "0.2.2",
 )
 class ConversationalFlowPlugin(Star):
     """对话流控制主插件类。"""
@@ -180,7 +180,9 @@ class ConversationalFlowPlugin(Star):
     # ------------------------------------------------------------------
 
     @filter.on_waiting_llm_request()
-    async def on_waiting_llm_request(self, event: AstrMessageEvent) -> None:
+    async def on_waiting_llm_request(
+        self, event: AstrMessageEvent, *args: Any, **kwargs: Any
+    ) -> None:
         """会话锁外登记请求，使后续消息能及时使旧请求失效。"""
         is_wake = self._is_wake(event)
         seq = self.tracker.begin_request(
@@ -316,7 +318,9 @@ class ConversationalFlowPlugin(Star):
     # ------------------------------------------------------------------
 
     @filter.on_decorating_result()
-    async def on_decorating_result(self, event: AstrMessageEvent) -> None:
+    async def on_decorating_result(
+        self, event: AstrMessageEvent, *args: Any, **kwargs: Any
+    ) -> None:
         """结果装饰阶段：二次检查 + 智能分段发送。"""
         seq = event.get_extra(ConversationTracker.SEQ_EXTRA_KEY)
 
@@ -474,7 +478,9 @@ class ConversationalFlowPlugin(Star):
     # ------------------------------------------------------------------
 
     @filter.event_message_type(filter.EventMessageType.GROUP_MESSAGE, priority=1000)
-    async def on_group_message(self, event: AstrMessageEvent) -> None:
+    async def on_group_message(
+        self, event: AstrMessageEvent, *args: Any, **kwargs: Any
+    ) -> None:
         """记录群聊消息到上下文缓冲，供被唤醒时注入。"""
         if not self.config.group_context_enabled:
             return
