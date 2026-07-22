@@ -55,6 +55,7 @@ from astrbot_plugin_conversation_flow.core.prompts import (  # noqa: E402
     GROUP_CONTEXT_INSTRUCTION_TEMPLATE,
     IMAGE_INTENT_INSTRUCTION,
     INTERCEPT_INJECT_INSTRUCTION,
+    CHUNKING_INSTRUCTION,
 )
 from astrbot_plugin_conversation_flow.core.image_intent import (  # noqa: E402
     detect_images,
@@ -177,6 +178,23 @@ class ChunkerTests(unittest.TestCase):
         self.assertGreater(len(result), 1)
         # 短段保留（>10 字符不会被 _merge_short 合并）
         self.assertTrue(any("短段" in seg for seg in result))
+
+
+class ChunkingPromptTests(unittest.TestCase):
+    def test_chunking_instruction_mentions_double_newline(self) -> None:
+        """分段引导指令应明确提到双空行分段。"""
+        self.assertIn("空行", CHUNKING_INSTRUCTION)
+        self.assertIn("\\n\\n", CHUNKING_INSTRUCTION)
+        self.assertIn("分段", CHUNKING_INSTRUCTION)
+
+    def test_chunking_instruction_instructs_no_numbering(self) -> None:
+        """分段引导应禁止人为编号。"""
+        self.assertIn("编号", CHUNKING_INSTRUCTION)
+
+    def test_long_paragraph_threshold_default_is_20(self) -> None:
+        """默认阈值应为 20（保底策略）。"""
+        cfg = build_plugin_config({})
+        self.assertEqual(cfg.chunking_long_paragraph_threshold, 20)
 
 
 class ConfigTests(unittest.TestCase):

@@ -34,10 +34,11 @@ from .core.prompts import (
     INTERRUPT_MERGE_REWRITE_USER_TEMPLATE,
     INTERRUPT_THINKING_HISTORY_TEMPLATE,
     PLAIN_TEXT_INSTRUCTION,
+    CHUNKING_INSTRUCTION,
 )
 from .core.silence_judge import SilenceJudge
 
-__version__ = "0.3.0"
+__version__ = "0.3.1"
 
 
 @register(
@@ -283,6 +284,10 @@ class ConversationalFlowPlugin(Star):
         # 纯文本模式：注入纯文本回复指令
         if self.config.plain_text_mode:
             self._inject_plain_text_instruction(req)
+
+        # 智能分段：注入分段引导，让 LLM 主动用双空行分段（正则切分作为保底）
+        if self.config.chunking_enabled:
+            self._inject_chunking_instruction(req)
 
     # ------------------------------------------------------------------
     # 主钩子：on_llm_response
@@ -761,26 +766,34 @@ class ConversationalFlowPlugin(Star):
 
     def _inject_plain_text_instruction(self, req: Any) -> None:
         """注入纯文本回复指令到 req.extra_user_content_parts。"""
+        self._inject_instruction(req, PLAIN_TEXT_INSTRUCTION, "plain text")
+
+    def _inject_chunking_instruction(self, req: Any) -> None:
+        """注入分段引导指令到 req.extra_user_content_parts。"""
+        self._inject_instruction(req, CHUNKING_INSTRUCTION, "chunking")
+
+    def _inject_instruction(self, req: Any, instruction: str, label: str) -> None:
+        """通用指令注入：优先 extra_user_content_parts，降级到 system_prompt。"""
         try:
             parts = getattr(req, "extra_user_content_parts", None)
             if parts is not None:
                 try:
                     from astrbot.core.agent.message import TextPart
 
-                    parts.append(TextPart(text=PLAIN_TEXT_INSTRUCTION))
+                    parts.append(TextPart(text=instruction))
                     return
                 except Exception:
-                    parts.append({"type": "text", "text": PLAIN_TEXT_INSTRUCTION})
+                    parts.append({"type": "text", "text": instruction})
                     return
         except Exception as exc:
-            self.logger.debug("[conv-flow] plain text inject via parts failed: %s", exc)
+            self.logger.debug("[conv-flow] %s inject via parts failed: %s", label, exc)
         # 降级到 system_prompt
         try:
             current = getattr(req, "system_prompt", None) or ""
-            req.system_prompt = current + "\n\n" + PLAIN_TEXT_INSTRUCTION
+            req.system_prompt = current + "\n\n" + instruction
         except Exception as exc:
             self.logger.warning(
-                "[conv-flow] plain text inject via system_prompt failed: %s", exc
+                "[conv-flow] %s inject via system_prompt failed: %s", label, exc
             )
 
     def _inject_image_intent_instruction(

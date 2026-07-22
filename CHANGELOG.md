@@ -1,5 +1,20 @@
 # Changelog
 
+## v0.3.1 - 2026-07-22
+
+### Added
+
+- **智能分段提示词注入**：新增 `CHUNKING_INSTRUCTION`，`chunking_enabled=true` 时在 `on_llm_request` 注入，引导 LLM 主动用双空行（`\n\n`）分段。正则切分作为保底，LLM 主动分段时每段保留不切。
+- 新增 `_inject_instruction` 通用注入方法，`_inject_plain_text_instruction` 和 `_inject_chunking_instruction` 复用。
+
+### Changed
+
+- **`chunking_long_paragraph_threshold` 默认值 240 → 20**：作为 LLM 主动分段未生效时的保底策略，短段落也会被句末标点切分。下限从 80 降到 10。
+
+### Tests
+
+- 新增 3 项测试：`CHUNKING_INSTRUCTION` 内容校验、阈值默认值校验。共 73 项测试全部通过。
+
 ## v0.3.0 - 2026-07-22
 
 ### Added

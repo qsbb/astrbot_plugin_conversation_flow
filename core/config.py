@@ -24,7 +24,7 @@ DEFAULTS: dict[str, Any] = {
     "chunking_delay_max_ms": 4000,
     "chunking_protect_code_block": True,
     "chunking_preserve_paragraphs": True,
-    "chunking_long_paragraph_threshold": 240,
+    "chunking_long_paragraph_threshold": 20,
     "chunking_llm_assist": False,
     "plain_text_mode": True,
     "image_intent_mode": True,
@@ -157,7 +157,7 @@ def normalize_config(raw: dict[str, Any] | None) -> dict[str, Any]:
         DEFAULTS["chunking_preserve_paragraphs"],
     )
     out["chunking_long_paragraph_threshold"] = max(
-        80,
+        10,
         _coerce_int(
             raw.get("chunking_long_paragraph_threshold"),
             DEFAULTS["chunking_long_paragraph_threshold"],
@@ -260,7 +260,7 @@ class PluginConfig:
     chunking_delay_max_ms: int = 4000
     chunking_protect_code_block: bool = True
     chunking_preserve_paragraphs: bool = True
-    chunking_long_paragraph_threshold: int = 240
+    chunking_long_paragraph_threshold: int = 20
     chunking_llm_assist: bool = False
     plain_text_mode: bool = True
     image_intent_mode: bool = True

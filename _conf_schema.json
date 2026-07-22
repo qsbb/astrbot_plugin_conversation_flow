@@ -97,8 +97,8 @@
   "chunking_long_paragraph_threshold": {
     "type": "int",
     "description": "需要进一步拆分的段落长度",
-    "hint": "仅超过此长度的自然段才按句末标点继续拆分。",
-    "default": 240
+    "hint": "仅超过此长度的自然段才按句末标点继续拆分。默认 20，作为 LLM 主动分段（双空行）未生效时的保底策略。",
+    "default": 20
   },
   "chunking_llm_assist": {
     "type": "bool",
