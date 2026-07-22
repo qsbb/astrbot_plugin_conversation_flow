@@ -38,7 +38,7 @@ from .core.prompts import (
 )
 from .core.silence_judge import SilenceJudge
 
-__version__ = "0.3.1"
+__version__ = "0.3.2"
 
 
 @register(

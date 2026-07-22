@@ -1,201 +1,207 @@
 {
   "silence_enabled": {
     "type": "bool",
-    "description": "启用沉默/拒绝回应判断",
-    "hint": "开启后会在 LLM 请求前注入判断指令，由模型自主决定是否沉默。",
+    "description": "[沉默判断] 启用沉默/拒绝回应判断",
+    "hint": "开启后会在 LLM 请求前注入判断指令，由模型自主决定是否沉默。对'好的''嗯''hhhh'等无意义消息或骚扰攻击保持沉默。",
     "default": true
   },
   "silence_strategy": {
     "type": "string",
-    "description": "沉默判断策略",
+    "description": "[沉默判断] 判断策略",
     "options": ["inject", "prejudge", "both"],
     "hint": "inject=指令注入（省一次 LLM 调用，推荐）；prejudge=独立预判断（更可控但慢）；both=二者结合。",
     "default": "inject"
   },
   "silence_marker": {
     "type": "string",
-    "description": "沉默标记",
-    "hint": "LLM 在判断应沉默时输出此标记，插件检测到后清空回复。默认 <SILENCE/>。",
+    "description": "[沉默判断] 沉默标记",
+    "hint": "LLM 判断应沉默时输出此标记，插件检测到后清空回复。默认 <SILENCE/>。",
     "default": "<SILENCE/>"
   },
   "silence_notify_text": {
     "type": "string",
-    "description": "沉默时发送的提示文本",
+    "description": "[沉默判断] 沉默时发送的提示文本",
     "hint": "留空则完全静默；填写则会发送此文本作为暗示（如'…'）。仅在 silence_strategy=inject 时生效。",
     "default": ""
   },
   "silence_prejudge_provider_id": {
     "type": "string",
     "_special": "select_provider",
-    "description": "预判断专用 LLM Provider（留空用当前对话模型）",
-    "hint": "仅在 silence_strategy=prejudge 或 both 时使用。建议选一个快且便宜的模型。",
+    "description": "[沉默判断] 预判断专用 LLM Provider",
+    "hint": "仅在 silence_strategy=prejudge 或 both 时使用。留空用当前对话模型，建议选一个快且便宜的模型。",
     "default": ""
   },
   "silence_prejudge_max_chars": {
     "type": "int",
-    "description": "预判断输入文本最大字符数",
+    "description": "[沉默判断] 预判断输入文本最大字符数",
     "hint": "超过此长度的用户消息不参与预判断（认为长文本通常需要正常回复）。",
     "default": 200
   },
+  "plain_text_mode": {
+    "type": "bool",
+    "description": "[回复格式] 纯文本回复模式",
+    "hint": "开启后向 LLM 注入指令要求用纯文本聊天（不用 Markdown 格式），并在分段发送前剥离残留的 **加粗**、# 标题、- 列表等标记。代码块内容不受影响。推荐开启。",
+    "default": true
+  },
+  "image_intent_mode": {
+    "type": "bool",
+    "description": "[图片处理] 图片意图判断",
+    "hint": "开启后检测到用户发送图片时，按对话作用判断为话题收口型、社交互动型、观点态度型或信息内容型。卖萌/撒娇/求关注会简短互动，只有明确结束话题才沉默。依赖 AstrBot 原生图片识别，不接管图片识别本身。",
+    "default": true
+  },
   "chunking_enabled": {
     "type": "bool",
-    "description": "启用智能分段回复",
+    "description": "[智能分段] 启用智能分段回复",
+    "hint": "开启后会向 LLM 注入分段引导指令，让模型主动用双空行分段；并在结果装饰阶段按双空行优先 + 句末标点保底切分。",
     "default": true
   },
   "chunking_min_length": {
     "type": "int",
-    "description": "触发分段的最小回复长度（字符数）",
-    "hint": "短于此长度的回复保持单条发送。",
+    "description": "[智能分段] 触发分段的最小回复长度",
+    "hint": "短于此长度（字符数）的回复保持单条发送。默认 60。",
     "default": 60
   },
   "chunking_max_segments": {
     "type": "int",
-    "description": "单次回复最大分段数",
-    "hint": "超过此数量时会合并末尾的多段为一段，避免刷屏。",
+    "description": "[智能分段] 单次回复最大分段数",
+    "hint": "超过此数量时会合并末尾的多段为一段，避免刷屏。默认 5。",
     "default": 5
+  },
+  "chunking_preserve_paragraphs": {
+    "type": "bool",
+    "description": "[智能分段] 优先保持已有段落",
+    "hint": "短于长段落阈值的自然段视为完整段落，不再按句子拆开。",
+    "default": true
+  },
+  "chunking_long_paragraph_threshold": {
+    "type": "int",
+    "description": "[智能分段] 需要进一步拆分的段落长度",
+    "hint": "仅超过此长度的自然段才按句末标点继续拆分。默认 20，作为 LLM 主动分段（双空行）未生效时的保底策略。",
+    "default": 20
+  },
+  "chunking_protect_code_block": {
+    "type": "bool",
+    "description": "[智能分段] 保护代码块不被切分",
+    "hint": "开启后包含 ``` 代码块的回复会标记代码块为不可切分单元。",
+    "default": true
+  },
+  "chunking_llm_assist": {
+    "type": "bool",
+    "description": "[智能分段] 对长文本启用 LLM 辅助切分",
+    "hint": "仅当启发式切分得到超过 max_segments 段时启用，调用一次轻量 LLM 重新规划。会额外消耗 token。",
+    "default": false
   },
   "chunking_delay_mode": {
     "type": "string",
-    "description": "分段延迟模式",
+    "description": "[分段延迟] 延迟模式",
     "options": ["fixed", "per_char"],
     "hint": "fixed=每段固定延迟；per_char=按下一段有效字数乘以每字延迟，并受最小/最大值限制。推荐 per_char。",
     "default": "per_char"
   },
   "chunking_segment_interval_ms": {
     "type": "int",
-    "description": "固定分段延迟（毫秒）",
+    "description": "[分段延迟] 固定分段延迟（毫秒）",
     "hint": "仅在 fixed 模式生效。默认 800ms。设为 0 则无间隔立即发送。",
     "default": 800
   },
   "chunking_delay_per_char_ms": {
     "type": "int",
-    "description": "按字数延迟系数（毫秒/字）",
+    "description": "[分段延迟] 按字数延迟系数（毫秒/字）",
     "hint": "仅在 per_char 模式生效。推荐 35ms/字。",
     "default": 35
   },
   "chunking_delay_min_ms": {
     "type": "int",
-    "description": "按字数模式最小延迟（毫秒）",
+    "description": "[分段延迟] 按字数模式最小延迟（毫秒）",
+    "hint": "per_char 模式下每段延迟的下限。默认 500ms。",
     "default": 500
   },
   "chunking_delay_max_ms": {
     "type": "int",
-    "description": "按字数模式最大延迟（毫秒）",
+    "description": "[分段延迟] 按字数模式最大延迟（毫秒）",
+    "hint": "per_char 模式下每段延迟的上限。默认 4000ms。",
     "default": 4000
-  },
-  "chunking_protect_code_block": {
-    "type": "bool",
-    "description": "保护代码块不被切分",
-    "default": true
-  },
-  "chunking_preserve_paragraphs": {
-    "type": "bool",
-    "description": "优先保持已有段落",
-    "hint": "短于长段落阈值的自然段视为完整段落，不再按句子拆开。",
-    "default": true
-  },
-  "chunking_long_paragraph_threshold": {
-    "type": "int",
-    "description": "需要进一步拆分的段落长度",
-    "hint": "仅超过此长度的自然段才按句末标点继续拆分。默认 20，作为 LLM 主动分段（双空行）未生效时的保底策略。",
-    "default": 20
-  },
-  "chunking_llm_assist": {
-    "type": "bool",
-    "description": "对长文本启用 LLM 辅助切分",
-    "hint": "仅当启发式切分得到超过 max_segments 段时启用，调用一次轻量 LLM 重新规划。会额外消耗 token。",
-    "default": false
-  },
-  "plain_text_mode": {
-    "type": "bool",
-    "description": "纯文本回复模式",
-    "hint": "开启后向 LLM 注入指令要求用纯文本聊天（不用 Markdown 格式），并在分段发送前剥离残留的 **加粗**、# 标题、- 列表等标记。代码块内容不受影响。推荐开启。",
-    "default": true
-  },
-  "image_intent_mode": {
-    "type": "bool",
-    "description": "图片意图判断",
-    "hint": "开启后检测到用户发送图片时，按对话作用判断为话题收口型、社交互动型、观点态度型或信息内容型。卖萌/撒娇/求关注会简短互动，只有明确结束话题才沉默。依赖 AstrBot 原生图片识别，不接管图片识别本身。",
-    "default": true
   },
   "interrupt_enabled": {
     "type": "bool",
-    "description": "启用插话中断处理",
+    "description": "[插话中断] 启用插话中断处理",
+    "hint": "开启后，bot 还在思考时用户追加消息，旧回复会被抑制或合并到新请求。",
     "default": true
-  },
-  "experimental_thinking_merge_enabled": {
-    "type": "bool",
-    "description": "实验性：打断思考并合并到下一轮",
-    "hint": "实验性功能。开启后，用户在上一轮仍在思考且尚未输出时，会抑制旧结果、读取下一轮请求已有的公开历史并合并未回复消息重新生成。当前无法取消 Provider 端推理，频繁插话会让旧请求和新请求重复思考，可能消耗大量 Token；直至 AstrBot 提供真正的打断思考接口。",
-    "default": false
-  },
-  "interrupt_merge_strategy": {
-    "type": "string",
-    "description": "插话合并策略",
-    "options": ["append", "rewrite", "discard_old"],
-    "hint": "append=把旧消息作为追加上下文注入；rewrite=让 LLM 重写为新语境；discard_old=直接丢弃旧响应不合并。",
-    "default": "append"
-  },
-  "interrupt_window_ms": {
-    "type": "int",
-    "description": "插话检测时间窗口（毫秒）",
-    "hint": "仅当上一条消息在此时间窗口内且尚未完成回复时，新消息才算插话并中断旧回复。超过此时间的旧请求视为已完成，不会被打断。",
-    "default": 30000
-  },
-  "interrupt_state_ttl_ms": {
-    "type": "int",
-    "description": "会话状态保留时长（毫秒）",
-    "hint": "超过此时长未活动的会话状态会被清理，避免内存泄漏。",
-    "default": 600000
   },
   "interrupt_scope": {
     "type": "string",
-    "description": "群聊中断作用域",
+    "description": "[插话中断] 群聊中断作用域",
     "options": ["room", "sender", "mention_or_sender"],
     "hint": "room=房间内任何新消息可中断旧回复；sender=仅同一发送者的新消息可中断（推荐）；mention_or_sender=同一发送者或明确@/回复bot时中断。",
     "default": "sender"
   },
+  "interrupt_window_ms": {
+    "type": "int",
+    "description": "[插话中断] 插话检测时间窗口（毫秒）",
+    "hint": "仅当上一条消息在此时间窗口内且尚未完成回复时，新消息才算插话并中断旧回复。超过此时间的旧请求视为已完成，不会被打断。默认 30000ms。",
+    "default": 30000
+  },
+  "interrupt_state_ttl_ms": {
+    "type": "int",
+    "description": "[插话中断] 会话状态保留时长（毫秒）",
+    "hint": "超过此时长未活动的会话状态会被清理，避免内存泄漏。默认 600000ms（10分钟）。",
+    "default": 600000
+  },
+  "interrupt_merge_strategy": {
+    "type": "string",
+    "description": "[插话中断] 插话合并策略",
+    "options": ["append", "rewrite", "discard_old"],
+    "hint": "append=把旧消息作为追加上下文注入（推荐）；rewrite=让 LLM 重写为新语境；discard_old=直接丢弃旧响应不合并。",
+    "default": "append"
+  },
+  "experimental_thinking_merge_enabled": {
+    "type": "bool",
+    "description": "[插话中断] 实验性：打断思考并合并到下一轮",
+    "hint": "实验性功能，默认关闭。开启后，用户在上一轮仍在思考且尚未输出时，会抑制旧结果、读取下一轮请求已有的公开历史并合并未回复消息重新生成。当前无法取消 Provider 端推理，频繁插话会让旧请求和新请求重复思考，可能消耗大量 Token；直至 AstrBot 提供真正的打断思考接口。",
+    "default": false
+  },
   "group_context_enabled": {
     "type": "bool",
-    "description": "群聊被唤醒时注入最近群聊上下文",
-    "hint": "开启后，bot在群聊中被@或被回复时，会获取最近若干条群聊消息作为上下文注入到LLM请求，帮助bot理解群聊氛围。",
+    "description": "[群聊上下文] 启用群聊上下文注入",
+    "hint": "开启后，bot 在群聊中被@或被回复时，会获取最近若干条群聊消息作为上下文注入到 LLM 请求，帮助 bot 理解群聊氛围。",
     "default": true
   },
   "group_context_max_messages": {
     "type": "int",
-    "description": "群聊上下文最大消息条数",
-    "hint": "被唤醒时获取的最近群聊消息条数上限。推荐10-20条。",
+    "description": "[群聊上下文] 群聊上下文最大消息条数",
+    "hint": "被唤醒时获取的最近群聊消息条数上限。推荐 10-20 条。",
     "default": 10
   },
   "group_context_only_when_woken": {
     "type": "bool",
-    "description": "仅在被唤醒时注入群聊上下文",
-    "hint": "开启后只在bot被@或被回复时才注入群聊上下文；关闭则每次群聊消息都注入（消耗更多Token）。",
+    "description": "[群聊上下文] 仅在被唤醒时注入",
+    "hint": "开启后只在 bot 被@或被回复时才注入群聊上下文；关闭则每次群聊消息都注入（消耗更多 Token）。",
     "default": true
   },
   "intercept_enabled": {
     "type": "bool",
-    "description": "启用智能拦截（实验性）",
+    "description": "[智能拦截] 启用智能拦截（实验性）",
     "hint": "开启后向主 LLM 注入拦截指令，让模型在主对话思维链中一并判断用户输入是否为不良内容（色情/暴力/辱骂/违法/越狱等），命中则礼貌拒绝或输出 silence_marker 静默。不做独立 LLM 预判断，不增加额外调用。白名单会话完全跳过。",
     "default": false
   },
   "intercept_whitelist": {
     "type": "list",
-    "description": "拦截白名单会话（unified_msg_origin）",
+    "description": "[智能拦截] 拦截白名单会话",
     "hint": "白名单中的会话完全跳过拦截注入。格式如 'aiocqhttp:FriendMessage:123456'，每行一个。信任的私聊或指定群可以加入白名单。",
     "default": []
   },
   "llm_provider_id": {
     "type": "string",
     "_special": "select_provider",
-    "description": "插件专用 LLM Provider（留空用当前对话模型）",
-    "hint": "用于预判断、LLM 辅助切分等插件内部 LLM 调用。留空则按 4 层 fallback 解析。",
+    "description": "[通用] 插件专用 LLM Provider",
+    "hint": "用于预判断、LLM 辅助切分等插件内部 LLM 调用。留空则按 4 层 fallback 解析（当前对话模型 → 全局默认）。",
     "default": ""
   },
   "log_level": {
     "type": "string",
-    "description": "插件日志级别",
+    "description": "[通用] 插件日志级别",
     "options": ["DEBUG", "INFO", "WARNING", "ERROR"],
+    "hint": "DEBUG 会输出详细的状态流转日志，方便排查问题。生产环境建议 INFO。",
     "default": "INFO"
   }
 }
