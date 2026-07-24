@@ -27,6 +27,7 @@ from .core.llm_service import LLMService
 from .core.plain_text import strip_markdown_format
 from .core.prompts import (
     GROUP_CONTEXT_INSTRUCTION_TEMPLATE,
+    TOPIC_CONTEXT_INSTRUCTION_TEMPLATE,
     IMAGE_INTENT_INSTRUCTION,
     INTERRUPT_MERGE_APPEND_TEMPLATE,
     INTERRUPT_MERGE_DISCARD_HINT,
@@ -55,6 +56,8 @@ class ConversationalFlowPlugin(Star):
     SENT_CHUNKS_KEY = "conv_flow_sent_chunks"
     # event extra 上用于标记"本请求被拦截命中（polite_reject 模式）"的 key
     INTERCEPTED_KEY = "conv_flow_intercepted"
+    # event extra 上用于标记"群聊上下文本轮已注入"的 key
+    GROUP_CONTEXT_INJECTED_KEY = "conv_flow_group_context_injected"
 
     def __init__(self, context: Context, config: Any = None) -> None:
         super().__init__(context)
@@ -242,6 +245,8 @@ class ConversationalFlowPlugin(Star):
 
         # 群聊上下文注入：被唤醒时获取最近群聊消息作为背景
         self._inject_group_context(event, req, seq, is_wake)
+        # 话题上下文注入：帮助 LLM 理解当前话题（群聊上下文已注入时自动跳过）
+        self._inject_topic_context(event, req, seq)
 
         if not user_text:
             return
@@ -545,6 +550,8 @@ class ConversationalFlowPlugin(Star):
             f"- 群聊上下文: {'on' if self.config.group_context_enabled else 'off'} "
             f"(max={self.config.group_context_max_messages}, "
             f"woken_only={self.config.group_context_only_when_woken})\n"
+            f"- 话题上下文: {'on' if self.config.topic_context_enabled else 'off'} "
+            f"(max={self.config.topic_context_max_messages})\n"
             f"- 智能拦截: {'on' if self.config.intercept_enabled else 'off'}\n"
             f"- 活跃会话: {active_sessions} (清理过期 {stale_cleaned}, 群缓冲 {group_stale})\n"
             "统计:\n"
@@ -981,12 +988,42 @@ class ConversationalFlowPlugin(Star):
                     exc,
                 )
         if injected:
+            self._set_extra(event, self.GROUP_CONTEXT_INJECTED_KEY, True)
             self.logger.info(
                 "[conv-flow] seq=%s group context injected (group=%s, is_wake=%s)",
                 seq,
                 group_id,
                 is_wake,
             )
+
+    def _inject_topic_context(
+        self, event: AstrMessageEvent, req: Any, seq: Any
+    ) -> None:
+        """注入最近消息作为话题上下文，帮助 LLM 理解当前话题。
+
+        与群聊上下文独立：若群聊上下文本轮已注入则跳过，避免重复。
+        """
+        if not self.config.topic_context_enabled:
+            return
+        # 群聊上下文本轮已注入则跳过，避免重复注入相同数据
+        if self._get_extra(event, self.GROUP_CONTEXT_INJECTED_KEY):
+            return
+        group_id = self._get_group_id(event)
+        if not group_id:
+            return
+        context = self.group_context.get_recent_context(
+            group_id, self.config.topic_context_max_messages
+        )
+        if not context:
+            return
+        instruction = TOPIC_CONTEXT_INSTRUCTION_TEMPLATE.format(context=context)
+        self._inject_instruction(req, instruction, "topic context")
+        self.logger.info(
+            "[conv-flow] seq=%s topic context injected (group=%s, count=%s)",
+            seq,
+            group_id,
+            self.config.topic_context_max_messages,
+        )
 
     def _has_non_text_components(self, event: AstrMessageEvent) -> bool:
         """检查结果链中是否有非 Plain 文本组件（图片、音频等）。"""

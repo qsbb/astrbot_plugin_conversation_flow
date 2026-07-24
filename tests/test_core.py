@@ -53,6 +53,7 @@ from astrbot_plugin_conversation_flow.core.plain_text import (  # noqa: E402
 )
 from astrbot_plugin_conversation_flow.core.prompts import (  # noqa: E402
     GROUP_CONTEXT_INSTRUCTION_TEMPLATE,
+    TOPIC_CONTEXT_INSTRUCTION_TEMPLATE,
     IMAGE_INTENT_INSTRUCTION,
     INTERCEPT_INJECT_INSTRUCTION,
     INTERRUPT_THINKING_HISTORY_WITH_CONTEXT_TEMPLATE,
@@ -222,6 +223,35 @@ class ConfigTests(unittest.TestCase):
     def test_thinking_merge_context_count_clamped_to_zero(self) -> None:
         cfg = build_plugin_config({"interrupt_thinking_merge_context_count": -3})
         self.assertEqual(cfg.interrupt_thinking_merge_context_count, 0)
+
+    def test_topic_context_defaults(self) -> None:
+        cfg = build_plugin_config({})
+        self.assertFalse(cfg.topic_context_enabled)
+        self.assertEqual(cfg.topic_context_max_messages, 10)
+
+    def test_topic_context_can_be_enabled(self) -> None:
+        cfg = build_plugin_config(
+            {"topic_context_enabled": True, "topic_context_max_messages": 20}
+        )
+        self.assertTrue(cfg.topic_context_enabled)
+        self.assertEqual(cfg.topic_context_max_messages, 20)
+
+    def test_topic_context_max_messages_clamped_to_one(self) -> None:
+        cfg = build_plugin_config({"topic_context_max_messages": 0})
+        self.assertEqual(cfg.topic_context_max_messages, 1)
+
+
+class TopicContextPromptTests(unittest.TestCase):
+    def test_template_has_context_placeholder(self) -> None:
+        self.assertIn("{context}", TOPIC_CONTEXT_INSTRUCTION_TEMPLATE)
+
+    def test_template_mentions_topic(self) -> None:
+        self.assertIn("话题", TOPIC_CONTEXT_INSTRUCTION_TEMPLATE)
+
+    def test_template_format_succeeds(self) -> None:
+        result = TOPIC_CONTEXT_INSTRUCTION_TEMPLATE.format(context="- 消息一\n- 消息二")
+        self.assertIn("消息一", result)
+        self.assertIn("消息二", result)
 
 
 class ThinkingMergeContextPromptTests(unittest.TestCase):

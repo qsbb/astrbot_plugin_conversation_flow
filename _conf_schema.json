@@ -184,6 +184,18 @@
     "hint": "开启后只在 bot 被@或被回复时才注入群聊上下文；关闭则每次群聊消息都注入（消耗更多 Token）。",
     "default": true
   },
+  "topic_context_enabled": {
+    "type": "bool",
+    "description": "[话题上下文] 启用话题上下文注入",
+    "hint": "开启后在 LLM 请求时注入最近的消息记录作为话题背景，帮助 LLM 理解当前正在讨论的内容。默认关闭。与群聊上下文独立，若群聊上下文本轮已注入则自动跳过避免重复。",
+    "default": false
+  },
+  "topic_context_max_messages": {
+    "type": "int",
+    "description": "[话题上下文] 话题上下文最大消息条数",
+    "hint": "注入的最近消息条数上限。默认 10 条。仅在 topic_context_enabled=true 时生效。",
+    "default": 10
+  },
   "intercept_enabled": {
     "type": "bool",
     "description": "[智能拦截] 启用智能拦截（实验性）",

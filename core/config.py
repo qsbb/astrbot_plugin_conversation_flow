@@ -38,6 +38,8 @@ DEFAULTS: dict[str, Any] = {
     "group_context_enabled": True,
     "group_context_max_messages": 10,
     "group_context_only_when_woken": True,
+    "topic_context_enabled": False,
+    "topic_context_max_messages": 10,
     "intercept_enabled": False,
     "intercept_whitelist": [],
     "llm_provider_id": "",
@@ -223,6 +225,17 @@ def normalize_config(raw: dict[str, Any] | None) -> dict[str, Any]:
         DEFAULTS["group_context_only_when_woken"],
     )
 
+    out["topic_context_enabled"] = _coerce_bool(
+        raw.get("topic_context_enabled"), DEFAULTS["topic_context_enabled"]
+    )
+    out["topic_context_max_messages"] = max(
+        1,
+        _coerce_int(
+            raw.get("topic_context_max_messages"),
+            DEFAULTS["topic_context_max_messages"],
+        ),
+    )
+
     out["intercept_enabled"] = _coerce_bool(
         raw.get("intercept_enabled"), DEFAULTS["intercept_enabled"]
     )
@@ -282,6 +295,8 @@ class PluginConfig:
     group_context_enabled: bool = True
     group_context_max_messages: int = 10
     group_context_only_when_woken: bool = True
+    topic_context_enabled: bool = False
+    topic_context_max_messages: int = 10
     intercept_enabled: bool = False
     intercept_whitelist: list[str] = field(default_factory=list)
     llm_provider_id: str = ""
