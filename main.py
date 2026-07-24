@@ -44,7 +44,7 @@ __version__ = "0.3.2"
 @register(
     "astrbot_plugin_conversation_flow",
     "Justice-ocr",
-    "对话流控制：沉默判断、智能分段、插话中断",
+    "凝心溯溪-言，沉默判断、智能分段、插话衔接与群聊上下文",
     __version__,
 )
 class ConversationalFlowPlugin(Star):

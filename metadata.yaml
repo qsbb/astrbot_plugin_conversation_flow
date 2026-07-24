@@ -1,6 +1,6 @@
 name: astrbot_plugin_conversation_flow
-display_name: 自然对话流
-short_desc: 让 bot 像真人聊天：该沉默时沉默、长回复自动分段、被插话时自然衔接、群聊被@时理解上下文
+display_name: 凝心溯溪-言
+short_desc: 凝心溯溪系列对话模块：沉默判断、智能分段、插话衔接与群聊上下文
 desc: >
   让 AstrBot 的回复节奏更接近真人聊天。通过提示词注入和结果装饰两阶段控制对话流，不改变 LLM 本身能力。
 
