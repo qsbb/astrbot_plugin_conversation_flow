@@ -160,6 +160,12 @@
     "hint": "实验性功能，默认关闭。开启后，用户在上一轮仍在思考且尚未输出时，会抑制旧结果、读取下一轮请求已有的公开历史并合并未回复消息重新生成。当前无法取消 Provider 端推理，频繁插话会让旧请求和新请求重复思考，可能消耗大量 Token；直至 AstrBot 提供真正的打断思考接口。",
     "default": false
   },
+  "interrupt_thinking_merge_context_count": {
+    "type": "int",
+    "description": "[插话中断] 打断后注入的历史上下文条数",
+    "hint": "实验性思考中断合并触发时，从插件维护的未回复消息中取出最近 N 条作为上下文注入新请求，弥补 LLM 公开对话历史过短导致上下文缺失。默认 5 条；设为 0 则不主动注入（仅依赖 LLM 自带历史）。仅在 experimental_thinking_merge_enabled=true 时生效。",
+    "default": 5
+  },
   "group_context_enabled": {
     "type": "bool",
     "description": "[群聊上下文] 启用群聊上下文注入",

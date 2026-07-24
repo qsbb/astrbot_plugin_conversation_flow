@@ -110,6 +110,7 @@
 |---|---|---|
 | `interrupt_enabled` | `true` | 总开关 |
 | `experimental_thinking_merge_enabled` | `false` | **实验性/高 Token 风险**：旧回复仍在思考且未输出时，抑制旧结果并把未回复消息合并到下一轮重新生成 |
+| `interrupt_thinking_merge_context_count` | `5` | 打断后从插件维护的未回复消息中取最近 N 条作为上下文注入新请求，弥补 LLM 公开对话历史过短。`0` 表示不主动注入（仅依赖 LLM 自带历史）。仅在 `experimental_thinking_merge_enabled=true` 时生效 |
 | `interrupt_merge_strategy` | `append` | `append` / `rewrite` / `discard_old` |
 | `interrupt_window_ms` | `30000` | 插话检测时间窗口（毫秒）。仅当上一条消息在此窗口内且尚未完成回复时，新消息才算插话并中断旧回复；超过此时间的旧请求视为已完成，不会被打断 |
 | `interrupt_state_ttl_ms` | `600000` | 会话状态保留时长，超时自动清理 |

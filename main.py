@@ -33,12 +33,13 @@ from .core.prompts import (
     INTERRUPT_MERGE_REWRITE_SYSTEM,
     INTERRUPT_MERGE_REWRITE_USER_TEMPLATE,
     INTERRUPT_THINKING_HISTORY_TEMPLATE,
+    INTERRUPT_THINKING_HISTORY_WITH_CONTEXT_TEMPLATE,
     PLAIN_TEXT_INSTRUCTION,
     CHUNKING_INSTRUCTION,
 )
 from .core.silence_judge import SilenceJudge
 
-__version__ = "0.3.2"
+__version__ = "0.3.3"
 
 
 @register(
@@ -536,7 +537,8 @@ class ConversationalFlowPlugin(Star):
             f"- 纯文本模式: {'on' if self.config.plain_text_mode else 'off'}\n"
             f"- 图片意图: {'on' if self.config.image_intent_mode else 'off'}\n"
             f"- 思考中断合并(实验性/高Token): "
-            f"{'on' if self.config.experimental_thinking_merge_enabled else 'off'}\n"
+            f"{'on' if self.config.experimental_thinking_merge_enabled else 'off'} "
+            f"(context_count={self.config.interrupt_thinking_merge_context_count})\n"
             f"- 插话中断: {'on' if self.config.interrupt_enabled else 'off'} "
             f"({self.config.interrupt_merge_strategy}, scope={self.config.interrupt_scope}, "
             f"window={self.config.interrupt_window_ms}ms)\n"
@@ -686,40 +688,61 @@ class ConversationalFlowPlugin(Star):
 
         strategy = self.config.interrupt_merge_strategy
         history_contains_old = self._request_context_contains(req, old_texts)
+        context_count = self.config.interrupt_thinking_merge_context_count
+        injection = ""
+        # 实验性思考中断合并：主动注入未回复历史，弥补 LLM 公开历史过短
+        thinking_handled = False
         if (
             previous_state == "thinking"
             and self.config.experimental_thinking_merge_enabled
-            and history_contains_old
         ):
-            injection = INTERRUPT_THINKING_HISTORY_TEMPLATE.format(new_text=new_text)
-        elif strategy == "discard_old":
-            injection = INTERRUPT_MERGE_DISCARD_HINT
-        elif strategy == "rewrite":
-            # 调用 LLM 重写
-            rewritten = await self.llm.chat(
-                prompt=INTERRUPT_MERGE_REWRITE_USER_TEMPLATE.format(
-                    old_text=old_text, new_text=new_text
-                ),
-                system_prompt=INTERRUPT_MERGE_REWRITE_SYSTEM,
-                umo=umo,
-                provider_id=self.config.llm_provider_id,
-            )
-            rewritten = (rewritten or "").strip()
-            if rewritten:
-                # 把重写后的内容作为 prompt 主体替换
-                try:
-                    req.prompt = rewritten
-                except Exception:
-                    pass
-                injection = ""
-            else:
+            if context_count > 0:
+                # 从未回复消息中取最近 N 条作为上下文主动注入
+                recent = [str(t).strip() for t in old_texts if str(t).strip()][
+                    -context_count:
+                ]
+                if recent:
+                    context_text = "\n".join(f"- {t}" for t in recent)
+                    injection = INTERRUPT_THINKING_HISTORY_WITH_CONTEXT_TEMPLATE.format(
+                        context=context_text, new_text=new_text
+                    )
+                    thinking_handled = True
+                # recent 为空时 fall through 到 strategy 分支
+            elif history_contains_old:
+                injection = INTERRUPT_THINKING_HISTORY_TEMPLATE.format(
+                    new_text=new_text
+                )
+                thinking_handled = True
+
+        if not thinking_handled:
+            if strategy == "discard_old":
+                injection = INTERRUPT_MERGE_DISCARD_HINT
+            elif strategy == "rewrite":
+                # 调用 LLM 重写
+                rewritten = await self.llm.chat(
+                    prompt=INTERRUPT_MERGE_REWRITE_USER_TEMPLATE.format(
+                        old_text=old_text, new_text=new_text
+                    ),
+                    system_prompt=INTERRUPT_MERGE_REWRITE_SYSTEM,
+                    umo=umo,
+                    provider_id=self.config.llm_provider_id,
+                )
+                rewritten = (rewritten or "").strip()
+                if rewritten:
+                    # 把重写后的内容作为 prompt 主体替换
+                    try:
+                        req.prompt = rewritten
+                    except Exception:
+                        pass
+                    injection = ""
+                else:
+                    injection = INTERRUPT_MERGE_APPEND_TEMPLATE.format(
+                        old_text=old_text, new_text=new_text
+                    )
+            else:  # append (默认)
                 injection = INTERRUPT_MERGE_APPEND_TEMPLATE.format(
                     old_text=old_text, new_text=new_text
                 )
-        else:  # append (默认)
-            injection = INTERRUPT_MERGE_APPEND_TEMPLATE.format(
-                old_text=old_text, new_text=new_text
-            )
 
         if not injection:
             return

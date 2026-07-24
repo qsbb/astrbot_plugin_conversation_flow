@@ -1,5 +1,22 @@
 # Changelog
 
+## v0.3.3 - 2026-07-24
+
+### Added
+
+- **打断后历史上下文注入**：新增配置项 `interrupt_thinking_merge_context_count`（默认 5）。实验性思考中断合并触发时，从插件维护的未回复消息中取出最近 N 条作为上下文主动注入新请求，弥补 LLM 公开对话历史过短导致上下文缺失。设为 0 则不主动注入（仅依赖 LLM 自带历史）。仅在 `experimental_thinking_merge_enabled=true` 时生效。
+- 新增 prompt 模板 `INTERRUPT_THINKING_HISTORY_WITH_CONTEXT_TEMPLATE`，带 `{context}` 占位符用于注入历史上下文。
+
+### Changed
+
+- `_apply_merge` thinking 分支重构：`context_count > 0` 时优先用带上下文模板主动注入；`context_count == 0` 且公开历史包含旧消息时回退到原模板依赖 LLM 历史；其余情况走 strategy 分支。
+- `/convflow status` 新增 `context_count` 显示。
+- README 配置表新增 `interrupt_thinking_merge_context_count` 说明。
+
+### Tests
+
+- 新增 6 项测试：context_count 默认值/可设置/下限钳制、带上下文模板占位符/内容/格式化。共 79 项测试全部通过，ruff 检查无问题。
+
 ## v0.3.2 - 2026-07-22
 
 ### Changed

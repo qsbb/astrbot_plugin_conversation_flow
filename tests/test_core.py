@@ -55,6 +55,7 @@ from astrbot_plugin_conversation_flow.core.prompts import (  # noqa: E402
     GROUP_CONTEXT_INSTRUCTION_TEMPLATE,
     IMAGE_INTENT_INSTRUCTION,
     INTERCEPT_INJECT_INSTRUCTION,
+    INTERRUPT_THINKING_HISTORY_WITH_CONTEXT_TEMPLATE,
     CHUNKING_INSTRUCTION,
 )
 from astrbot_plugin_conversation_flow.core.image_intent import (  # noqa: E402
@@ -209,6 +210,37 @@ class ConfigTests(unittest.TestCase):
     def test_experimental_thinking_merge_can_be_enabled(self) -> None:
         cfg = build_plugin_config({"experimental_thinking_merge_enabled": True})
         self.assertTrue(cfg.experimental_thinking_merge_enabled)
+
+    def test_thinking_merge_context_count_defaults_to_5(self) -> None:
+        cfg = build_plugin_config({})
+        self.assertEqual(cfg.interrupt_thinking_merge_context_count, 5)
+
+    def test_thinking_merge_context_count_can_be_set(self) -> None:
+        cfg = build_plugin_config({"interrupt_thinking_merge_context_count": 10})
+        self.assertEqual(cfg.interrupt_thinking_merge_context_count, 10)
+
+    def test_thinking_merge_context_count_clamped_to_zero(self) -> None:
+        cfg = build_plugin_config({"interrupt_thinking_merge_context_count": -3})
+        self.assertEqual(cfg.interrupt_thinking_merge_context_count, 0)
+
+
+class ThinkingMergeContextPromptTests(unittest.TestCase):
+    def test_with_context_template_has_context_and_new_text_placeholders(self) -> None:
+        """带上下文模板必须包含 {context} 和 {new_text} 占位符。"""
+        self.assertIn("{context}", INTERRUPT_THINKING_HISTORY_WITH_CONTEXT_TEMPLATE)
+        self.assertIn("{new_text}", INTERRUPT_THINKING_HISTORY_WITH_CONTEXT_TEMPLATE)
+
+    def test_with_context_template_mentions_unreplied_history(self) -> None:
+        """带上下文模板应说明注入的是未获回复的历史消息。"""
+        self.assertIn("未获回复", INTERRUPT_THINKING_HISTORY_WITH_CONTEXT_TEMPLATE)
+
+    def test_with_context_template_format_succeeds(self) -> None:
+        """模板应能被正确格式化。"""
+        result = INTERRUPT_THINKING_HISTORY_WITH_CONTEXT_TEMPLATE.format(
+            context="- 第一句\n- 第二句", new_text="最新消息"
+        )
+        self.assertIn("第一句", result)
+        self.assertIn("最新消息", result)
 
 
 class DelayTests(unittest.TestCase):
