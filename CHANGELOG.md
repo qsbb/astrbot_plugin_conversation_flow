@@ -1,5 +1,35 @@
 # Changelog
 
+## v0.5.0 - 2026-07-26
+
+围绕"群里什么时候该出声"补齐三块能力：读空气限制刷屏与收尾循环、场景感知避免打断别人的对话、自然工具调用去掉机制词汇。三者判定全部基于本地规则，不引入额外 LLM 调用。
+
+### Added
+
+- **群聊场景感知 `core/scene.py`**：新增 `scene_awareness_enabled`（默认 `true`）、`scene_awareness_guard_to_other`（默认 `false`）、`scene_awareness_hint_to_group`（默认 `false`）、`scene_awareness_self_names`（默认 `[]`）、`scene_awareness_recent_speakers`（默认 `8`）。基于消息链的 `at` 段、`reply` 段与最近发言者昵称，判断当前这句话是对 bot 说、对群里另一个人说、还是对整个群说，据此调整回应方式。判定不调用 LLM，零额外 Token。
+- **`message_meta.extract_at_targets`**：新增 `AtTargets` 数据类，提取消息链中所有 @ 目标并识别 @全体成员（含 OneBot 的 `qq="all"` 形式）。
+- **`GroupContextManager.get_recent_speakers`**：返回最近发言者的 `(sender_id, sender_name)` 列表，按最近优先去重，排除 bot 自身发言，支持排除当前发言者与限制人数。
+- **场景 prompt 模板**：新增 `SCENE_TO_OTHER_INSTRUCTION_TEMPLATE`、`SCENE_TARGET_HINT_NAMED`、`SCENE_TARGET_HINT_UNKNOWN`、`SCENE_TO_GROUP_INSTRUCTION`。判定为"在对别人说话"时注入软指令，要求默认不接话、确有需要时最多说一句，并允许输出 `silence_marker` 完全不出声。
+- **群聊读空气 `core/air_guard.py`**：新增 `group_air_guard_enabled`（默认 `true`）、`group_air_guard_window_seconds`（默认 `120`）、`group_air_guard_max_bot_replies`（默认 `6`）、`group_air_guard_polite_loop_limit`（默认 `2`）。用滑动窗口统计 bot 在本群的回复频次与礼貌收尾话术次数，命中上限时静默本轮。两条规则相互独立，阈值填 `0` 即关闭对应规则。判定全部基于本地计数，不调用 LLM；拦截发生在所有 prompt 注入之前，被拦下的这轮完全不消耗 Token。静默时不发提示文本，避免"换个方式刷屏"。
+- **自然工具调用**：新增 `natural_tool_call_enabled`（默认 `true`）与 prompt 模板 `NATURAL_TOOL_CALL_INSTRUCTION`。要求 LLM 用第一人称自然动作描述自身行为，不说出工具名/函数名/接口名/参数名，不复述工具返回的原始内容，失败时也不把权限报错原文念给用户（"我没这个权限呢"→"这个我改不了，得管理员来弄"）。仅约束表达方式，不改变工具是否被调用。
+- **`/convflow air_reset` 指令**：清空当前群的读空气窗口计数，被误拦时可立刻恢复回复。`/convflow status` 新增读空气配置、本群窗口内计数与累计拦截次数。
+
+### Changed
+
+- `/convflow status` 新增场景感知配置显示与 `scene_guarded` / `scene_hinted` 累计计数。
+- 响应阶段的 `silence_marker` 检测扩展到场景感知注入：沉默判断 inject 模式、智能拦截、场景感知任一命中都会检测 marker，避免标记原样发到群里。
+
+### Tests
+
+- 新增 @ 目标提取、场景判定优先级、最近发言者、场景配置项与场景 prompt 模板相关测试。共 188 项测试全部通过，ruff 检查与格式化无问题。
+
+### Notes
+
+- 场景感知的硬拦截默认关闭：判定虽基于强信号，但群里存在"@某人的同时也想让 bot 看看"的用法，硬拦截会让这类消息完全没有回应，比多回一句更让人困惑。默认只注入软指令，由模型自己决定是否出声。
+- 一条消息里既 @ bot 又 @ 别人时算作对 bot 说，避免"该回的没回"。正文昵称匹配属于弱信号（"提到某人"与"对某人说"难以区分），只用于软指令，且忽略少于 2 个字的称呼以防在正常句子里误命中。
+- 读空气的回复次数规则不区分说话方是人还是 bot，因此默认阈值刻意放宽到 120 秒 6 次：机器人互相引用的循环通常在几秒内连发，该阈值足以抓住，而人类正常连续对话很难触碰。调小该值会误伤正常聊天。
+- 收尾话术判定不只看长度：带疑问标记的消息直接放过，其余先剔除命中的客套话与语气词标点，剩余实义字符够多则不算收尾。这样"那就晚安啦～"算收尾，而"这个插件的分段功能怎么配置，谢谢""明天几点集合？晚安"不会被误静默。
+
 ## v0.4.0 - 2026-07-26
 
 围绕"bot 复述自己说过的话"这一现象做上下文工程重构。根因不是模型退化，而是插件此前只记录用户消息、不记录 bot 自己的发言，且用户引用（回复）某条消息时，被引用内容会被平台拼进 `message_str` 当成用户正文，模型因此把自己的旧话当成用户诉求原样念了一遍。

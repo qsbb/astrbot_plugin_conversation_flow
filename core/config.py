@@ -40,6 +40,21 @@ DEFAULTS: dict[str, Any] = {
     "group_context_only_when_woken": True,
     "group_context_record_bot": True,
     "group_context_bot_label": "你",
+    "group_air_guard_enabled": True,
+    # 默认值偏宽松：读空气是硬拦截，宁可漏掉几次刷屏，也不要把正常
+    # 连续对话的人拦在门外。机器人互相引用的循环通常在几秒内连发，
+    # 120 秒 6 次足够抓住，而人类正常聊天很难触碰这个上限。
+    "group_air_guard_window_seconds": 120,
+    "group_air_guard_max_bot_replies": 6,
+    "group_air_guard_polite_loop_limit": 2,
+    "scene_awareness_enabled": True,
+    # 硬拦截默认关闭：场景判定基于规则，误判时代价是"该回的没回"，
+    # 比"多回一句"更让人困惑。默认只注入软指令，由模型自己决定。
+    "scene_awareness_guard_to_other": False,
+    "scene_awareness_hint_to_group": False,
+    "scene_awareness_self_names": [],
+    "scene_awareness_recent_speakers": 8,
+    "natural_tool_call_enabled": True,
     "reply_context_enabled": True,
     "reply_context_api_fallback": True,
     "topic_context_enabled": False,
@@ -78,6 +93,19 @@ def _coerce_str(value: Any, default: str) -> str:
     if value is None:
         return default
     return str(value)
+
+
+def _coerce_str_list(value: Any, default: list[str]) -> list[str]:
+    """把列表配置项规范成字符串列表。
+
+    兼容三种输入：真正的列表、换行/逗号分隔的字符串、以及空值。
+    面板上多行文本框常把列表存成字符串，直接当列表用会退化成逐字符遍历。
+    """
+    if isinstance(value, list):
+        return [str(item).strip() for item in value if str(item).strip()]
+    if isinstance(value, str) and value.strip():
+        return [s.strip() for s in re.split(r"[\n,，]", value) if s.strip()]
+    return list(default)
 
 
 def normalize_config(raw: dict[str, Any] | None) -> dict[str, Any]:
@@ -236,6 +264,55 @@ def normalize_config(raw: dict[str, Any] | None) -> dict[str, Any]:
         raw.get("group_context_bot_label"), DEFAULTS["group_context_bot_label"]
     ).strip()
     out["group_context_bot_label"] = bot_label or DEFAULTS["group_context_bot_label"]
+    out["group_air_guard_enabled"] = _coerce_bool(
+        raw.get("group_air_guard_enabled"), DEFAULTS["group_air_guard_enabled"]
+    )
+    out["group_air_guard_window_seconds"] = max(
+        10,
+        _coerce_int(
+            raw.get("group_air_guard_window_seconds"),
+            DEFAULTS["group_air_guard_window_seconds"],
+        ),
+    )
+    # 阈值允许为 0，表示关闭该条规则
+    out["group_air_guard_max_bot_replies"] = max(
+        0,
+        _coerce_int(
+            raw.get("group_air_guard_max_bot_replies"),
+            DEFAULTS["group_air_guard_max_bot_replies"],
+        ),
+    )
+    out["group_air_guard_polite_loop_limit"] = max(
+        0,
+        _coerce_int(
+            raw.get("group_air_guard_polite_loop_limit"),
+            DEFAULTS["group_air_guard_polite_loop_limit"],
+        ),
+    )
+    out["scene_awareness_enabled"] = _coerce_bool(
+        raw.get("scene_awareness_enabled"), DEFAULTS["scene_awareness_enabled"]
+    )
+    out["scene_awareness_guard_to_other"] = _coerce_bool(
+        raw.get("scene_awareness_guard_to_other"),
+        DEFAULTS["scene_awareness_guard_to_other"],
+    )
+    out["scene_awareness_hint_to_group"] = _coerce_bool(
+        raw.get("scene_awareness_hint_to_group"),
+        DEFAULTS["scene_awareness_hint_to_group"],
+    )
+    out["scene_awareness_self_names"] = _coerce_str_list(
+        raw.get("scene_awareness_self_names"), DEFAULTS["scene_awareness_self_names"]
+    )
+    out["scene_awareness_recent_speakers"] = max(
+        0,
+        _coerce_int(
+            raw.get("scene_awareness_recent_speakers"),
+            DEFAULTS["scene_awareness_recent_speakers"],
+        ),
+    )
+    out["natural_tool_call_enabled"] = _coerce_bool(
+        raw.get("natural_tool_call_enabled"), DEFAULTS["natural_tool_call_enabled"]
+    )
     out["reply_context_enabled"] = _coerce_bool(
         raw.get("reply_context_enabled"), DEFAULTS["reply_context_enabled"]
     )
@@ -258,15 +335,9 @@ def normalize_config(raw: dict[str, Any] | None) -> dict[str, Any]:
     out["intercept_enabled"] = _coerce_bool(
         raw.get("intercept_enabled"), DEFAULTS["intercept_enabled"]
     )
-    raw_whitelist = raw.get("intercept_whitelist")
-    if isinstance(raw_whitelist, list):
-        whitelist = [str(item) for item in raw_whitelist if item]
-    elif isinstance(raw_whitelist, str) and raw_whitelist.strip():
-        # 兼容字符串配置：按换行/逗号分隔
-        whitelist = [s.strip() for s in re.split(r"[\n,]", raw_whitelist) if s.strip()]
-    else:
-        whitelist = list(DEFAULTS["intercept_whitelist"])
-    out["intercept_whitelist"] = whitelist
+    out["intercept_whitelist"] = _coerce_str_list(
+        raw.get("intercept_whitelist"), DEFAULTS["intercept_whitelist"]
+    )
 
     out["llm_provider_id"] = _coerce_str(
         raw.get("llm_provider_id"), DEFAULTS["llm_provider_id"]
@@ -316,6 +387,16 @@ class PluginConfig:
     group_context_only_when_woken: bool = True
     group_context_record_bot: bool = True
     group_context_bot_label: str = "你"
+    group_air_guard_enabled: bool = True
+    group_air_guard_window_seconds: int = 120
+    group_air_guard_max_bot_replies: int = 6
+    group_air_guard_polite_loop_limit: int = 2
+    scene_awareness_enabled: bool = True
+    scene_awareness_guard_to_other: bool = False
+    scene_awareness_hint_to_group: bool = False
+    scene_awareness_self_names: list[str] = field(default_factory=list)
+    scene_awareness_recent_speakers: int = 8
+    natural_tool_call_enabled: bool = True
     reply_context_enabled: bool = True
     reply_context_api_fallback: bool = True
     topic_context_enabled: bool = False

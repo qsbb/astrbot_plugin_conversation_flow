@@ -196,6 +196,66 @@
     "hint": "注入上下文时用于标注 bot 自己那几行的称谓。默认「你」，即记录里显示为「你: ……」。也可填 bot 的昵称。",
     "default": "你"
   },
+  "group_air_guard_enabled": {
+    "type": "bool",
+    "description": "[读空气] 启用群聊读空气限制",
+    "hint": "限制短时间连续回复和礼貌收尾循环，避免机器人互相引用、互道晚安停不下来。判定完全基于本地计数，不额外调用 LLM。推荐开启。",
+    "default": true
+  },
+  "group_air_guard_window_seconds": {
+    "type": "int",
+    "description": "[读空气] 读空气检测窗口秒数",
+    "hint": "统计最近多少秒内 Bot 在本群的回复次数。建议 60-180 秒；越短越宽松。",
+    "default": 120
+  },
+  "group_air_guard_max_bot_replies": {
+    "type": "int",
+    "description": "[读空气] 窗口内最大 Bot 回复数",
+    "hint": "窗口内 Bot 回复达到该次数后，后续即使被明确唤醒也会硬拦截，用来兜住机器人互相引用的死循环。注意这条规则不区分说话的是人还是 Bot，调太小会把正常连续对话的人也拦掉，建议保持 6 或更大。填 0 关闭这条规则，只留礼貌收尾判定。",
+    "default": 6
+  },
+  "group_air_guard_polite_loop_limit": {
+    "type": "int",
+    "description": "[读空气] 礼貌收尾循环上限",
+    "hint": "窗口内 Bot 已回复过几次晚安/谢谢/拜拜等收尾话术后，再遇到同类消息就静默。建议 1-2。填 0 关闭这条规则。",
+    "default": 2
+  },
+  "scene_awareness_enabled": {
+    "type": "bool",
+    "description": "[场景感知] 启用群聊场景感知",
+    "hint": "判断当前这句话是在对你说、对群里另一个人说、还是对整个群说，并据此调整回应方式。判定基于 @ 段、引用段与最近发言者昵称，不额外调用 LLM。默认开启。",
+    "default": true
+  },
+  "scene_awareness_guard_to_other": {
+    "type": "bool",
+    "description": "[场景感知] 明确在对别人说话时硬拦截",
+    "hint": "开启后，当用户明确 @ 了别人或引用了别人的发言（强信号）且没有唤醒 Bot 时，直接静默不消耗 Token。默认关闭：判定虽基于强信号，但群里确实存在「@某人的同时也想让 Bot 看看」的用法，硬拦截会让这类消息完全没有回应。关闭时改为注入软指令，由模型自己决定是否出声。",
+    "default": false
+  },
+  "scene_awareness_hint_to_group": {
+    "type": "bool",
+    "description": "[场景感知] 面向全群的消息也注入克制指令",
+    "hint": "开启后，对没有指向任何人的群内闲聊也注入指令，要求 Bot 像普通群成员一样最多搭一两句、不要长篇作答。默认关闭，因为这类消息通常本来就不会唤醒 Bot；仅在关闭了唤醒限制、Bot 会回应全部群消息时才建议开启。",
+    "default": false
+  },
+  "scene_awareness_self_names": {
+    "type": "list",
+    "description": "[场景感知] Bot 的称呼/昵称",
+    "hint": "用户没有 @ 而是直接喊名字时（如「溯溪你看看这个」），据此识别这句话是在对 Bot 说。每行一个，可填人设名、群昵称、常用简称。少于 2 个字的称呼会被忽略，避免在正常句子里误命中。",
+    "default": []
+  },
+  "scene_awareness_recent_speakers": {
+    "type": "int",
+    "description": "[场景感知] 参与昵称匹配的最近发言人数",
+    "hint": "从群聊缓冲中取最近多少位发言者的昵称，用于判断「这句话里提到的名字是不是群里某个人」。默认 8 人；填 0 表示不限制（取整个缓冲）。",
+    "default": 8
+  },
+  "natural_tool_call_enabled": {
+    "type": "bool",
+    "description": "[工具调用] 自然语言工具调用",
+    "hint": "开启后向 LLM 注入指令，要求用第一人称自然动作描述自己在做什么，不说出工具名/函数名/接口名，也不把权限报错原文念给用户。例如把「我调用自拍功能生成一张」说成「我去拍一张」，把「我没这个权限呢」说成「这个我改不了，得管理员来弄」。仅约束表达方式，不改变工具是否被调用。",
+    "default": true
+  },
   "reply_context_enabled": {
     "type": "bool",
     "description": "[引用消息] 启用引用消息指向说明",

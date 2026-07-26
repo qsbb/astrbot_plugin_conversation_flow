@@ -17,6 +17,7 @@ from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent, filter
 from astrbot.api.star import Context, Star, StarTools, register
 
+from .core.air_guard import AirGuard
 from .core.chunker import Chunker
 from .core.config import PluginConfig, build_plugin_config, normalize_config
 from .core.delay import calculate_segment_delay_ms
@@ -25,6 +26,7 @@ from .core.intercept import InterceptJudge
 from .core.interrupt_tracker import ConversationTracker
 from .core.llm_service import LLMService
 from .core.message_meta import (
+    extract_at_targets,
     extract_plain_text,
     extract_reply_ref,
     fetch_message_by_id,
@@ -37,6 +39,10 @@ from .core.prompts import (
     GROUP_CONTEXT_INSTRUCTION_TEMPLATE,
     REPLY_SPEAKER_SELF,
     REPLY_TARGET_INSTRUCTION_TEMPLATE,
+    SCENE_TARGET_HINT_NAMED,
+    SCENE_TARGET_HINT_UNKNOWN,
+    SCENE_TO_GROUP_INSTRUCTION,
+    SCENE_TO_OTHER_INSTRUCTION_TEMPLATE,
     TOPIC_CONTEXT_INSTRUCTION_TEMPLATE,
     IMAGE_INTENT_INSTRUCTION,
     INTERRUPT_MERGE_APPEND_TEMPLATE,
@@ -45,12 +51,14 @@ from .core.prompts import (
     INTERRUPT_MERGE_REWRITE_USER_TEMPLATE,
     INTERRUPT_THINKING_HISTORY_TEMPLATE,
     INTERRUPT_THINKING_HISTORY_WITH_CONTEXT_TEMPLATE,
+    NATURAL_TOOL_CALL_INSTRUCTION,
     PLAIN_TEXT_INSTRUCTION,
     CHUNKING_INSTRUCTION,
 )
+from .core.scene import SceneInput, detect_scene
 from .core.silence_judge import SilenceJudge
 
-__version__ = "0.4.0"
+__version__ = "0.5.0"
 
 
 @register(
@@ -68,6 +76,9 @@ class ConversationalFlowPlugin(Star):
     INTERCEPTED_KEY = "conv_flow_intercepted"
     # event extra 上用于标记"群聊上下文本轮已注入"的 key
     GROUP_CONTEXT_INJECTED_KEY = "conv_flow_group_context_injected"
+    # event extra 上用于标记"场景感知指令本轮已注入"的 key。
+    # 场景指令允许模型输出 silence_marker，因此响应阶段需要据此检测 marker。
+    SCENE_INJECTED_KEY = "conv_flow_scene_injected"
 
     def __init__(self, context: Context, config: Any = None) -> None:
         super().__init__(context)
@@ -107,6 +118,11 @@ class ConversationalFlowPlugin(Star):
         self.group_context = GroupContextManager(
             max_messages=self.config.group_context_max_messages
         )
+        self.air_guard = AirGuard(
+            window_seconds=self.config.group_air_guard_window_seconds,
+            max_bot_replies=self.config.group_air_guard_max_bot_replies,
+            polite_loop_limit=self.config.group_air_guard_polite_loop_limit,
+        )
 
         # bot 自身 ID 缓存（首次从事件解析后复用）
         self._self_id_cache: str = ""
@@ -117,6 +133,9 @@ class ConversationalFlowPlugin(Star):
             "chunked": 0,
             "interrupted": 0,
             "intercepted": 0,
+            "air_guarded": 0,
+            "scene_guarded": 0,
+            "scene_hinted": 0,
             "total_requests": 0,
         }
 
@@ -195,6 +214,11 @@ class ConversationalFlowPlugin(Star):
             self.config.interrupt_window_ms, self.config.interrupt_scope
         )
         self.group_context.update_max(self.config.group_context_max_messages)
+        self.air_guard.update_config(
+            self.config.group_air_guard_window_seconds,
+            self.config.group_air_guard_max_bot_replies,
+            self.config.group_air_guard_polite_loop_limit,
+        )
 
     # ------------------------------------------------------------------
     # 主钩子：等待会话锁 / on_llm_request
@@ -251,6 +275,16 @@ class ConversationalFlowPlugin(Star):
             self.logger.debug(
                 "[conv-flow] seq=%s already discarded, skip silence judge", seq
             )
+            return
+
+        # 3.5) 群聊读空气：窗口内已连续回复太多次或礼貌收尾循环时直接静默
+        # 放在所有注入之前，被拦下的这轮完全不消耗 Token
+        if await self._apply_air_guard(event, seq, user_text):
+            return
+
+        # 3.6) 场景感知：判断这句话是在对 bot、对某个群友还是对整个群说。
+        # 开启硬拦截且命中强信号时直接静默；否则只注入软指令交给模型判断。
+        if await self._apply_scene_awareness(event, req, seq, is_wake):
             return
 
         # 图片意图必须在空文本判断前执行，纯图片消息的 user_text 通常为空
@@ -314,6 +348,10 @@ class ConversationalFlowPlugin(Star):
         if self.config.chunking_enabled:
             self._inject_chunking_instruction(req)
 
+        # 自然工具调用：约束 bot 描述自身动作的措辞，不暴露工具名与报错原文
+        if self.config.natural_tool_call_enabled:
+            self._inject_natural_tool_call_instruction(req)
+
     # ------------------------------------------------------------------
     # 主钩子：on_llm_response
     # ------------------------------------------------------------------
@@ -333,10 +371,8 @@ class ConversationalFlowPlugin(Star):
             self.tracker.finish_response(event)
             return
 
-        # 2) 检查沉默标记（silence_judge 注入模式 或 拦截命中时都需检测）
-        should_check_marker = self.silence_judge.should_inject() or (
-            event.get_extra(self.INTERCEPTED_KEY) is True
-        )
+        # 2) 检查沉默标记（silence_judge 注入模式、拦截命中、场景指令注入时都需检测）
+        should_check_marker = self._should_check_silence_marker(event)
         if should_check_marker:
             text = self._extract_response_text(response)
             if text and self.silence_judge.is_silence_response(text):
@@ -401,10 +437,8 @@ class ConversationalFlowPlugin(Star):
             self.tracker.finish_response(event)
             return
 
-        # 3) 沉默标记二次校验（silence_judge 注入模式 或 拦截命中时都需检测）
-        should_check_marker = self.silence_judge.should_inject() or (
-            event.get_extra(self.INTERCEPTED_KEY) is True
-        )
+        # 3) 沉默标记二次校验（注入模式、拦截命中、场景指令注入时都需检测）
+        should_check_marker = self._should_check_silence_marker(event)
         if should_check_marker and self.silence_judge.is_silence_response(text):
             self.logger.info(
                 "[conv-flow] seq=%s silence marker found at decorating", seq
@@ -431,6 +465,7 @@ class ConversationalFlowPlugin(Star):
             if text_modified and not has_non_text:
                 self._update_result_plain_text(event, text)
             self._record_bot_message(event, text)
+            self._record_air_reply(event, text)
             self.tracker.finish_response(event, bot_text=text)
             return
 
@@ -440,6 +475,7 @@ class ConversationalFlowPlugin(Star):
             if text_modified:
                 self._update_result_plain_text(event, text)
             self._record_bot_message(event, text)
+            self._record_air_reply(event, text)
             self.tracker.finish_response(event, bot_text=text)
             return
 
@@ -515,6 +551,8 @@ class ConversationalFlowPlugin(Star):
         # 分段发送时按整段合并记录，避免上下文里出现多条零碎的 bot 发言
         final_text = "\n".join(sent_text_parts) or original_text
         self._record_bot_message(event, final_text)
+        # 分段发送只算一次回复：读空气限制的是"接话次数"，不是消息条数
+        self._record_air_reply(event, final_text)
         self.tracker.finish_response(event, bot_text=final_text)
 
     # ------------------------------------------------------------------
@@ -572,6 +610,16 @@ class ConversationalFlowPlugin(Star):
         group_stale = self.group_context.cleanup_stale(
             self.config.interrupt_state_ttl_ms / 1000.0
         )
+        air_stale = self.air_guard.cleanup_stale()
+        # 群聊里附带当前会话的窗口计数，方便现场核对为什么被静默
+        air_text = ""
+        current_group = self._get_group_id(event)
+        if current_group:
+            air_now = self.air_guard.stats(current_group)
+            air_text = (
+                f" 本群窗口内: 回复 {air_now['bot_replies']} 次, "
+                f"收尾话术 {air_now['polite_replies']} 次"
+            )
         text = (
             "对话流控制 - 运行状态\n"
             f"- 沉默判断: {'on' if self.config.silence_enabled else 'off'} ({self.config.silence_strategy})\n"
@@ -595,13 +643,28 @@ class ConversationalFlowPlugin(Star):
             f"- 话题上下文: {'on' if self.config.topic_context_enabled else 'off'} "
             f"(max={self.config.topic_context_max_messages})\n"
             f"- 智能拦截: {'on' if self.config.intercept_enabled else 'off'}\n"
-            f"- 活跃会话: {active_sessions} (清理过期 {stale_cleaned}, 群缓冲 {group_stale})\n"
+            f"- 群聊读空气: {'on' if self.config.group_air_guard_enabled else 'off'} "
+            f"(window={self.config.group_air_guard_window_seconds}s, "
+            f"max_replies={self.config.group_air_guard_max_bot_replies}, "
+            f"polite_limit={self.config.group_air_guard_polite_loop_limit})"
+            f"{air_text}\n"
+            f"- 场景感知: {'on' if self.config.scene_awareness_enabled else 'off'} "
+            f"(guard_to_other={self.config.scene_awareness_guard_to_other}, "
+            f"hint_to_group={self.config.scene_awareness_hint_to_group}, "
+            f"self_names={len(self.config.scene_awareness_self_names)}, "
+            f"speakers={self.config.scene_awareness_recent_speakers})\n"
+            f"- 自然工具调用: {'on' if self.config.natural_tool_call_enabled else 'off'}\n"
+            f"- 活跃会话: {active_sessions} (清理过期 {stale_cleaned}, 群缓冲 {group_stale}, "
+            f"读空气 {air_stale})\n"
             "统计:\n"
             f"- 总请求: {self._stats['total_requests']}\n"
             f"- 沉默次数: {self._stats['silenced']}\n"
             f"- 分段次数: {self._stats['chunked']}\n"
             f"- 插话合并: {self._stats['interrupted']}\n"
-            f"- 拦截命中: {self._stats['intercepted']}"
+            f"- 拦截命中: {self._stats['intercepted']}\n"
+            f"- 读空气拦截: {self._stats['air_guarded']}\n"
+            f"- 场景拦截: {self._stats['scene_guarded']} "
+            f"(软指令 {self._stats['scene_hinted']})"
         )
         yield event.plain_result(text)
 
@@ -676,9 +739,22 @@ class ConversationalFlowPlugin(Star):
             "chunked": 0,
             "interrupted": 0,
             "intercepted": 0,
+            "air_guarded": 0,
+            "scene_guarded": 0,
+            "scene_hinted": 0,
             "total_requests": 0,
         }
         yield event.plain_result("统计已重置。")
+
+    @convflow_group.command("air_reset")
+    async def convflow_air_reset(self, event: AstrMessageEvent):
+        """清空当前群的读空气窗口计数，立刻解除静默。"""
+        group_id = self._get_group_id(event)
+        if not group_id:
+            yield event.plain_result("读空气仅对群聊生效，当前会话无需重置。")
+            return
+        self.air_guard.reset(group_id)
+        yield event.plain_result("本群读空气窗口已清空。")
 
     @convflow_group.command("help")
     async def convflow_help(self, event: AstrMessageEvent):
@@ -690,6 +766,7 @@ class ConversationalFlowPlugin(Star):
             "/convflow reload - 从本地文件重载配置\n"
             "/convflow set <key> <value> - 修改配置项\n"
             "/convflow silence_test <text> - 测试沉默预判断\n"
+            "/convflow air_reset - 清空本群读空气窗口\n"
             "/convflow reset_stats - 重置统计\n"
             "/convflow help - 显示本帮助"
         )
@@ -843,6 +920,12 @@ class ConversationalFlowPlugin(Star):
     def _inject_chunking_instruction(self, req: Any) -> None:
         """注入分段引导指令到 req.extra_user_content_parts。"""
         self._inject_instruction(req, CHUNKING_INSTRUCTION, "chunking")
+
+    def _inject_natural_tool_call_instruction(self, req: Any) -> None:
+        """注入自然工具调用指令到 req.extra_user_content_parts。"""
+        self._inject_instruction(
+            req, NATURAL_TOOL_CALL_INSTRUCTION, "natural tool call"
+        )
 
     def _inject_instruction(self, req: Any, instruction: str, label: str) -> None:
         """通用指令注入：优先 extra_user_content_parts，降级到 system_prompt。"""
@@ -1160,6 +1243,197 @@ class ConversationalFlowPlugin(Star):
             quoted_is_bot,
             reply_ref.message_id,
         )
+
+    async def _apply_air_guard(
+        self, event: AstrMessageEvent, seq: Any, user_text: str
+    ) -> bool:
+        """群聊读空气：命中窗口限制时静默本轮，返回 True 表示已拦截。
+
+        只作用于群聊（私聊没有"刷屏打扰别人"的问题）。判定基于本地计数，
+        放在所有注入之前，被拦下的这轮完全不消耗 Token。
+        """
+        if not self.config.group_air_guard_enabled:
+            return False
+        group_id = self._get_group_id(event)
+        if not group_id:
+            return False
+        decision = self.air_guard.evaluate(group_id, user_text)
+        if not decision.should_silence:
+            return False
+        self.logger.info(
+            "[conv-flow] seq=%s air guard silenced: %s (group=%s, user_text=%r)",
+            seq,
+            decision.reason,
+            group_id,
+            user_text[:60],
+        )
+        # 读空气属于"主动装作没看见"，不发提示文本，否则等于换个方式刷屏
+        await self._silence_event(event, send_notify=False)
+        self.tracker.cancel_request(event)
+        self._stats["air_guarded"] += 1
+        return True
+
+    def _should_check_silence_marker(self, event: AstrMessageEvent) -> bool:
+        """判断本轮是否需要在响应中检测 silence_marker。
+
+        三类注入都会让模型有机会输出 marker：沉默判断的 inject 模式、
+        智能拦截、以及场景感知。任一命中都必须检测，否则 marker 会
+        原样发到群里。
+        """
+        if self.silence_judge.should_inject():
+            return True
+        if self._get_extra(event, self.INTERCEPTED_KEY) is True:
+            return True
+        return self._get_extra(event, self.SCENE_INJECTED_KEY) is True
+
+    def _build_scene_input(self, event: AstrMessageEvent, group_id: str) -> SceneInput:
+        """从 event 与群聊缓冲中收集场景判定所需的原始信号。"""
+        self_id = self._get_self_id(event)
+        at_targets = extract_at_targets(event)
+        reply_ref = extract_reply_ref(event)
+
+        # 引用目标是否是 bot：优先查本地缓冲（最准），再退到引用段自带的 sender_id
+        reply_is_bot = False
+        if not reply_ref.is_empty():
+            record = self.group_context.find_by_message_id(
+                group_id, reply_ref.message_id
+            )
+            if record is not None:
+                reply_is_bot = record.is_bot
+            elif reply_ref.sender_id and self_id and reply_ref.sender_id == self_id:
+                reply_is_bot = True
+
+        speakers = self.group_context.get_recent_speakers(
+            group_id,
+            n=self.config.scene_awareness_recent_speakers,
+            exclude_sender_id=self.tracker._get_sender_id(event),
+        )
+        return SceneInput(
+            text=extract_plain_text(event),
+            self_id=self_id,
+            self_names=self._scene_self_names(),
+            at_ids=at_targets.ids,
+            at_all=at_targets.at_all,
+            reply_sender_id=reply_ref.sender_id,
+            reply_sender_name=reply_ref.sender_name,
+            reply_is_bot=reply_is_bot,
+            recent_speakers=tuple(speakers),
+        )
+
+    def _scene_self_names(self) -> tuple[str, ...]:
+        """bot 可能被直接称呼的名字集合。
+
+        除配置项外，把自定义的 ``group_context_bot_label`` 也算进去：
+        用户会把它填成 bot 的昵称（如「溯溪」），那本身就是一个称呼。
+        默认值「你」是代词，不能当名字用。
+        """
+        names = list(self.config.scene_awareness_self_names)
+        label = (self.config.group_context_bot_label or "").strip()
+        if label and label != "你" and label not in names:
+            names.append(label)
+        return tuple(names)
+
+    async def _apply_scene_awareness(
+        self, event: AstrMessageEvent, req: Any, seq: Any, is_wake: bool
+    ) -> bool:
+        """群聊场景感知。返回 True 表示已静默本轮，调用方应立即返回。
+
+        两种处理方式：
+
+        - **硬拦截**（``scene_awareness_guard_to_other``，默认关闭）：
+          确认是在对别人说话、判定基于强信号、且本轮没有唤醒 bot 时直接静默，
+          不消耗 Token。默认关闭是因为群里存在"@某人的同时也想让 bot 看看"
+          的用法，硬拦截会让这类消息完全没有回应。
+        - **软指令**（默认）：把"这句话不是对你说的"作为事实注入，
+          由模型自己决定接不接话。模型可以输出 silence_marker 选择不出声。
+        """
+        if not self.config.scene_awareness_enabled:
+            return False
+        # 场景感知只对群聊有意义：私聊里每句话都是对 bot 说的
+        group_id = self._get_group_id(event)
+        if not group_id:
+            return False
+
+        try:
+            decision = detect_scene(self._build_scene_input(event, group_id))
+        except Exception as exc:
+            self.logger.debug("[conv-flow] scene detect failed: %s", exc)
+            return False
+
+        self.logger.debug(
+            "[conv-flow] seq=%s scene=%s confident=%s reason=%s",
+            seq,
+            decision.scene,
+            decision.confident,
+            decision.reason,
+        )
+
+        # 对 bot 说话是正常情况，不需要任何额外指令
+        if decision.to_bot:
+            return False
+
+        if decision.to_other:
+            # 硬拦截只在强信号且未被唤醒时生效：被 @ 唤醒说明用户确实在叫 bot
+            if (
+                self.config.scene_awareness_guard_to_other
+                and decision.confident
+                and not is_wake
+            ):
+                self.logger.info(
+                    "[conv-flow] seq=%s scene guard silenced: %s (group=%s)",
+                    seq,
+                    decision.reason,
+                    group_id,
+                )
+                await self._silence_event(event, send_notify=False)
+                self.tracker.cancel_request(event)
+                self._stats["scene_guarded"] += 1
+                return True
+
+            target_hint = (
+                SCENE_TARGET_HINT_NAMED.format(name=decision.target_name)
+                if decision.target_name
+                else SCENE_TARGET_HINT_UNKNOWN
+            )
+            instruction = SCENE_TO_OTHER_INSTRUCTION_TEMPLATE.format(
+                target_hint=target_hint, marker=self.config.silence_marker
+            )
+            self._inject_instruction(req, instruction, "scene to_other")
+            self._set_extra(event, self.SCENE_INJECTED_KEY, True)
+            self._stats["scene_hinted"] += 1
+            self.logger.info(
+                "[conv-flow] seq=%s scene hint injected (to_other, target=%r, %s)",
+                seq,
+                decision.target_name,
+                decision.reason,
+            )
+            return False
+
+        # 面向全群：默认不注入，这类消息通常本来就不会唤醒 bot
+        if decision.to_group and self.config.scene_awareness_hint_to_group:
+            instruction = SCENE_TO_GROUP_INSTRUCTION.format(
+                marker=self.config.silence_marker
+            )
+            self._inject_instruction(req, instruction, "scene to_group")
+            self._set_extra(event, self.SCENE_INJECTED_KEY, True)
+            self._stats["scene_hinted"] += 1
+            self.logger.info(
+                "[conv-flow] seq=%s scene hint injected (to_group, %s)",
+                seq,
+                decision.reason,
+            )
+        return False
+
+    def _record_air_reply(self, event: AstrMessageEvent, text: str) -> None:
+        """把 bot 实际发出的回复计入读空气窗口。"""
+        if not self.config.group_air_guard_enabled:
+            return
+        if not text or not text.strip():
+            return
+        group_id = self._get_group_id(event)
+        if not group_id:
+            return
+        self.air_guard.record_reply(group_id, text)
 
     def _record_bot_message(self, event: AstrMessageEvent, text: str) -> None:
         """把 bot 实际发出的回复写回群聊上下文缓冲。

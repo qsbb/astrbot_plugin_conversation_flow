@@ -172,6 +172,45 @@ def extract_reply_ref(event: Any) -> ReplyRef:
     return ReplyRef()
 
 
+@dataclass
+class AtTargets:
+    """当前消息 @ 了谁。
+
+    - ``ids``：被 @ 的用户 ID 列表，保持消息链中的出现顺序；
+    - ``at_all``：是否 @ 了全体成员。@全体不指向具体某人，
+      因此不能据此认为"在对某个人说话"。
+    """
+
+    ids: tuple[str, ...] = ()
+    at_all: bool = False
+
+    def is_empty(self) -> bool:
+        return not self.ids and not self.at_all
+
+
+def extract_at_targets(event: Any) -> AtTargets:
+    """从消息链中提取所有 @ 目标。没有 @ 时返回空 AtTargets。"""
+    ids: list[str] = []
+    at_all = False
+    for comp in _get_chain(event):
+        ctype = _component_type(comp)
+        if ctype not in ("at", "atall"):
+            continue
+        if ctype == "atall":
+            at_all = True
+            continue
+        data = _component_data(comp)
+        raw = _pick(data, "qq", "user_id", "target", "id")
+        # OneBot 用 qq="all" 表示 @全体成员
+        if isinstance(raw, str) and raw.strip().lower() == "all":
+            at_all = True
+            continue
+        value = _clean_id(raw)
+        if value and value not in ids:
+            ids.append(value)
+    return AtTargets(ids=tuple(ids), at_all=at_all)
+
+
 def extract_plain_text(event: Any) -> str:
     """提取用户真正输入的正文，排除 reply / at 段。
 

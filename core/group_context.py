@@ -120,6 +120,35 @@ class GroupContextManager:
             return None
         return queue.index.get(str(message_id))
 
+    def get_recent_speakers(
+        self, group_id: str, n: int = 0, exclude_sender_id: str = ""
+    ) -> list[tuple[str, str]]:
+        """返回最近发言者的 ``(sender_id, sender_name)`` 列表，按最近优先去重。
+
+        供场景感知判断"这句话里提到的名字是不是群里某个人"。bot 自己的
+        发言不计入：判断目标是"用户在对谁说话"，bot 自身由调用方单独处理。
+        """
+        if not group_id:
+            return []
+        queue = self._queues.get(group_id)
+        if queue is None or not queue.records:
+            return []
+        exclude = str(exclude_sender_id or "")
+        seen: set[str] = set()
+        speakers: list[tuple[str, str]] = []
+        for rec in reversed(queue.records):
+            if rec.is_bot:
+                continue
+            if not rec.sender_id or rec.sender_id in seen:
+                continue
+            if exclude and rec.sender_id == exclude:
+                continue
+            seen.add(rec.sender_id)
+            speakers.append((rec.sender_id, rec.sender_name))
+            if n > 0 and len(speakers) >= n:
+                break
+        return speakers
+
     def get_recent_context(
         self,
         group_id: str,

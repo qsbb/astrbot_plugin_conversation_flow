@@ -36,6 +36,10 @@ sys.modules.setdefault("astrbot", astrbot_module)
 sys.modules.setdefault("astrbot.api", astrbot_api_module)
 sys.modules.setdefault("astrbot.api.message_components", astrbot_mc_module)
 
+from astrbot_plugin_conversation_flow.core.air_guard import (  # noqa: E402
+    AirGuard,
+    is_polite_closing,
+)
 from astrbot_plugin_conversation_flow.core.chunker import Chunker  # noqa: E402
 from astrbot_plugin_conversation_flow.core.config import build_plugin_config  # noqa: E402
 from astrbot_plugin_conversation_flow.core.delay import (  # noqa: E402
@@ -59,15 +63,28 @@ from astrbot_plugin_conversation_flow.core.prompts import (  # noqa: E402
     IMAGE_INTENT_INSTRUCTION,
     INTERCEPT_INJECT_INSTRUCTION,
     INTERRUPT_THINKING_HISTORY_WITH_CONTEXT_TEMPLATE,
+    NATURAL_TOOL_CALL_INSTRUCTION,
     CHUNKING_INSTRUCTION,
+    SCENE_TARGET_HINT_NAMED,
+    SCENE_TARGET_HINT_UNKNOWN,
+    SCENE_TO_GROUP_INSTRUCTION,
+    SCENE_TO_OTHER_INSTRUCTION_TEMPLATE,
 )
 from astrbot_plugin_conversation_flow.core.message_meta import (  # noqa: E402
+    extract_at_targets,
     extract_plain_text,
     extract_reply_ref,
     fetch_message_by_id,
     get_message_id,
     get_self_id,
     truncate_preview,
+)
+from astrbot_plugin_conversation_flow.core.scene import (  # noqa: E402
+    SCENE_TO_BOT,
+    SCENE_TO_GROUP,
+    SCENE_TO_OTHER,
+    SceneInput,
+    detect_scene,
 )
 from astrbot_plugin_conversation_flow.core.image_intent import (  # noqa: E402
     detect_images,
@@ -1238,6 +1255,396 @@ class NewConfigTests(unittest.TestCase):
     def test_group_context_max_messages_clamped(self) -> None:
         cfg = build_plugin_config({"group_context_max_messages": 0})
         self.assertEqual(cfg.group_context_max_messages, 1)
+
+
+class AirGuardConfigTests(unittest.TestCase):
+    def test_air_guard_defaults(self) -> None:
+        cfg = build_plugin_config({})
+        self.assertTrue(cfg.group_air_guard_enabled)
+        self.assertEqual(cfg.group_air_guard_window_seconds, 120)
+        self.assertEqual(cfg.group_air_guard_max_bot_replies, 6)
+        self.assertEqual(cfg.group_air_guard_polite_loop_limit, 2)
+
+    def test_natural_tool_call_defaults_on(self) -> None:
+        cfg = build_plugin_config({})
+        self.assertTrue(cfg.natural_tool_call_enabled)
+
+    def test_window_seconds_has_floor(self) -> None:
+        cfg = build_plugin_config({"group_air_guard_window_seconds": 1})
+        self.assertEqual(cfg.group_air_guard_window_seconds, 10)
+
+    def test_thresholds_allow_zero_to_disable(self) -> None:
+        cfg = build_plugin_config(
+            {
+                "group_air_guard_max_bot_replies": 0,
+                "group_air_guard_polite_loop_limit": 0,
+            }
+        )
+        self.assertEqual(cfg.group_air_guard_max_bot_replies, 0)
+        self.assertEqual(cfg.group_air_guard_polite_loop_limit, 0)
+
+    def test_negative_thresholds_clamped_to_zero(self) -> None:
+        cfg = build_plugin_config({"group_air_guard_max_bot_replies": -5})
+        self.assertEqual(cfg.group_air_guard_max_bot_replies, 0)
+
+
+class PoliteClosingTests(unittest.TestCase):
+    def test_recognizes_closing_phrases(self) -> None:
+        for text in ("晚安", "那就晚安啦～", "拜拜", "谢谢你", "好的", "嗯嗯"):
+            self.assertTrue(is_polite_closing(text), text)
+
+    def test_ignores_substantive_text(self) -> None:
+        for text in ("帮我查一下今天的天气", "这段代码为什么报错", ""):
+            self.assertFalse(is_polite_closing(text), text)
+
+    def test_long_text_ending_with_thanks_not_closing(self) -> None:
+        # 长文本承载了实际内容，末尾一句"谢谢"不应让整条被当成收尾话术
+        text = "我想问一下这个插件的分段功能是怎么实现的，配置项应该怎么调，谢谢"
+        self.assertFalse(is_polite_closing(text))
+
+    def test_short_question_with_thanks_not_closing(self) -> None:
+        # 短句同样不能只看长度：带实际问题的"谢谢"是提问，不是道别
+        for text in (
+            "这个插件的分段功能怎么配置，谢谢",
+            "明天几点集合？晚安",
+            "帮我看下报错原因，多谢",
+        ):
+            self.assertFalse(is_polite_closing(text), text)
+
+    def test_closing_with_filler_still_closing(self) -> None:
+        # 收尾语常带语气词和称呼，剔除后没有实义内容，仍算收尾
+        for text in (
+            "那就晚安啦～",
+            "好的好的，谢谢啦",
+            "行吧，那拜拜咯",
+            "大家早上好",
+        ):
+            self.assertTrue(is_polite_closing(text), text)
+
+
+class AirGuardTests(unittest.TestCase):
+    def test_allows_replies_under_limit(self) -> None:
+        guard = AirGuard(window_seconds=60, max_bot_replies=3, polite_loop_limit=0)
+        guard.record_reply("g1", "在的")
+        guard.record_reply("g1", "好")
+        self.assertFalse(guard.evaluate("g1", "再问个问题").should_silence)
+
+    def test_silences_when_reply_limit_reached(self) -> None:
+        guard = AirGuard(window_seconds=60, max_bot_replies=2, polite_loop_limit=0)
+        guard.record_reply("g1", "第一条")
+        guard.record_reply("g1", "第二条")
+        decision = guard.evaluate("g1", "继续说")
+        self.assertTrue(decision.should_silence)
+        self.assertTrue(bool(decision))
+        self.assertEqual(decision.bot_replies, 2)
+
+    def test_zero_limit_disables_reply_rule(self) -> None:
+        guard = AirGuard(window_seconds=60, max_bot_replies=0, polite_loop_limit=0)
+        for _ in range(10):
+            guard.record_reply("g1", "刷屏")
+        self.assertFalse(guard.evaluate("g1", "还在吗").should_silence)
+
+    def test_scopes_are_independent(self) -> None:
+        guard = AirGuard(window_seconds=60, max_bot_replies=1, polite_loop_limit=0)
+        guard.record_reply("g1", "回复")
+        self.assertTrue(guard.evaluate("g1", "喂").should_silence)
+        self.assertFalse(guard.evaluate("g2", "喂").should_silence)
+
+    def test_empty_scope_never_silences(self) -> None:
+        guard = AirGuard(window_seconds=60, max_bot_replies=1, polite_loop_limit=1)
+        guard.record_reply("", "回复")
+        self.assertFalse(guard.evaluate("", "晚安").should_silence)
+
+    def test_polite_loop_silences_only_on_polite_input(self) -> None:
+        guard = AirGuard(window_seconds=60, max_bot_replies=0, polite_loop_limit=2)
+        guard.record_reply("g1", "晚安")
+        guard.record_reply("g1", "好梦")
+        # 又是收尾话术：静默
+        self.assertTrue(guard.evaluate("g1", "拜拜").should_silence)
+        # 有实际内容的提问：照常回复
+        self.assertFalse(guard.evaluate("g1", "顺便问下明天几点开会").should_silence)
+
+    def test_window_expiry_releases_silence(self) -> None:
+        guard = AirGuard(window_seconds=60, max_bot_replies=1, polite_loop_limit=0)
+        guard.record_reply("g1", "回复")
+        self.assertTrue(guard.evaluate("g1", "喂").should_silence)
+        # 手动把时间戳推到窗口外，模拟时间流逝
+        guard._replies["g1"][0] -= 120
+        self.assertFalse(guard.evaluate("g1", "喂").should_silence)
+
+    def test_update_config_takes_effect(self) -> None:
+        guard = AirGuard(window_seconds=60, max_bot_replies=1, polite_loop_limit=0)
+        guard.record_reply("g1", "回复")
+        self.assertTrue(guard.evaluate("g1", "喂").should_silence)
+        guard.update_config(60, 5, 0)
+        self.assertFalse(guard.evaluate("g1", "喂").should_silence)
+
+    def test_reset_scope_and_all(self) -> None:
+        guard = AirGuard(window_seconds=60, max_bot_replies=1, polite_loop_limit=0)
+        guard.record_reply("g1", "回复")
+        guard.record_reply("g2", "回复")
+        guard.reset("g1")
+        self.assertFalse(guard.evaluate("g1", "喂").should_silence)
+        self.assertTrue(guard.evaluate("g2", "喂").should_silence)
+        guard.reset()
+        self.assertFalse(guard.evaluate("g2", "喂").should_silence)
+
+    def test_stats_reports_window_counts(self) -> None:
+        guard = AirGuard(window_seconds=60, max_bot_replies=0, polite_loop_limit=0)
+        guard.record_reply("g1", "晚安")
+        guard.record_reply("g1", "查到了，明天下午三点")
+        stats = guard.stats("g1")
+        self.assertEqual(stats["bot_replies"], 2)
+        self.assertEqual(stats["polite_replies"], 1)
+
+    def test_cleanup_stale_drops_empty_windows(self) -> None:
+        guard = AirGuard(window_seconds=60, max_bot_replies=0, polite_loop_limit=0)
+        guard.record_reply("g1", "晚安")
+        guard._replies["g1"][0] -= 120
+        guard._polite["g1"][0] -= 120
+        self.assertEqual(guard.cleanup_stale(), 1)
+        self.assertEqual(guard.stats("g1")["bot_replies"], 0)
+
+
+class NaturalToolCallPromptTests(unittest.TestCase):
+    def test_instruction_forbids_mechanism_words(self) -> None:
+        text = NATURAL_TOOL_CALL_INSTRUCTION
+        self.assertIn("第一人称", text)
+        for word in ("工具名", "函数名", "接口名"):
+            self.assertIn(word, text)
+
+    def test_instruction_covers_failure_wording(self) -> None:
+        text = NATURAL_TOOL_CALL_INSTRUCTION
+        self.assertIn("权限", text)
+        self.assertIn("不要编原因", text)
+
+
+class AtTargetsTests(unittest.TestCase):
+    def test_extract_single_at(self) -> None:
+        chain = [_Seg("at", qq="10001"), _Seg("text", text="你好")]
+        targets = extract_at_targets(_MetaEvent(chain=chain))
+        self.assertEqual(targets.ids, ("10001",))
+        self.assertFalse(targets.at_all)
+        self.assertFalse(targets.is_empty())
+
+    def test_extract_multiple_at_preserves_order(self) -> None:
+        chain = [_Seg("at", qq="1"), _Seg("at", qq="2"), _Seg("text", text="看看")]
+        self.assertEqual(extract_at_targets(_MetaEvent(chain=chain)).ids, ("1", "2"))
+
+    def test_duplicate_at_deduplicated(self) -> None:
+        chain = [_Seg("at", qq="7"), _Seg("at", qq="7")]
+        self.assertEqual(extract_at_targets(_MetaEvent(chain=chain)).ids, ("7",))
+
+    def test_at_all_via_qq_all(self) -> None:
+        """OneBot 用 qq="all" 表示 @全体成员。"""
+        chain = [_Seg("at", qq="all"), _Seg("text", text="通知")]
+        targets = extract_at_targets(_MetaEvent(chain=chain))
+        self.assertTrue(targets.at_all)
+        self.assertEqual(targets.ids, ())
+
+    def test_empty_without_at_segment(self) -> None:
+        chain = [_Seg("text", text="普通消息")]
+        self.assertTrue(extract_at_targets(_MetaEvent(chain=chain)).is_empty())
+
+
+class SceneDetectTests(unittest.TestCase):
+    def test_at_bot_is_to_bot(self) -> None:
+        d = detect_scene(SceneInput(self_id="100", at_ids=("100",), text="在吗"))
+        self.assertEqual(d.scene, SCENE_TO_BOT)
+        self.assertTrue(d.confident)
+
+    def test_at_bot_wins_over_at_others(self) -> None:
+        """同时 @ bot 和别人时应算对 bot 说，避免该回的没回。"""
+        d = detect_scene(SceneInput(self_id="100", at_ids=("100", "200")))
+        self.assertEqual(d.scene, SCENE_TO_BOT)
+
+    def test_reply_to_bot_is_to_bot(self) -> None:
+        d = detect_scene(SceneInput(self_id="100", reply_is_bot=True))
+        self.assertEqual(d.scene, SCENE_TO_BOT)
+        self.assertTrue(d.confident)
+
+    def test_reply_sender_matching_self_id_is_to_bot(self) -> None:
+        d = detect_scene(SceneInput(self_id="100", reply_sender_id="100"))
+        self.assertEqual(d.scene, SCENE_TO_BOT)
+
+    def test_at_other_is_to_other_with_name(self) -> None:
+        d = detect_scene(
+            SceneInput(
+                self_id="100",
+                at_ids=("200",),
+                recent_speakers=(("200", "张三"),),
+            )
+        )
+        self.assertEqual(d.scene, SCENE_TO_OTHER)
+        self.assertEqual(d.target_name, "张三")
+        self.assertTrue(d.confident)
+
+    def test_at_unknown_other_has_empty_name(self) -> None:
+        d = detect_scene(SceneInput(self_id="100", at_ids=("999",)))
+        self.assertEqual(d.scene, SCENE_TO_OTHER)
+        self.assertEqual(d.target_name, "")
+
+    def test_reply_to_other_is_to_other(self) -> None:
+        d = detect_scene(
+            SceneInput(self_id="100", reply_sender_id="200", reply_sender_name="李四")
+        )
+        self.assertEqual(d.scene, SCENE_TO_OTHER)
+        self.assertEqual(d.target_name, "李四")
+        self.assertTrue(d.confident)
+
+    def test_self_name_in_text_is_weak_to_bot(self) -> None:
+        d = detect_scene(
+            SceneInput(self_id="100", self_names=("溯溪",), text="溯溪你看看这个")
+        )
+        self.assertEqual(d.scene, SCENE_TO_BOT)
+        self.assertFalse(d.confident)
+
+    def test_speaker_name_in_text_is_weak_to_other(self) -> None:
+        d = detect_scene(
+            SceneInput(
+                self_id="100",
+                text="张三你怎么看",
+                recent_speakers=(("200", "张三"),),
+            )
+        )
+        self.assertEqual(d.scene, SCENE_TO_OTHER)
+        self.assertEqual(d.target_name, "张三")
+        self.assertFalse(d.confident)
+
+    def test_bot_name_wins_over_speaker_name(self) -> None:
+        """一句话里同时提到 bot 和群友时优先算对 bot 说。"""
+        d = detect_scene(
+            SceneInput(
+                self_id="100",
+                self_names=("溯溪",),
+                text="溯溪和张三都来看看",
+                recent_speakers=(("200", "张三"),),
+            )
+        )
+        self.assertEqual(d.scene, SCENE_TO_BOT)
+
+    def test_single_char_name_ignored(self) -> None:
+        """单字昵称在正文里几乎必然误命中，不参与匹配。"""
+        d = detect_scene(
+            SceneInput(
+                self_id="100", text="我有点紧张", recent_speakers=(("200", "张"),)
+            )
+        )
+        self.assertEqual(d.scene, SCENE_TO_GROUP)
+
+    def test_at_all_is_to_group(self) -> None:
+        d = detect_scene(SceneInput(self_id="100", at_all=True, text="都来看看"))
+        self.assertEqual(d.scene, SCENE_TO_GROUP)
+        self.assertTrue(d.confident)
+
+    def test_no_signal_falls_back_to_group(self) -> None:
+        d = detect_scene(SceneInput(self_id="100", text="今天天气不错"))
+        self.assertEqual(d.scene, SCENE_TO_GROUP)
+        self.assertFalse(d.confident)
+
+    def test_empty_self_id_does_not_match_empty_at(self) -> None:
+        """self_id 取不到时不能把空串当成命中。"""
+        d = detect_scene(SceneInput(self_id="", at_ids=("200",)))
+        self.assertEqual(d.scene, SCENE_TO_OTHER)
+
+    def test_label_includes_target_name(self) -> None:
+        d = detect_scene(
+            SceneInput(
+                self_id="100", at_ids=("200",), recent_speakers=(("200", "张三"),)
+            )
+        )
+        self.assertIn("张三", d.label())
+
+    def test_scene_properties_are_exclusive(self) -> None:
+        d = detect_scene(SceneInput(self_id="100", at_ids=("100",)))
+        self.assertTrue(d.to_bot)
+        self.assertFalse(d.to_other)
+        self.assertFalse(d.to_group)
+
+
+class RecentSpeakersTests(unittest.TestCase):
+    def test_returns_recent_first(self) -> None:
+        mgr = GroupContextManager(max_messages=10)
+        mgr.record("g", "u1", "Alice", "先说")
+        mgr.record("g", "u2", "Bob", "后说")
+        self.assertEqual(mgr.get_recent_speakers("g"), [("u2", "Bob"), ("u1", "Alice")])
+
+    def test_deduplicates_keeping_latest_name(self) -> None:
+        mgr = GroupContextManager(max_messages=10)
+        mgr.record("g", "u1", "Alice", "第一句")
+        mgr.record("g", "u1", "Alice2", "第二句")
+        self.assertEqual(mgr.get_recent_speakers("g"), [("u1", "Alice2")])
+
+    def test_excludes_bot_messages(self) -> None:
+        mgr = GroupContextManager(max_messages=10)
+        mgr.record("g", "bot", "Bot", "我说的", is_bot=True)
+        mgr.record("g", "u1", "Alice", "用户说的")
+        self.assertEqual(mgr.get_recent_speakers("g"), [("u1", "Alice")])
+
+    def test_excludes_given_sender(self) -> None:
+        """当前发言者不该被当成"对话对象"。"""
+        mgr = GroupContextManager(max_messages=10)
+        mgr.record("g", "u1", "Alice", "一句")
+        mgr.record("g", "u2", "Bob", "两句")
+        self.assertEqual(
+            mgr.get_recent_speakers("g", exclude_sender_id="u2"), [("u1", "Alice")]
+        )
+
+    def test_limit_n(self) -> None:
+        mgr = GroupContextManager(max_messages=10)
+        for i in range(5):
+            mgr.record("g", f"u{i}", f"User{i}", f"消息{i}")
+        self.assertEqual(len(mgr.get_recent_speakers("g", n=2)), 2)
+
+    def test_empty_for_unknown_group(self) -> None:
+        self.assertEqual(GroupContextManager().get_recent_speakers("nope"), [])
+
+
+class SceneConfigTests(unittest.TestCase):
+    def test_defaults(self) -> None:
+        cfg = build_plugin_config({})
+        self.assertTrue(cfg.scene_awareness_enabled)
+        # 硬拦截默认关闭：误判代价是"该回的没回"，比多回一句更困惑
+        self.assertFalse(cfg.scene_awareness_guard_to_other)
+        self.assertFalse(cfg.scene_awareness_hint_to_group)
+        self.assertEqual(cfg.scene_awareness_self_names, [])
+        self.assertEqual(cfg.scene_awareness_recent_speakers, 8)
+
+    def test_self_names_from_list(self) -> None:
+        cfg = build_plugin_config(
+            {"scene_awareness_self_names": ["溯溪", " 小溪 ", ""]}
+        )
+        self.assertEqual(cfg.scene_awareness_self_names, ["溯溪", "小溪"])
+
+    def test_self_names_from_delimited_string(self) -> None:
+        """面板多行文本框可能把列表存成字符串，不能退化成逐字符遍历。"""
+        cfg = build_plugin_config({"scene_awareness_self_names": "溯溪，小溪\n阿溪"})
+        self.assertEqual(cfg.scene_awareness_self_names, ["溯溪", "小溪", "阿溪"])
+
+    def test_recent_speakers_clamped_to_zero(self) -> None:
+        cfg = build_plugin_config({"scene_awareness_recent_speakers": -5})
+        self.assertEqual(cfg.scene_awareness_recent_speakers, 0)
+
+
+class ScenePromptTests(unittest.TestCase):
+    def test_to_other_instruction_allows_silence(self) -> None:
+        text = SCENE_TO_OTHER_INSTRUCTION_TEMPLATE.format(
+            target_hint=SCENE_TARGET_HINT_NAMED.format(name="张三"), marker="[NO_REPLY]"
+        )
+        self.assertIn("张三", text)
+        self.assertIn("[NO_REPLY]", text)
+        self.assertIn("默认不要接话", text)
+
+    def test_to_other_unknown_hint(self) -> None:
+        text = SCENE_TO_OTHER_INSTRUCTION_TEMPLATE.format(
+            target_hint=SCENE_TARGET_HINT_UNKNOWN, marker="[NO_REPLY]"
+        )
+        self.assertIn("另一位成员", text)
+
+    def test_to_group_instruction_limits_length(self) -> None:
+        text = SCENE_TO_GROUP_INSTRUCTION.format(marker="[NO_REPLY]")
+        self.assertIn("[NO_REPLY]", text)
+        self.assertIn("不要分点回答", text)
 
 
 if __name__ == "__main__":
