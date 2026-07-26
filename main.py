@@ -61,7 +61,7 @@ from .core.prompts import (
 from .core.scene import SceneInput, detect_scene
 from .core.silence_judge import SilenceJudge
 
-__version__ = "0.6.0"
+__version__ = "0.6.1"
 
 
 @register(
@@ -422,7 +422,13 @@ class ConversationalFlowPlugin(Star):
     # 主钩子：on_decorating_result
     # ------------------------------------------------------------------
 
-    @filter.on_decorating_result()
+    # 顺序约束（CONVENTIONS.md 3.3）：本插件（言）的文本分段必须先于
+    # astrbot_plugin_voice_hub（声，priority=400）的语音合成执行，因此显式声明
+    # priority=600（on_decorating_result 区间 200-800，数值越大越先执行）。
+    # - 言先执行并多段发送时会 stop_event()，声不再合成语音（整条消息已按文本发出）；
+    # - 若声先加入了音频组件（例如其他链路先合成），本钩子通过
+    #   _has_non_text_components 检测到非文本组件后跳过分段，不破坏音频结果。
+    @filter.on_decorating_result(priority=600)
     async def on_decorating_result(
         self, event: AstrMessageEvent, *args: Any, **kwargs: Any
     ) -> None:
@@ -489,7 +495,9 @@ class ConversationalFlowPlugin(Star):
             if not text or not text.strip():
                 return
 
-        # 5) 检查是否有非文本组件（图片、音频等），有则跳过分段和文本替换
+        # 5) 检查是否有非文本组件（图片、音频等），有则跳过分段和文本替换。
+        #    这同时覆盖 CONVENTIONS.md 3.3 的顺序约束：若声（voice_hub）或其他
+        #    链路已先加入音频组件，本插件不再分段、不清空结果、不 stop_event()。
         has_non_text = self._has_non_text_components(event)
 
         # 6) 不分段或仅有非文本组件：in-place 修改结果，不抢占发送权

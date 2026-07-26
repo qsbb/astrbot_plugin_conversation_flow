@@ -29,12 +29,99 @@ class _MockImage:
         self.path = path
 
 
+class _MockPlain:
+    def __init__(self, text=""):
+        self.text = text
+
+
 astrbot_mc_module.Image = _MockImage
+astrbot_mc_module.Plain = _MockPlain
 astrbot_api_module.message_components = astrbot_mc_module
+
+# mock astrbot.api.event（filter 装饰器记录 priority，供入口钩子测试使用）
+astrbot_event_module = types.ModuleType("astrbot.api.event")
+
+HOOK_PRIORITIES: dict[str, object] = {}
+
+
+def _identity_decorator(*_args, **_kwargs):
+    def deco(fn):
+        return fn
+
+    return deco
+
+
+class _MockFilter:
+    class EventMessageType:
+        GROUP_MESSAGE = "group_message"
+
+    @staticmethod
+    def on_decorating_result(priority=None, **_kwargs):
+        HOOK_PRIORITIES["on_decorating_result"] = priority
+        return _identity_decorator()
+
+    @staticmethod
+    def on_waiting_llm_request(*args, **kwargs):
+        return _identity_decorator()
+
+    @staticmethod
+    def on_llm_request(*args, **kwargs):
+        return _identity_decorator()
+
+    @staticmethod
+    def on_llm_response(*args, **kwargs):
+        return _identity_decorator()
+
+    @staticmethod
+    def event_message_type(*args, **kwargs):
+        return _identity_decorator()
+
+    @staticmethod
+    def command_group(*_args, **_kwargs):
+        class _Group:
+            def __init__(self, fn):
+                self._fn = fn
+
+            def command(self, *_a, **_k):
+                return _identity_decorator()
+
+        return _Group
+
+
+class _MockAstrMessageEvent:
+    pass
+
+
+astrbot_event_module.filter = _MockFilter
+astrbot_event_module.AstrMessageEvent = _MockAstrMessageEvent
+astrbot_api_module.event = astrbot_event_module
+
+# mock astrbot.api.star
+astrbot_star_module = types.ModuleType("astrbot.api.star")
+
+
+class _MockStar:
+    def __init__(self, context=None):
+        self.context = context
+
+
+class _MockStarTools:
+    @staticmethod
+    def get_data_dir(_name):
+        return "."
+
+
+astrbot_star_module.Context = object
+astrbot_star_module.Star = _MockStar
+astrbot_star_module.StarTools = _MockStarTools
+astrbot_star_module.register = _identity_decorator
+astrbot_api_module.star = astrbot_star_module
 
 sys.modules.setdefault("astrbot", astrbot_module)
 sys.modules.setdefault("astrbot.api", astrbot_api_module)
 sys.modules.setdefault("astrbot.api.message_components", astrbot_mc_module)
+sys.modules.setdefault("astrbot.api.event", astrbot_event_module)
+sys.modules.setdefault("astrbot.api.star", astrbot_star_module)
 
 from astrbot_plugin_conversation_flow.core.air_guard import (  # noqa: E402
     AirGuard,
@@ -1781,6 +1868,73 @@ class ScenePromptTests(unittest.TestCase):
         text = SCENE_TO_GROUP_INSTRUCTION.format(marker="[NO_REPLY]")
         self.assertIn("[NO_REPLY]", text)
         self.assertIn("不要分点回答", text)
+
+
+class DecoratingHookPriorityTests(unittest.TestCase):
+    """CONVENTIONS.md 3.3：言的分段必须先于声的语音合成（优先级 600 > 400）。"""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        import astrbot_plugin_conversation_flow.main as plugin_main
+
+        cls.plugin_main = plugin_main
+
+    def test_on_decorating_result_priority_declared_600(self) -> None:
+        self.assertEqual(HOOK_PRIORITIES.get("on_decorating_result"), 600)
+
+    def test_priority_ahead_of_voice_hub_and_in_range(self) -> None:
+        priority = HOOK_PRIORITIES.get("on_decorating_result")
+        voice_hub_priority = 400  # 声插件约定值
+        self.assertGreater(priority, voice_hub_priority)
+        self.assertGreaterEqual(priority, 200)
+        self.assertLessEqual(priority, 800)
+
+    def test_version_is_plain_semver(self) -> None:
+        version = self.plugin_main.__version__
+        self.assertEqual(version, "0.6.1")
+        self.assertFalse(version.startswith("v"))
+        self.assertEqual(len(version.split(".")), 3)
+
+
+class _ChainResult:
+    def __init__(self, chain) -> None:
+        self.chain = chain
+
+
+class _ChainEvent:
+    def __init__(self, chain) -> None:
+        self._result = _ChainResult(chain)
+
+    def get_result(self):
+        return self._result
+
+
+class NonTextSkipTests(unittest.TestCase):
+    """结果链已有音频等非文本组件时（声先处理场景），言应跳过分段。"""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        from astrbot_plugin_conversation_flow.main import ConversationalFlowPlugin
+
+        cls.plugin_cls = ConversationalFlowPlugin
+
+    def _has_non_text(self, chain) -> bool:
+        return self.plugin_cls._has_non_text_components(None, _ChainEvent(chain))
+
+    def test_pure_text_chain_allows_chunking(self) -> None:
+        self.assertFalse(self._has_non_text([_MockPlain("你好"), _MockPlain("再见")]))
+
+    def test_audio_component_triggers_skip(self) -> None:
+        class _Record:  # 模拟声插件加入的语音组件
+            pass
+
+        self.assertTrue(self._has_non_text([_MockPlain("你好"), _Record()]))
+
+    def test_image_component_triggers_skip(self) -> None:
+        self.assertTrue(self._has_non_text([_MockImage(url="http://x/1.png")]))
+
+    def test_empty_chain_allows_default_flow(self) -> None:
+        self.assertFalse(self._has_non_text([]))
 
 
 if __name__ == "__main__":
