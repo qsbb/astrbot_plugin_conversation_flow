@@ -17,7 +17,7 @@
 
 | 阶段 | 能力 | 解决的痛点 |
 |---|---|---|
-| `on_llm_request` | 沉默/拒绝回应判断 + 群聊读空气 + 群聊场景感知 + 群聊上下文注入 + 引用消息归属说明 + 图片意图判断 + 自然工具调用 | bot 对"好的""嗯""hhhh"等无意义消息也强行回复；多个 bot 互相引用刷屏、互道晚安停不下来；两个群友正在对话时 bot 插进去打断；群聊被 @ 时缺乏背景；用户引用 bot 旧发言时被当成用户观点复述；图片消息一刀切；bot 把"调用工具""没有权限"这类机制词汇念给用户 |
+| `on_llm_request` | 沉默判断 + 群聊读空气 + 拟人化情绪 + 场景感知 + 上下文/引用说明 + 图片意图 + 自然工具调用 | bot 逢 @ 必回且永远精神饱满；多 bot 刷屏；打断群友对话；缺少上下文；引用归属错乱；图片消息一刀切；暴露工具机制词 |
 | `on_llm_response` | 沉默标记检测 + 拦截标记检测 | 主 LLM 已生成回复但应静默 |
 | `on_decorating_result` | 智能分段回复 + 纯文本后处理 | 一大串文字糊在一条消息里；Markdown 格式破坏聊天自然度 |
 | `event_message_type(GROUP_MESSAGE)` | 群聊上下文采集（含 bot 自身发言与引用关系） | 群聊被唤醒时提供最近对话作为背景，并保留"谁在回复谁"的指向 |
@@ -177,6 +177,26 @@ OneBot v11 的消息事件自带 `message_id`，引用消息以 `reply` 段携�
 收尾话术的判定要求"整条消息除了客套没别的内容"：先放过超长文本与带疑问标记（`？`/怎么/为什么/能不能…）的消息，再把命中的客套话连同语气词、标点一起剔除，若剩下的实义字符仍够多就不算收尾。因此"那就晚安啦～"算收尾，而"这个插件的分段功能怎么配置，谢谢""明天几点集合？晚安"都会正常回复——不是简单按长度截断。
 
 被误拦时用 `/convflow air_reset` 清空本群窗口计数，立刻恢复回复。`/convflow status` 在群里会附带显示本群窗口内的回复次数与收尾话术次数，方便现场核对。
+
+#### 拟人化情绪
+
+| 字段 | 默认 | 说明 |
+|---|---|---|
+| `mood_enabled` | `true` | 启用会话级回复意愿变化，默认只作用于群聊 |
+| `mood_private_enabled` | `false` | 私聊是否也积累疲劳并可能不回复 |
+| `mood_window_seconds` | `300` | 高频互动与复读的滑动统计窗口 |
+| `mood_frequent_after` | `6` | 窗口内超过该互动数后开始降低意愿 |
+| `mood_streak_after` | `8` | 连续对话超过该轮数后开始疲劳 |
+| `mood_streak_gap_seconds` | `90` | 超过该间隔后连续轮数重置 |
+| `mood_lazy_score` | `72` | 低于该分数时回复更短、更随口 |
+| `mood_annoyed_score` | `45` | 低于该分数时允许模型自行决定不回 |
+| `mood_silence_score` | `25` | 低于该分数时进入概率硬静默 |
+| `mood_silence_chance_percent` | `45` | 极低意愿时直接不调用 LLM 的概率 |
+| `mood_max_consecutive_silences` | `2` | 连续硬静默上限，之后强制交给模型处理 |
+
+系统综合窗口内互动频率、相似文本复读次数和连续对话轮数计算 0～100 的回复意愿。正常档不干预；懒散档仍会回复，但只说必要的一两句；烦躁档即使被 @ 也可以输出 `<SILENCE/>`，极低意愿时还会按概率在调用 LLM 前直接静默。
+
+命令消息不会参与情绪累积，明确求助或紧急消息不会被硬静默；情绪只影响回复意愿和长度，不允许辱骂、羞辱或报复。状态会随统计窗口自然恢复，也可用 `/convflow mood_reset` 立即恢复当前会话。
 
 #### 群聊场景感知
 
@@ -345,6 +365,7 @@ Event B 的 LLM 完成
 /convflow set <key> <val>  - 修改配置项并持久化
 /convflow silence_test <text> - 测试沉默预判断（需 prejudge/both 策略）
 /convflow air_reset        - 清空本群读空气窗口计数
+/convflow mood_reset       - 恢复当前会话的情绪状态
 /convflow reset_stats      - 重置统计
 /convflow help             - 显示帮助
 ```
@@ -373,6 +394,7 @@ astrbot_plugin_conversation_flow/
     ├── image_intent.py           # 图片检测 + 可见性判断（图片意图判断）
     ├── intercept.py              # 智能拦截（注入式，融入主思维链）
     ├── air_guard.py              # 群聊读空气（滑动窗口计数，不调用 LLM）
+    ├── mood.py                   # 拟人化情绪（会话疲劳与回复意愿）
     ├── scene.py                  # 群聊场景感知（对谁说话，规则判定不调用 LLM）
     ├── group_context.py          # 群聊上下文管理（deque 缓存 + message_id 索引）
     ├── message_meta.py           # 消息元信息：message_id / 引用目标 / @ 目标 / 纯文本正文

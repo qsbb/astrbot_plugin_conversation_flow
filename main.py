@@ -25,6 +25,7 @@ from .core.group_context import GroupContextManager
 from .core.intercept import InterceptJudge
 from .core.interrupt_tracker import ConversationTracker
 from .core.llm_service import LLMService
+from .core.mood import MOOD_ANNOYED, MoodTracker
 from .core.message_meta import (
     extract_at_targets,
     extract_plain_text,
@@ -52,13 +53,15 @@ from .core.prompts import (
     INTERRUPT_THINKING_HISTORY_TEMPLATE,
     INTERRUPT_THINKING_HISTORY_WITH_CONTEXT_TEMPLATE,
     NATURAL_TOOL_CALL_INSTRUCTION,
+    MOOD_ANNOYED_INSTRUCTION,
+    MOOD_LAZY_INSTRUCTION,
     PLAIN_TEXT_INSTRUCTION,
     CHUNKING_INSTRUCTION,
 )
 from .core.scene import SceneInput, detect_scene
 from .core.silence_judge import SilenceJudge
 
-__version__ = "0.5.0"
+__version__ = "0.6.0"
 
 
 @register(
@@ -77,8 +80,9 @@ class ConversationalFlowPlugin(Star):
     # event extra 上用于标记"群聊上下文本轮已注入"的 key
     GROUP_CONTEXT_INJECTED_KEY = "conv_flow_group_context_injected"
     # event extra 上用于标记"场景感知指令本轮已注入"的 key。
-    # 场景指令允许模型输出 silence_marker，因此响应阶段需要据此检测 marker。
+    # 场景/情绪指令允许模型输出 silence_marker，响应阶段需据此检测 marker。
     SCENE_INJECTED_KEY = "conv_flow_scene_injected"
+    MOOD_INJECTED_KEY = "conv_flow_mood_injected"
 
     def __init__(self, context: Context, config: Any = None) -> None:
         super().__init__(context)
@@ -123,6 +127,17 @@ class ConversationalFlowPlugin(Star):
             max_bot_replies=self.config.group_air_guard_max_bot_replies,
             polite_loop_limit=self.config.group_air_guard_polite_loop_limit,
         )
+        self.mood = MoodTracker(
+            window_seconds=self.config.mood_window_seconds,
+            frequent_after=self.config.mood_frequent_after,
+            streak_after=self.config.mood_streak_after,
+            streak_gap_seconds=self.config.mood_streak_gap_seconds,
+            lazy_score=self.config.mood_lazy_score,
+            annoyed_score=self.config.mood_annoyed_score,
+            silence_score=self.config.mood_silence_score,
+            silence_chance_percent=self.config.mood_silence_chance_percent,
+            max_consecutive_silences=self.config.mood_max_consecutive_silences,
+        )
 
         # bot 自身 ID 缓存（首次从事件解析后复用）
         self._self_id_cache: str = ""
@@ -136,6 +151,8 @@ class ConversationalFlowPlugin(Star):
             "air_guarded": 0,
             "scene_guarded": 0,
             "scene_hinted": 0,
+            "mood_silenced": 0,
+            "mood_hinted": 0,
             "total_requests": 0,
         }
 
@@ -219,6 +236,17 @@ class ConversationalFlowPlugin(Star):
             self.config.group_air_guard_max_bot_replies,
             self.config.group_air_guard_polite_loop_limit,
         )
+        self.mood.update_config(
+            self.config.mood_window_seconds,
+            self.config.mood_frequent_after,
+            self.config.mood_streak_after,
+            self.config.mood_streak_gap_seconds,
+            self.config.mood_lazy_score,
+            self.config.mood_annoyed_score,
+            self.config.mood_silence_score,
+            self.config.mood_silence_chance_percent,
+            self.config.mood_max_consecutive_silences,
+        )
 
     # ------------------------------------------------------------------
     # 主钩子：等待会话锁 / on_llm_request
@@ -280,6 +308,10 @@ class ConversationalFlowPlugin(Star):
         # 3.5) 群聊读空气：窗口内已连续回复太多次或礼貌收尾循环时直接静默
         # 放在所有注入之前，被拦下的这轮完全不消耗 Token
         if await self._apply_air_guard(event, seq, user_text):
+            return
+
+        # 3.55) 拟人化情绪：即使被 @，bot 也可因高频打扰或复读自行不回。
+        if await self._apply_mood(event, req, seq, user_text):
             return
 
         # 3.6) 场景感知：判断这句话是在对 bot、对某个群友还是对整个群说。
@@ -466,6 +498,7 @@ class ConversationalFlowPlugin(Star):
                 self._update_result_plain_text(event, text)
             self._record_bot_message(event, text)
             self._record_air_reply(event, text)
+            self._record_mood_reply(event)
             self.tracker.finish_response(event, bot_text=text)
             return
 
@@ -476,6 +509,7 @@ class ConversationalFlowPlugin(Star):
                 self._update_result_plain_text(event, text)
             self._record_bot_message(event, text)
             self._record_air_reply(event, text)
+            self._record_mood_reply(event)
             self.tracker.finish_response(event, bot_text=text)
             return
 
@@ -553,6 +587,7 @@ class ConversationalFlowPlugin(Star):
         self._record_bot_message(event, final_text)
         # 分段发送只算一次回复：读空气限制的是"接话次数"，不是消息条数
         self._record_air_reply(event, final_text)
+        self._record_mood_reply(event)
         self.tracker.finish_response(event, bot_text=final_text)
 
     # ------------------------------------------------------------------
@@ -611,6 +646,9 @@ class ConversationalFlowPlugin(Star):
             self.config.interrupt_state_ttl_ms / 1000.0
         )
         air_stale = self.air_guard.cleanup_stale()
+        mood_stale = self.mood.cleanup_stale(
+            self.config.interrupt_state_ttl_ms / 1000.0
+        )
         # 群聊里附带当前会话的窗口计数，方便现场核对为什么被静默
         air_text = ""
         current_group = self._get_group_id(event)
@@ -653,9 +691,13 @@ class ConversationalFlowPlugin(Star):
             f"hint_to_group={self.config.scene_awareness_hint_to_group}, "
             f"self_names={len(self.config.scene_awareness_self_names)}, "
             f"speakers={self.config.scene_awareness_recent_speakers})\n"
+            f"- 拟人化情绪: {'on' if self.config.mood_enabled else 'off'} "
+            f"(private={self.config.mood_private_enabled}, "
+            f"window={self.config.mood_window_seconds}s, "
+            f"chance={self.config.mood_silence_chance_percent}%)\n"
             f"- 自然工具调用: {'on' if self.config.natural_tool_call_enabled else 'off'}\n"
             f"- 活跃会话: {active_sessions} (清理过期 {stale_cleaned}, 群缓冲 {group_stale}, "
-            f"读空气 {air_stale})\n"
+            f"读空气 {air_stale}, 情绪 {mood_stale})\n"
             "统计:\n"
             f"- 总请求: {self._stats['total_requests']}\n"
             f"- 沉默次数: {self._stats['silenced']}\n"
@@ -664,7 +706,9 @@ class ConversationalFlowPlugin(Star):
             f"- 拦截命中: {self._stats['intercepted']}\n"
             f"- 读空气拦截: {self._stats['air_guarded']}\n"
             f"- 场景拦截: {self._stats['scene_guarded']} "
-            f"(软指令 {self._stats['scene_hinted']})"
+            f"(软指令 {self._stats['scene_hinted']})\n"
+            f"- 情绪静默: {self._stats['mood_silenced']} "
+            f"(软指令 {self._stats['mood_hinted']})"
         )
         yield event.plain_result(text)
 
@@ -742,6 +786,8 @@ class ConversationalFlowPlugin(Star):
             "air_guarded": 0,
             "scene_guarded": 0,
             "scene_hinted": 0,
+            "mood_silenced": 0,
+            "mood_hinted": 0,
             "total_requests": 0,
         }
         yield event.plain_result("统计已重置。")
@@ -756,6 +802,16 @@ class ConversationalFlowPlugin(Star):
         self.air_guard.reset(group_id)
         yield event.plain_result("本群读空气窗口已清空。")
 
+    @convflow_group.command("mood_reset")
+    async def convflow_mood_reset(self, event: AstrMessageEvent):
+        """清空当前会话的情绪状态。"""
+        scope_key = self._mood_scope_key(event)
+        if not scope_key:
+            yield event.plain_result("当前会话未启用拟人化情绪。")
+            return
+        self.mood.reset(scope_key)
+        yield event.plain_result("当前会话的情绪状态已恢复。")
+
     @convflow_group.command("help")
     async def convflow_help(self, event: AstrMessageEvent):
         """显示帮助。"""
@@ -767,6 +823,7 @@ class ConversationalFlowPlugin(Star):
             "/convflow set <key> <value> - 修改配置项\n"
             "/convflow silence_test <text> - 测试沉默预判断\n"
             "/convflow air_reset - 清空本群读空气窗口\n"
+            "/convflow mood_reset - 恢复当前会话的情绪状态\n"
             "/convflow reset_stats - 重置统计\n"
             "/convflow help - 显示本帮助"
         )
@@ -1273,6 +1330,63 @@ class ConversationalFlowPlugin(Star):
         self._stats["air_guarded"] += 1
         return True
 
+    def _mood_scope_key(self, event: AstrMessageEvent) -> str:
+        """群聊按群、私聊按会话隔离情绪状态。"""
+        group_id = self._get_group_id(event)
+        if group_id:
+            return f"group:{group_id}"
+        if self.config.mood_private_enabled:
+            umo = self.tracker._get_umo(event)
+            return f"private:{umo}" if umo else ""
+        return ""
+
+    async def _apply_mood(
+        self, event: AstrMessageEvent, req: Any, seq: Any, user_text: str
+    ) -> bool:
+        """评估当前回复意愿；返回 True 表示已直接静默。"""
+        if not self.config.mood_enabled:
+            return False
+        # 管理命令必须稳定可用；明确求助由 MoodTracker 保护，不做硬静默。
+        stripped = (user_text or "").lstrip()
+        if not stripped or stripped.startswith("/"):
+            return False
+        scope_key = self._mood_scope_key(event)
+        if not scope_key:
+            return False
+
+        decision = self.mood.evaluate(scope_key, user_text)
+        self.logger.debug(
+            "[conv-flow] seq=%s mood=%s willingness=%s reason=%s",
+            seq,
+            decision.mood,
+            decision.willingness,
+            decision.reason,
+        )
+        if decision.should_silence:
+            self.logger.info(
+                "[conv-flow] seq=%s mood silenced: willingness=%s, %s",
+                seq,
+                decision.willingness,
+                decision.reason,
+            )
+            await self._silence_event(event, send_notify=False)
+            self.tracker.cancel_request(event)
+            self._stats["mood_silenced"] += 1
+            return True
+        if not decision.should_inject:
+            return False
+
+        if decision.mood == MOOD_ANNOYED:
+            instruction = MOOD_ANNOYED_INSTRUCTION.format(
+                marker=self.config.silence_marker
+            )
+            self._set_extra(event, self.MOOD_INJECTED_KEY, True)
+        else:
+            instruction = MOOD_LAZY_INSTRUCTION
+        self._inject_instruction(req, instruction, f"mood {decision.mood}")
+        self._stats["mood_hinted"] += 1
+        return False
+
     def _should_check_silence_marker(self, event: AstrMessageEvent) -> bool:
         """判断本轮是否需要在响应中检测 silence_marker。
 
@@ -1284,7 +1398,9 @@ class ConversationalFlowPlugin(Star):
             return True
         if self._get_extra(event, self.INTERCEPTED_KEY) is True:
             return True
-        return self._get_extra(event, self.SCENE_INJECTED_KEY) is True
+        if self._get_extra(event, self.SCENE_INJECTED_KEY) is True:
+            return True
+        return self._get_extra(event, self.MOOD_INJECTED_KEY) is True
 
     def _build_scene_input(self, event: AstrMessageEvent, group_id: str) -> SceneInput:
         """从 event 与群聊缓冲中收集场景判定所需的原始信号。"""
@@ -1434,6 +1550,14 @@ class ConversationalFlowPlugin(Star):
         if not group_id:
             return
         self.air_guard.record_reply(group_id, text)
+
+    def _record_mood_reply(self, event: AstrMessageEvent) -> None:
+        """实际回复后解除该会话的连续静默计数。"""
+        if not self.config.mood_enabled:
+            return
+        scope_key = self._mood_scope_key(event)
+        if scope_key:
+            self.mood.record_reply(scope_key)
 
     def _record_bot_message(self, event: AstrMessageEvent, text: str) -> None:
         """把 bot 实际发出的回复写回群聊上下文缓冲。

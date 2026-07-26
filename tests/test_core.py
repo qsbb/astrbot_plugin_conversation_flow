@@ -52,6 +52,12 @@ from astrbot_plugin_conversation_flow.core.interrupt_tracker import (  # noqa: E
 from astrbot_plugin_conversation_flow.core.group_context import (  # noqa: E402
     GroupContextManager,
 )
+from astrbot_plugin_conversation_flow.core.mood import (  # noqa: E402
+    MOOD_ANNOYED,
+    MOOD_LAZY,
+    MOOD_NORMAL,
+    MoodTracker,
+)
 from astrbot_plugin_conversation_flow.core.plain_text import (  # noqa: E402
     strip_markdown_format,
 )
@@ -1404,6 +1410,136 @@ class AirGuardTests(unittest.TestCase):
         guard._polite["g1"][0] -= 120
         self.assertEqual(guard.cleanup_stale(), 1)
         self.assertEqual(guard.stats("g1")["bot_replies"], 0)
+
+
+class _FixedRandom:
+    def __init__(self, value: float) -> None:
+        self.value = value
+
+    def random(self) -> float:
+        return self.value
+
+
+class MoodTrackerTests(unittest.TestCase):
+    def _tracker(self, **overrides) -> MoodTracker:
+        values = {
+            "window_seconds": 60,
+            "frequent_after": 2,
+            "streak_after": 2,
+            "streak_gap_seconds": 20,
+            "lazy_score": 80,
+            "annoyed_score": 50,
+            "silence_score": 30,
+            "silence_chance_percent": 100,
+            "max_consecutive_silences": 2,
+            "rng": _FixedRandom(0.0),
+        }
+        values.update(overrides)
+        return MoodTracker(**values)
+
+    def test_first_messages_keep_normal_mood(self) -> None:
+        tracker = self._tracker()
+        first = tracker.evaluate("g", "你好", now=1)
+        second = tracker.evaluate("g", "今天怎么样", now=2)
+        self.assertEqual(first.mood, MOOD_NORMAL)
+        self.assertEqual(second.mood, MOOD_NORMAL)
+
+    def test_frequent_interactions_progress_through_moods(self) -> None:
+        tracker = self._tracker(silence_chance_percent=0)
+        decisions = [tracker.evaluate("g", f"消息{i}", now=i) for i in range(1, 9)]
+        self.assertIn(MOOD_LAZY, [item.mood for item in decisions])
+        self.assertEqual(decisions[-1].mood, MOOD_ANNOYED)
+        self.assertFalse(decisions[-1].should_silence)
+
+    def test_repeated_text_causes_stronger_penalty(self) -> None:
+        tracker = self._tracker(frequent_after=99, streak_after=99)
+        decisions = [tracker.evaluate("g", "回我回我！", now=i) for i in range(1, 6)]
+        self.assertEqual(decisions[1].mood, MOOD_NORMAL)
+        self.assertEqual(decisions[2].mood, MOOD_LAZY)
+        self.assertEqual(decisions[3].mood, MOOD_LAZY)
+        self.assertEqual(decisions[4].mood, MOOD_ANNOYED)
+
+    def test_hard_silence_is_probabilistic(self) -> None:
+        tracker = self._tracker()
+        decision = None
+        for i in range(1, 10):
+            decision = tracker.evaluate("g", "催催催", now=i)
+            if decision.should_silence:
+                break
+        self.assertIsNotNone(decision)
+        self.assertTrue(decision.should_silence)
+
+    def test_commands_and_urgent_messages_are_never_hard_silenced(self) -> None:
+        for protected_text in ("/convflow status", "救命，帮帮我"):
+            tracker = self._tracker()
+            decision = None
+            for i in range(1, 10):
+                decision = tracker.evaluate("g", protected_text, now=i)
+            self.assertEqual(decision.mood, MOOD_ANNOYED)
+            self.assertFalse(decision.should_silence)
+
+    def test_consecutive_silence_limit_forces_next_round_through(self) -> None:
+        tracker = self._tracker(max_consecutive_silences=2)
+        silences = []
+        for i in range(1, 14):
+            decision = tracker.evaluate("g", "还在吗", now=i)
+            if decision.willingness <= 30:
+                silences.append(decision.should_silence)
+                if len(silences) == 3:
+                    break
+        self.assertEqual(silences, [True, True, False])
+
+    def test_record_reply_resets_consecutive_silence_limit(self) -> None:
+        tracker = self._tracker(max_consecutive_silences=1)
+        first_silence = None
+        for i in range(1, 12):
+            decision = tracker.evaluate("g", "催一下", now=i)
+            if decision.should_silence:
+                first_silence = decision
+                break
+        self.assertTrue(first_silence.should_silence)
+        tracker.record_reply("g")
+        next_decision = tracker.evaluate("g", "催一下", now=20)
+        self.assertTrue(next_decision.should_silence)
+
+    def test_window_and_streak_recover_after_idle_time(self) -> None:
+        tracker = self._tracker()
+        for i in range(1, 8):
+            tracker.evaluate("g", "催一下", now=i)
+        recovered = tracker.evaluate("g", "新话题", now=100)
+        self.assertEqual(recovered.mood, MOOD_NORMAL)
+        self.assertEqual(recovered.streak_count, 1)
+        self.assertEqual(recovered.interaction_count, 1)
+
+    def test_scopes_are_independent_and_resettable(self) -> None:
+        tracker = self._tracker()
+        for i in range(1, 8):
+            tracker.evaluate("g1", "催", now=i)
+        self.assertEqual(tracker.evaluate("g2", "你好", now=8).mood, MOOD_NORMAL)
+        tracker.reset("g1")
+        self.assertEqual(tracker.stats("g1")["interactions"], 0)
+
+
+class MoodConfigTests(unittest.TestCase):
+    def test_defaults_are_enabled_for_groups_only(self) -> None:
+        cfg = build_plugin_config({})
+        self.assertTrue(cfg.mood_enabled)
+        self.assertFalse(cfg.mood_private_enabled)
+        self.assertEqual(cfg.mood_silence_chance_percent, 45)
+
+    def test_score_thresholds_are_ordered_and_clamped(self) -> None:
+        cfg = build_plugin_config(
+            {
+                "mood_lazy_score": 200,
+                "mood_annoyed_score": 150,
+                "mood_silence_score": 120,
+                "mood_silence_chance_percent": -5,
+            }
+        )
+        self.assertEqual(cfg.mood_lazy_score, 100)
+        self.assertEqual(cfg.mood_annoyed_score, 100)
+        self.assertEqual(cfg.mood_silence_score, 100)
+        self.assertEqual(cfg.mood_silence_chance_percent, 0)
 
 
 class NaturalToolCallPromptTests(unittest.TestCase):

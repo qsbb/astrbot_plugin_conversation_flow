@@ -54,6 +54,17 @@ DEFAULTS: dict[str, Any] = {
     "scene_awareness_hint_to_group": False,
     "scene_awareness_self_names": [],
     "scene_awareness_recent_speakers": 8,
+    "mood_enabled": True,
+    "mood_private_enabled": False,
+    "mood_window_seconds": 300,
+    "mood_frequent_after": 6,
+    "mood_streak_after": 8,
+    "mood_streak_gap_seconds": 90,
+    "mood_lazy_score": 72,
+    "mood_annoyed_score": 45,
+    "mood_silence_score": 25,
+    "mood_silence_chance_percent": 45,
+    "mood_max_consecutive_silences": 2,
     "natural_tool_call_enabled": True,
     "reply_context_enabled": True,
     "reply_context_api_fallback": True,
@@ -310,6 +321,63 @@ def normalize_config(raw: dict[str, Any] | None) -> dict[str, Any]:
             DEFAULTS["scene_awareness_recent_speakers"],
         ),
     )
+    out["mood_enabled"] = _coerce_bool(
+        raw.get("mood_enabled"), DEFAULTS["mood_enabled"]
+    )
+    out["mood_private_enabled"] = _coerce_bool(
+        raw.get("mood_private_enabled"), DEFAULTS["mood_private_enabled"]
+    )
+    out["mood_window_seconds"] = max(
+        10, _coerce_int(raw.get("mood_window_seconds"), DEFAULTS["mood_window_seconds"])
+    )
+    out["mood_frequent_after"] = max(
+        1, _coerce_int(raw.get("mood_frequent_after"), DEFAULTS["mood_frequent_after"])
+    )
+    out["mood_streak_after"] = max(
+        1, _coerce_int(raw.get("mood_streak_after"), DEFAULTS["mood_streak_after"])
+    )
+    out["mood_streak_gap_seconds"] = max(
+        1,
+        _coerce_int(
+            raw.get("mood_streak_gap_seconds"), DEFAULTS["mood_streak_gap_seconds"]
+        ),
+    )
+    lazy_score = max(
+        0, min(100, _coerce_int(raw.get("mood_lazy_score"), DEFAULTS["mood_lazy_score"]))
+    )
+    annoyed_score = max(
+        0,
+        min(
+            lazy_score,
+            _coerce_int(raw.get("mood_annoyed_score"), DEFAULTS["mood_annoyed_score"]),
+        ),
+    )
+    out["mood_lazy_score"] = lazy_score
+    out["mood_annoyed_score"] = annoyed_score
+    out["mood_silence_score"] = max(
+        0,
+        min(
+            annoyed_score,
+            _coerce_int(raw.get("mood_silence_score"), DEFAULTS["mood_silence_score"]),
+        ),
+    )
+    out["mood_silence_chance_percent"] = max(
+        0,
+        min(
+            100,
+            _coerce_int(
+                raw.get("mood_silence_chance_percent"),
+                DEFAULTS["mood_silence_chance_percent"],
+            ),
+        ),
+    )
+    out["mood_max_consecutive_silences"] = max(
+        0,
+        _coerce_int(
+            raw.get("mood_max_consecutive_silences"),
+            DEFAULTS["mood_max_consecutive_silences"],
+        ),
+    )
     out["natural_tool_call_enabled"] = _coerce_bool(
         raw.get("natural_tool_call_enabled"), DEFAULTS["natural_tool_call_enabled"]
     )
@@ -396,6 +464,17 @@ class PluginConfig:
     scene_awareness_hint_to_group: bool = False
     scene_awareness_self_names: list[str] = field(default_factory=list)
     scene_awareness_recent_speakers: int = 8
+    mood_enabled: bool = True
+    mood_private_enabled: bool = False
+    mood_window_seconds: int = 300
+    mood_frequent_after: int = 6
+    mood_streak_after: int = 8
+    mood_streak_gap_seconds: int = 90
+    mood_lazy_score: int = 72
+    mood_annoyed_score: int = 45
+    mood_silence_score: int = 25
+    mood_silence_chance_percent: int = 45
+    mood_max_consecutive_silences: int = 2
     natural_tool_call_enabled: bool = True
     reply_context_enabled: bool = True
     reply_context_api_fallback: bool = True

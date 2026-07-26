@@ -250,6 +250,72 @@
     "hint": "从群聊缓冲中取最近多少位发言者的昵称，用于判断「这句话里提到的名字是不是群里某个人」。默认 8 人；填 0 表示不限制（取整个缓冲）。",
     "default": 8
   },
+  "mood_enabled": {
+    "type": "bool",
+    "description": "[拟人化情绪] 启用回复意愿变化",
+    "hint": "开启后，Bot 在群聊中被连续打扰、复读或长时间连聊时，会逐渐变得懒散或烦躁；即使被 @ 也可自行选择不回。默认仅群聊生效。",
+    "default": true
+  },
+  "mood_private_enabled": {
+    "type": "bool",
+    "description": "[拟人化情绪] 私聊也启用",
+    "hint": "开启后私聊同样会积累疲劳并可能不回复。默认关闭，避免重要的一对一消息被漏掉。",
+    "default": false
+  },
+  "mood_window_seconds": {
+    "type": "int",
+    "description": "[拟人化情绪] 疲劳统计窗口秒数",
+    "hint": "只统计该窗口内的互动与复读；长时间没人说话后情绪会自然恢复。默认 300 秒。",
+    "default": 300
+  },
+  "mood_frequent_after": {
+    "type": "int",
+    "description": "[拟人化情绪] 开始厌烦的窗口互动数",
+    "hint": "窗口内超过该次数后开始降低回复意愿。默认 6；越小越容易烦。",
+    "default": 6
+  },
+  "mood_streak_after": {
+    "type": "int",
+    "description": "[拟人化情绪] 开始疲劳的连续对话轮数",
+    "hint": "连续对话超过该轮数后开始降低回复意愿。默认 8。",
+    "default": 8
+  },
+  "mood_streak_gap_seconds": {
+    "type": "int",
+    "description": "[拟人化情绪] 连续对话中断秒数",
+    "hint": "两条消息间隔超过该秒数后，连续轮数重新计算。默认 90 秒。",
+    "default": 90
+  },
+  "mood_lazy_score": {
+    "type": "int",
+    "description": "[拟人化情绪] 懒散阈值",
+    "hint": "回复意愿低于该分数时，Bot 仍会回复但会更短、更随口。范围 0-100，默认 72。",
+    "default": 72
+  },
+  "mood_annoyed_score": {
+    "type": "int",
+    "description": "[拟人化情绪] 烦躁阈值",
+    "hint": "回复意愿低于该分数时，Bot 可自行输出沉默标记或只敷衍一句。默认 45。",
+    "default": 45
+  },
+  "mood_silence_score": {
+    "type": "int",
+    "description": "[拟人化情绪] 概率硬静默阈值",
+    "hint": "回复意愿低于该分数时，可在调用 LLM 前直接装作没看见。默认 25。",
+    "default": 25
+  },
+  "mood_silence_chance_percent": {
+    "type": "int",
+    "description": "[拟人化情绪] 极低意愿时静默概率",
+    "hint": "达到硬静默阈值后的不回复概率，范围 0-100。默认 45%；填 0 关闭硬静默，只让模型自行决定。",
+    "default": 45
+  },
+  "mood_max_consecutive_silences": {
+    "type": "int",
+    "description": "[拟人化情绪] 最大连续静默次数",
+    "hint": "连续装作没看见达到该次数后，下一条强制交给模型回应，避免长期失联。默认 2；填 0 表示不限制。",
+    "default": 2
+  },
   "natural_tool_call_enabled": {
     "type": "bool",
     "description": "[工具调用] 自然语言工具调用",
