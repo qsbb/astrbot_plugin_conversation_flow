@@ -17,10 +17,10 @@
 
 | 阶段 | 能力 | 解决的痛点 |
 |---|---|---|
-| `on_llm_request` | 沉默/拒绝回应判断 + 群聊上下文注入 + 图片意图判断 | bot 对"好的""嗯""hhhh"等无意义消息也强行回复；群聊被 @ 时缺乏背景；图片消息一刀切 |
+| `on_llm_request` | 沉默/拒绝回应判断 + 群聊上下文注入 + 引用消息归属说明 + 图片意图判断 | bot 对"好的""嗯""hhhh"等无意义消息也强行回复；群聊被 @ 时缺乏背景；用户引用 bot 旧发言时被当成用户观点复述；图片消息一刀切 |
 | `on_llm_response` | 沉默标记检测 + 拦截标记检测 | 主 LLM 已生成回复但应静默 |
 | `on_decorating_result` | 智能分段回复 + 纯文本后处理 | 一大串文字糊在一条消息里；Markdown 格式破坏聊天自然度 |
-| `event_message_type(GROUP_MESSAGE)` | 群聊上下文采集 | 群聊被唤醒时提供最近对话作为背景 |
+| `event_message_type(GROUP_MESSAGE)` | 群聊上下文采集（含 bot 自身发言与引用关系） | 群聊被唤醒时提供最近对话作为背景，并保留"谁在回复谁"的指向 |
 | 贯穿全阶段 | 插话中断处理 + 智能拦截 | bot 还在思考时用户追加消息；不良内容自动拒绝 |
 
 ### 能力边界
@@ -123,8 +123,29 @@
 | `group_context_enabled` | `true` | bot 在群聊被 @/回复时注入最近群聊消息作为背景 |
 | `group_context_max_messages` | `10` | 获取的最近群聊消息条数上限 |
 | `group_context_only_when_woken` | `true` | 仅在被唤醒时注入；关闭则每次群聊消息都注入（消耗更多 Token） |
+| `group_context_record_bot` | `true` | 把 bot 自己发出的回复也写回群聊上下文，注入时单独标注归属 |
+| `group_context_bot_label` | `你` | 注入上下文时对 bot 自身发言的称谓 |
 
 群聊上下文由插件自行维护（按 group_id 缓存最近 N 条消息），AstrBot 没有跨平台"获取群聊历史"API。命令消息（以 `/` 开头）不会被记录到群聊上下文，避免污染。
+
+上下文按如下格式渲染，`（回复 …）` 标注来自 OneBot v11 的 `message_id` 反查：
+
+```
+Alice: 这个方案感觉不太行
+你: 我建议先拆成两步做
+Bob（回复 你「我建议先拆成两步做」）: 念一下上面那句
+```
+
+标注为 `group_context_bot_label` 的行是 bot 自己此前说过的话。加上这层归属信息后，用户引用 bot 旧发言时，模型不会再把自己的话误当成用户观点原样复述。
+
+#### 引用消息处理
+
+| 字段 | 默认 | 说明 |
+|---|---|---|
+| `reply_context_enabled` | `true` | 用户引用（回复）某条消息时，明确告知 LLM 被引用内容出自谁、用户针对它说了什么 |
+| `reply_context_api_fallback` | `true` | 本地缓冲未命中时，通过 OneBot `get_msg` 反查被引用消息；取不到则静默降级 |
+
+OneBot v11 的消息事件自带 `message_id`，引用消息以 `reply` 段携带目标 `id`。插件据此维护 `message_id → 记录` 索引，还原"谁在回复谁"。被引用内容与 `at` 段不会混入用户正文，避免模型把引用内容当成用户本轮的诉求。
 
 #### 话题上下文注入
 
@@ -281,7 +302,8 @@ astrbot_plugin_conversation_flow/
     ├── plain_text.py             # Markdown 格式剥离（纯文本模式）
     ├── image_intent.py           # 图片检测 + 可见性判断（图片意图判断）
     ├── intercept.py              # 智能拦截（注入式，融入主思维链）
-    ├── group_context.py          # 群聊上下文管理（deque 缓存）
+    ├── group_context.py          # 群聊上下文管理（deque 缓存 + message_id 索引）
+    ├── message_meta.py           # 消息元信息：message_id / 引用目标 / 纯文本正文
     └── interrupt_tracker.py      # 会话级 in-flight 状态管理（含作用域）
 ```
 
@@ -298,13 +320,15 @@ astrbot_plugin_conversation_flow/
 2. **插话检测仅在 LLM 思考期间生效**：若旧回复已进入 `on_decorating_result`，无法阻止其发送。
 3. **`event.send()` 时机**：分段发送依赖适配器实现，极少数适配器可能不支持在 `stop_event()` 后主动发送。
 4. **跨进程会话状态**：本插件状态在内存中，AstrBot 重启后会丢失（这是预期行为）。
+5. **`message_id` 依赖平台能力**：引用关系还原依赖 OneBot v11 的 `message_id` 与 `reply` 段。不提供这些字段的适配器会退化为仅按对象名/预览标注；`get_msg` 兜底反查也需适配器支持该 API。
+6. **bot 发言记录不含平台 `message_id`**：bot 自己的回复在发送前入库，此时拿不到平台回传的 `message_id`，因此用户引用 bot 消息时主要靠内容匹配与 API 兜底定位。
 
 ## 调试
 
 日志前缀统一为 `[conv-flow]`，关键事件：
 
 ```
-[conv-flow] plugin loaded: version=0.3.0, silence=True/inject, chunking=True, interrupt=True/append(scope=sender,window=30000ms), group_context=True, intercept=False
+[conv-flow] plugin loaded: version=0.4.0, silence=True/inject, chunking=True, interrupt=True/append(scope=sender,window=30000ms), group_context=True, intercept=False
 [conv-flow] seq=1 silenced by prejudge, user_text='好的'
 [conv-flow] seq=2 interrupt detected, merged context injected
 [conv-flow] seq=1 response discarded (interrupted)

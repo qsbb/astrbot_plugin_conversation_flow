@@ -24,9 +24,19 @@ from .core.group_context import GroupContextManager
 from .core.intercept import InterceptJudge
 from .core.interrupt_tracker import ConversationTracker
 from .core.llm_service import LLMService
+from .core.message_meta import (
+    extract_plain_text,
+    extract_reply_ref,
+    fetch_message_by_id,
+    get_message_id,
+    get_self_id,
+    truncate_preview,
+)
 from .core.plain_text import strip_markdown_format
 from .core.prompts import (
     GROUP_CONTEXT_INSTRUCTION_TEMPLATE,
+    REPLY_SPEAKER_SELF,
+    REPLY_TARGET_INSTRUCTION_TEMPLATE,
     TOPIC_CONTEXT_INSTRUCTION_TEMPLATE,
     IMAGE_INTENT_INSTRUCTION,
     INTERRUPT_MERGE_APPEND_TEMPLATE,
@@ -40,7 +50,7 @@ from .core.prompts import (
 )
 from .core.silence_judge import SilenceJudge
 
-__version__ = "0.3.3"
+__version__ = "0.4.0"
 
 
 @register(
@@ -97,6 +107,9 @@ class ConversationalFlowPlugin(Star):
         self.group_context = GroupContextManager(
             max_messages=self.config.group_context_max_messages
         )
+
+        # bot 自身 ID 缓存（首次从事件解析后复用）
+        self._self_id_cache: str = ""
 
         # 运行时统计
         self._stats = {
@@ -247,6 +260,12 @@ class ConversationalFlowPlugin(Star):
         self._inject_group_context(event, req, seq, is_wake)
         # 话题上下文注入：帮助 LLM 理解当前话题（群聊上下文已注入时自动跳过）
         self._inject_topic_context(event, req, seq)
+        # 引用消息指向说明：消除"被引用内容是谁说的"歧义
+        # 必须在上下文注入之后，让指向说明更靠近 prompt 末尾、权重更高
+        try:
+            await self._inject_reply_context(event, req, seq)
+        except Exception as exc:
+            self.logger.debug("[conv-flow] reply context inject failed: %s", exc)
 
         if not user_text:
             return
@@ -411,6 +430,7 @@ class ConversationalFlowPlugin(Star):
         if not self.config.chunking_enabled or has_non_text:
             if text_modified and not has_non_text:
                 self._update_result_plain_text(event, text)
+            self._record_bot_message(event, text)
             self.tracker.finish_response(event, bot_text=text)
             return
 
@@ -419,6 +439,7 @@ class ConversationalFlowPlugin(Star):
             # 只有一段：in-place 修改结果，不抢占发送权
             if text_modified:
                 self._update_result_plain_text(event, text)
+            self._record_bot_message(event, text)
             self.tracker.finish_response(event, bot_text=text)
             return
 
@@ -491,9 +512,10 @@ class ConversationalFlowPlugin(Star):
         self.logger.info(
             "[conv-flow] seq=%s chunked into %s segments", seq, len(sent_text_parts)
         )
-        self.tracker.finish_response(
-            event, bot_text="\n".join(sent_text_parts) or original_text
-        )
+        # 分段发送时按整段合并记录，避免上下文里出现多条零碎的 bot 发言
+        final_text = "\n".join(sent_text_parts) or original_text
+        self._record_bot_message(event, final_text)
+        self.tracker.finish_response(event, bot_text=final_text)
 
     # ------------------------------------------------------------------
     # 群聊消息监听：缓存最近群聊消息供被唤醒时注入
@@ -503,7 +525,11 @@ class ConversationalFlowPlugin(Star):
     async def on_group_message(
         self, event: AstrMessageEvent, *args: Any, **kwargs: Any
     ) -> None:
-        """记录群聊消息到上下文缓冲，供被唤醒时注入。"""
+        """记录群聊消息到上下文缓冲，供被唤醒时注入。
+
+        记录内容带上 message_id 与引用关系，使后续能精确判断
+        "用户引用的是谁的哪句话"。
+        """
         if not self.config.group_context_enabled:
             return
         group_id = self._get_group_id(event)
@@ -511,10 +537,23 @@ class ConversationalFlowPlugin(Star):
             return
         sender_id = self.tracker._get_sender_id(event)
         sender_name = self._get_sender_name(event)
-        text = (event.get_message_str() or "").strip()
+        # 只取 Plain 段，避免把被引用消息的内容当成用户本人说的话
+        text = extract_plain_text(event)
         # 过滤命令消息，避免污染群聊上下文
-        if text and not text.startswith("/"):
-            self.group_context.record(group_id, sender_id, sender_name, text)
+        if not text or text.startswith("/"):
+            return
+        reply_ref = extract_reply_ref(event)
+        self.group_context.record(
+            group_id,
+            sender_id,
+            sender_name,
+            text,
+            message_id=get_message_id(event),
+            is_bot=False,
+            reply_to_id=reply_ref.message_id,
+            reply_to_name=reply_ref.sender_name,
+            reply_to_preview=reply_ref.preview,
+        )
 
     # ------------------------------------------------------------------
     # 指令：/convflow
@@ -549,7 +588,10 @@ class ConversationalFlowPlugin(Star):
             f"window={self.config.interrupt_window_ms}ms)\n"
             f"- 群聊上下文: {'on' if self.config.group_context_enabled else 'off'} "
             f"(max={self.config.group_context_max_messages}, "
-            f"woken_only={self.config.group_context_only_when_woken})\n"
+            f"woken_only={self.config.group_context_only_when_woken}, "
+            f"record_bot={self.config.group_context_record_bot})\n"
+            f"- 引用消息: {'on' if self.config.reply_context_enabled else 'off'} "
+            f"(api_fallback={self.config.reply_context_api_fallback})\n"
             f"- 话题上下文: {'on' if self.config.topic_context_enabled else 'off'} "
             f"(max={self.config.topic_context_max_messages})\n"
             f"- 智能拦截: {'on' if self.config.intercept_enabled else 'off'}\n"
@@ -955,12 +997,20 @@ class ConversationalFlowPlugin(Star):
         group_id = self._get_group_id(event)
         if not group_id:
             return
+        bot_label = self.config.group_context_bot_label
+        # 排除当前正在处理的这条消息：它已经是 prompt 主体，
+        # 再出现在背景记录里会让模型看到重复内容。
         context = self.group_context.get_recent_context(
-            group_id, self.config.group_context_max_messages
+            group_id,
+            self.config.group_context_max_messages,
+            bot_label=bot_label,
+            exclude_message_id=get_message_id(event),
         )
         if not context:
             return
-        instruction = GROUP_CONTEXT_INSTRUCTION_TEMPLATE.format(context=context)
+        instruction = GROUP_CONTEXT_INSTRUCTION_TEMPLATE.format(
+            context=context, bot_label=bot_label
+        )
         injected = False
         try:
             parts = getattr(req, "extra_user_content_parts", None)
@@ -1011,12 +1061,18 @@ class ConversationalFlowPlugin(Star):
         group_id = self._get_group_id(event)
         if not group_id:
             return
+        bot_label = self.config.group_context_bot_label
         context = self.group_context.get_recent_context(
-            group_id, self.config.topic_context_max_messages
+            group_id,
+            self.config.topic_context_max_messages,
+            bot_label=bot_label,
+            exclude_message_id=get_message_id(event),
         )
         if not context:
             return
-        instruction = TOPIC_CONTEXT_INSTRUCTION_TEMPLATE.format(context=context)
+        instruction = TOPIC_CONTEXT_INSTRUCTION_TEMPLATE.format(
+            context=context, bot_label=bot_label
+        )
         self._inject_instruction(req, instruction, "topic context")
         self.logger.info(
             "[conv-flow] seq=%s topic context injected (group=%s, count=%s)",
@@ -1024,6 +1080,120 @@ class ConversationalFlowPlugin(Star):
             group_id,
             self.config.topic_context_max_messages,
         )
+
+    async def _inject_reply_context(
+        self, event: AstrMessageEvent, req: Any, seq: Any
+    ) -> None:
+        """用户引用（回复）了某条消息时，明确告诉 LLM 被引用内容出自谁。
+
+        解析顺序：
+        1. 本地缓冲按 message_id 反查（最准，能判断是不是 bot 自己说的）；
+        2. 引用段自带的发送者/预览；
+        3. OneBot ``get_msg`` 反查（可配置关闭）。
+        """
+        if not self.config.reply_context_enabled:
+            return
+        reply_ref = extract_reply_ref(event)
+        if reply_ref.is_empty():
+            return
+
+        group_id = self._get_group_id(event)
+        quoted_text = ""
+        quoted_name = ""
+        quoted_is_bot = False
+        source = ""
+
+        record = self.group_context.find_by_message_id(group_id, reply_ref.message_id)
+        if record is not None:
+            quoted_text = record.text
+            quoted_name = record.sender_name
+            quoted_is_bot = record.is_bot
+            source = "buffer"
+        else:
+            quoted_text = reply_ref.preview
+            quoted_name = reply_ref.sender_name
+            if reply_ref.sender_id and reply_ref.sender_id == self._get_self_id(event):
+                quoted_is_bot = True
+            source = "reply_segment" if quoted_text else ""
+
+        # 本地与引用段都没拿到内容时，按配置回落到协议端反查
+        if not quoted_text and self.config.reply_context_api_fallback:
+            fetched = await fetch_message_by_id(event, reply_ref.message_id)
+            if fetched:
+                quoted_text = fetched.get("preview", "")
+                quoted_name = quoted_name or fetched.get("sender_name", "")
+                fetched_sender = fetched.get("sender_id", "")
+                if fetched_sender and fetched_sender == self._get_self_id(event):
+                    quoted_is_bot = True
+                source = "get_msg"
+
+        if not quoted_text:
+            self.logger.debug(
+                "[conv-flow] seq=%s reply ref unresolved (id=%s)",
+                seq,
+                reply_ref.message_id,
+            )
+            return
+
+        user_text = extract_plain_text(event)
+        if not user_text:
+            return
+
+        if quoted_is_bot:
+            speaker = REPLY_SPEAKER_SELF
+        elif quoted_name:
+            speaker = quoted_name
+        else:
+            speaker = "群里的另一位成员"
+
+        instruction = REPLY_TARGET_INSTRUCTION_TEMPLATE.format(
+            speaker=speaker,
+            quoted_text=truncate_preview(quoted_text, 200),
+            user_text=truncate_preview(user_text, 200),
+        )
+        self._inject_instruction(req, instruction, "reply context")
+        self.logger.info(
+            "[conv-flow] seq=%s reply context injected "
+            "(source=%s, quoted_is_bot=%s, quoted_id=%s)",
+            seq,
+            source,
+            quoted_is_bot,
+            reply_ref.message_id,
+        )
+
+    def _record_bot_message(self, event: AstrMessageEvent, text: str) -> None:
+        """把 bot 实际发出的回复写回群聊上下文缓冲。
+
+        协议端不会给出 bot 自己发言的 message_id（发送 API 的返回值不经过
+        本钩子），因此这里记录的 message_id 为空，靠 ``is_bot`` 标记身份。
+        用户引用 bot 发言时通过 get_msg 的 sender_id 判定，不依赖本记录。
+        """
+        if not self.config.group_context_enabled:
+            return
+        if not self.config.group_context_record_bot:
+            return
+        if not text or not text.strip():
+            return
+        group_id = self._get_group_id(event)
+        if not group_id:
+            return
+        self.group_context.record(
+            group_id,
+            sender_id=self._get_self_id(event),
+            sender_name=self.config.group_context_bot_label,
+            text=text,
+            message_id="",
+            is_bot=True,
+        )
+
+    def _get_self_id(self, event: AstrMessageEvent) -> str:
+        """获取 bot 自身 ID，带本地缓存避免重复解析。"""
+        if self._self_id_cache:
+            return self._self_id_cache
+        value = get_self_id(event)
+        if value:
+            self._self_id_cache = value
+        return value
 
     def _has_non_text_components(self, event: AstrMessageEvent) -> bool:
         """检查结果链中是否有非 Plain 文本组件（图片、音频等）。"""
@@ -1112,6 +1282,16 @@ class ConversationalFlowPlugin(Star):
             pass
 
     @staticmethod
+    def _get_extra(event: AstrMessageEvent, key: str) -> Any:
+        getter = getattr(event, "get_extra", None)
+        if callable(getter):
+            try:
+                return getter(key)
+            except Exception:
+                pass
+        return getattr(event, key, None)
+
+    @staticmethod
     def _extract_response_text(response: Any) -> str:
         if response is None:
             return ""
@@ -1135,7 +1315,7 @@ class ConversationalFlowPlugin(Star):
 
     def _try_parse_value(self, key: str, value: str) -> Any:
         """根据 schema 默认值类型解析用户输入。"""
-        from .config import DEFAULTS
+        from .core.config import DEFAULTS
 
         if key not in DEFAULTS:
             return None

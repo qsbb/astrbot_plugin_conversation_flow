@@ -38,6 +38,10 @@ DEFAULTS: dict[str, Any] = {
     "group_context_enabled": True,
     "group_context_max_messages": 10,
     "group_context_only_when_woken": True,
+    "group_context_record_bot": True,
+    "group_context_bot_label": "你",
+    "reply_context_enabled": True,
+    "reply_context_api_fallback": True,
     "topic_context_enabled": False,
     "topic_context_max_messages": 10,
     "intercept_enabled": False,
@@ -224,6 +228,21 @@ def normalize_config(raw: dict[str, Any] | None) -> dict[str, Any]:
         raw.get("group_context_only_when_woken"),
         DEFAULTS["group_context_only_when_woken"],
     )
+    out["group_context_record_bot"] = _coerce_bool(
+        raw.get("group_context_record_bot"),
+        DEFAULTS["group_context_record_bot"],
+    )
+    bot_label = _coerce_str(
+        raw.get("group_context_bot_label"), DEFAULTS["group_context_bot_label"]
+    ).strip()
+    out["group_context_bot_label"] = bot_label or DEFAULTS["group_context_bot_label"]
+    out["reply_context_enabled"] = _coerce_bool(
+        raw.get("reply_context_enabled"), DEFAULTS["reply_context_enabled"]
+    )
+    out["reply_context_api_fallback"] = _coerce_bool(
+        raw.get("reply_context_api_fallback"),
+        DEFAULTS["reply_context_api_fallback"],
+    )
 
     out["topic_context_enabled"] = _coerce_bool(
         raw.get("topic_context_enabled"), DEFAULTS["topic_context_enabled"]
@@ -295,6 +314,10 @@ class PluginConfig:
     group_context_enabled: bool = True
     group_context_max_messages: int = 10
     group_context_only_when_woken: bool = True
+    group_context_record_bot: bool = True
+    group_context_bot_label: str = "你"
+    reply_context_enabled: bool = True
+    reply_context_api_fallback: bool = True
     topic_context_enabled: bool = False
     topic_context_max_messages: int = 10
     intercept_enabled: bool = False

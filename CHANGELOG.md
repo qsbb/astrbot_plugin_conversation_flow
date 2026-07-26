@@ -1,5 +1,35 @@
 # Changelog
 
+## v0.4.0 - 2026-07-26
+
+围绕"bot 复述自己说过的话"这一现象做上下文工程重构。根因不是模型退化，而是插件此前只记录用户消息、不记录 bot 自己的发言，且用户引用（回复）某条消息时，被引用内容会被平台拼进 `message_str` 当成用户正文，模型因此把自己的旧话当成用户诉求原样念了一遍。
+
+### Added
+
+- **消息元信息模块 `core/message_meta.py`**：基于 OneBot v11 规范提取 `message_id`、`reply` 段引用目标、bot 自身 `self_id`，并提供 `extract_plain_text` 剔除 `reply` / `at` 段后的用户正文，避免被引用内容混入用户输入。
+- **bot 发言进入上下文**：新增 `group_context_record_bot`（默认 `true`）与 `group_context_bot_label`（默认 `你`）。bot 实际发出的回复会写回群聊缓冲，注入时用独立称谓标注，模型能分清哪些话是自己说的。
+- **引用关系还原**：`GroupMessageRecord` 新增 `message_id` / `is_bot` / `reply_to_id` / `reply_to_name` / `reply_to_preview`；`GroupQueue` 维护 `message_id → 记录` 索引，支持 `find_by_message_id` 精确反查。上下文渲染为 `昵称（回复 对象「预览」）: 消息`。
+- **引用消息定向指令**：新增 `reply_context_enabled`（默认 `true`）与 prompt 模板 `REPLY_TARGET_INSTRUCTION_TEMPLATE`。用户引用消息时明确告知 LLM 被引用内容出自谁、用户针对它说了什么，并要求"若引用的是你自己的话，承接或解释而非复述"。
+- **API 兜底反查**：新增 `reply_context_api_fallback`（默认 `true`）。缓冲未命中时通过 OneBot `get_msg` 异步反查被引用消息，取不到则静默降级。
+
+### Fixed
+
+- **bot 发言缺失导致的归属错乱**：用户引用 bot 消息时，模型无从判断该内容属于自己，倾向当成用户观点复述。现已通过 bot 发言入库 + `is_bot` 标注修复。
+- **被引用内容污染用户正文**：改用 `extract_plain_text` 按消息段取正文，不再依赖含引用内容的 `message_str`。
+- **上下文重复注入**：`get_recent_context` 新增 `exclude_message_id`，排除当前正在处理的消息，避免它既作为 prompt 主体又出现在背景记录里。
+- **引用标注在只有对象名时丢失**：`GroupMessageRecord.has_reply` 漏判 `reply_to_name`，导致仅知对象名（无预览）的引用不渲染标注。
+- **`main.py` 中 `DEFAULTS` 导入路径错误**：`from .config import DEFAULTS` 改为 `from .core.config import DEFAULTS`。
+- **缺失 `_get_extra`**：补齐与 `_set_extra` 对应的读取方法。
+
+### Changed
+
+- `GROUP_CONTEXT_INSTRUCTION_TEMPLATE` 增加 `{bot_label}` 占位符与阅读规则说明（bot 自身标注、引用指向、记录仅作背景不要复述）。
+- deque 满时挤出最旧记录会同步清理 `message_id` 索引，避免索引泄漏。
+
+### Tests
+
+- 新增消息元信息、message_id 索引、bot 标注、引用标注、新配置项与 prompt 模板相关测试。共 131 项测试全部通过，ruff 检查与格式化无问题。
+
 ## v0.3.3 - 2026-07-24
 
 ### Added

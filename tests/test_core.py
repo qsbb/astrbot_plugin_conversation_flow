@@ -53,11 +53,21 @@ from astrbot_plugin_conversation_flow.core.plain_text import (  # noqa: E402
 )
 from astrbot_plugin_conversation_flow.core.prompts import (  # noqa: E402
     GROUP_CONTEXT_INSTRUCTION_TEMPLATE,
+    REPLY_SPEAKER_SELF,
+    REPLY_TARGET_INSTRUCTION_TEMPLATE,
     TOPIC_CONTEXT_INSTRUCTION_TEMPLATE,
     IMAGE_INTENT_INSTRUCTION,
     INTERCEPT_INJECT_INSTRUCTION,
     INTERRUPT_THINKING_HISTORY_WITH_CONTEXT_TEMPLATE,
     CHUNKING_INSTRUCTION,
+)
+from astrbot_plugin_conversation_flow.core.message_meta import (  # noqa: E402
+    extract_plain_text,
+    extract_reply_ref,
+    fetch_message_by_id,
+    get_message_id,
+    get_self_id,
+    truncate_preview,
 )
 from astrbot_plugin_conversation_flow.core.image_intent import (  # noqa: E402
     detect_images,
@@ -249,7 +259,9 @@ class TopicContextPromptTests(unittest.TestCase):
         self.assertIn("话题", TOPIC_CONTEXT_INSTRUCTION_TEMPLATE)
 
     def test_template_format_succeeds(self) -> None:
-        result = TOPIC_CONTEXT_INSTRUCTION_TEMPLATE.format(context="- 消息一\n- 消息二")
+        result = TOPIC_CONTEXT_INSTRUCTION_TEMPLATE.format(
+            context="- 消息一\n- 消息二", bot_label="你"
+        )
         self.assertIn("消息一", result)
         self.assertIn("消息二", result)
 
@@ -816,11 +828,394 @@ class InterruptScopeTests(unittest.TestCase):
 class GroupContextPromptTests(unittest.TestCase):
     def test_template_contains_context_placeholder(self) -> None:
         self.assertIn("{context}", GROUP_CONTEXT_INSTRUCTION_TEMPLATE)
+        self.assertIn("{bot_label}", GROUP_CONTEXT_INSTRUCTION_TEMPLATE)
 
     def test_template_does_not_mention_meta_words(self) -> None:
-        formatted = GROUP_CONTEXT_INSTRUCTION_TEMPLATE.format(context="测试")
+        formatted = GROUP_CONTEXT_INSTRUCTION_TEMPLATE.format(
+            context="测试", bot_label="你"
+        )
         self.assertIn("群聊", formatted)
         self.assertIn("被唤醒", formatted)
+
+    def test_template_explains_bot_own_lines(self) -> None:
+        """模板需说明标注行是 bot 自己说过的话。"""
+        formatted = GROUP_CONTEXT_INSTRUCTION_TEMPLATE.format(
+            context="你: 早上好", bot_label="你"
+        )
+        self.assertIn("你自己此前", formatted)
+        self.assertIn("不是别人说的", formatted)
+
+    def test_template_explains_reply_annotation(self) -> None:
+        """模板需说明「（回复 …）」标注的含义。"""
+        formatted = GROUP_CONTEXT_INSTRUCTION_TEMPLATE.format(
+            context="A: 你好", bot_label="你"
+        )
+        self.assertIn("回复", formatted)
+        self.assertIn("引用", formatted)
+
+
+class ReplyTargetPromptTests(unittest.TestCase):
+    def test_template_has_required_placeholders(self) -> None:
+        for key in ("{speaker}", "{quoted_text}", "{user_text}"):
+            self.assertIn(key, REPLY_TARGET_INSTRUCTION_TEMPLATE)
+
+    def test_template_format_succeeds(self) -> None:
+        formatted = REPLY_TARGET_INSTRUCTION_TEMPLATE.format(
+            speaker=REPLY_SPEAKER_SELF,
+            quoted_text="我昨天说过这件事",
+            user_text="念一下",
+        )
+        self.assertIn("你自己", formatted)
+        self.assertIn("我昨天说过这件事", formatted)
+        self.assertIn("念一下", formatted)
+
+    def test_template_forbids_verbatim_repeat(self) -> None:
+        """引用自己发言时必须禁止原样复述，这是复读问题的核心约束。"""
+        self.assertIn("不要原样复述", REPLY_TARGET_INSTRUCTION_TEMPLATE)
+
+    def test_template_clarifies_quote_is_not_user_demand(self) -> None:
+        self.assertIn("不是用户本人此刻说的话", REPLY_TARGET_INSTRUCTION_TEMPLATE)
+
+
+class TopicContextBotLabelTests(unittest.TestCase):
+    def test_topic_template_has_bot_label(self) -> None:
+        self.assertIn("{bot_label}", TOPIC_CONTEXT_INSTRUCTION_TEMPLATE)
+
+    def test_topic_template_format_with_bot_label(self) -> None:
+        formatted = TOPIC_CONTEXT_INSTRUCTION_TEMPLATE.format(
+            context="你: 之前说过", bot_label="你"
+        )
+        self.assertIn("你自己此前说过的话", formatted)
+
+
+class _Seg(dict):
+    """OneBot v11 风格的 dict 消息段。"""
+
+    def __init__(self, seg_type: str, **data):
+        super().__init__(type=seg_type, data=data)
+
+
+class _MetaMessageObj:
+    def __init__(self, chain=None, message_id="", self_id=""):
+        self.message = chain if chain is not None else []
+        self.message_id = message_id
+        self.self_id = self_id
+
+
+class _MetaEvent:
+    """带 message_id / self_id / 消息段链的事件 mock。"""
+
+    def __init__(self, chain=None, message_id="", self_id="", message_str=""):
+        self.message_obj = _MetaMessageObj(chain, message_id, self_id)
+        self.message_str = message_str
+
+    def get_message_str(self):
+        return self.message_str
+
+
+class _FakeBot:
+    """模拟 OneBot call_action。"""
+
+    def __init__(self, response=None, raise_error=False):
+        self.response = response
+        self.raise_error = raise_error
+        self.calls = []
+
+    async def call_action(self, action, **params):
+        self.calls.append((action, params))
+        if self.raise_error:
+            raise RuntimeError("network error")
+        return self.response
+
+
+class _BotEvent(_MetaEvent):
+    def __init__(self, bot=None, **kwargs):
+        super().__init__(**kwargs)
+        self.bot = bot
+
+
+class MessageMetaTests(unittest.TestCase):
+    def test_get_message_id_from_message_obj(self) -> None:
+        event = _MetaEvent(message_id="12345")
+        self.assertEqual(get_message_id(event), "12345")
+
+    def test_get_message_id_returns_empty_for_invalid(self) -> None:
+        for bad in ("", None, 0, -1, "none", "null"):
+            event = _MetaEvent(message_id=bad)
+            self.assertEqual(get_message_id(event), "")
+
+    def test_get_message_id_accepts_negative_looking_string(self) -> None:
+        """OneBot message_id 可能是负数（Go-cqhttp），但 -1 视为无效。"""
+        event = _MetaEvent(message_id="-88888")
+        self.assertEqual(get_message_id(event), "-88888")
+
+    def test_get_self_id(self) -> None:
+        event = _MetaEvent(self_id="10001")
+        self.assertEqual(get_self_id(event), "10001")
+
+    def test_get_self_id_empty_when_absent(self) -> None:
+        event = _MetaEvent()
+        self.assertEqual(get_self_id(event), "")
+
+    def test_extract_reply_ref_from_dict_segment(self) -> None:
+        chain = [_Seg("reply", id="999"), _Seg("text", text="念一下")]
+        event = _MetaEvent(chain=chain)
+        ref = extract_reply_ref(event)
+        self.assertEqual(ref.message_id, "999")
+        self.assertFalse(ref.is_empty())
+
+    def test_extract_reply_ref_picks_sender_and_preview(self) -> None:
+        chain = [
+            _Seg("reply", id="777", sender_id="555", nickname="Alice", text="原始内容"),
+        ]
+        ref = extract_reply_ref(_MetaEvent(chain=chain))
+        self.assertEqual(ref.message_id, "777")
+        self.assertEqual(ref.sender_id, "555")
+        self.assertEqual(ref.sender_name, "Alice")
+        self.assertEqual(ref.preview, "原始内容")
+
+    def test_extract_reply_ref_empty_without_reply_segment(self) -> None:
+        chain = [_Seg("text", text="普通消息")]
+        ref = extract_reply_ref(_MetaEvent(chain=chain))
+        self.assertTrue(ref.is_empty())
+
+    def test_extract_plain_text_excludes_reply_and_at(self) -> None:
+        """核心：引用段与 at 段的内容不能混进用户正文。"""
+        chain = [
+            _Seg("reply", id="1", text="这是被引用的内容"),
+            _Seg("at", qq="10001"),
+            _Seg("text", text="念一下"),
+        ]
+        event = _MetaEvent(chain=chain, message_str="这是被引用的内容 念一下")
+        self.assertEqual(extract_plain_text(event), "念一下")
+
+    def test_extract_plain_text_joins_multiple_text_segments(self) -> None:
+        chain = [_Seg("text", text="前半"), _Seg("text", text="后半")]
+        self.assertEqual(extract_plain_text(_MetaEvent(chain=chain)), "前半后半")
+
+    def test_extract_plain_text_falls_back_to_message_str(self) -> None:
+        event = _MetaEvent(chain=[], message_str="回退文本")
+        self.assertEqual(extract_plain_text(event), "回退文本")
+
+    def test_truncate_preview_collapses_whitespace(self) -> None:
+        self.assertEqual(truncate_preview("你好   世界\n再见"), "你好 世界 再见")
+
+    def test_truncate_preview_appends_ellipsis(self) -> None:
+        result = truncate_preview("字" * 100, limit=10)
+        self.assertEqual(len(result), 11)
+        self.assertTrue(result.endswith("…"))
+
+
+class FetchMessageByIdTests(unittest.IsolatedAsyncioTestCase):
+    async def test_returns_sender_and_preview(self) -> None:
+        bot = _FakeBot(
+            response={
+                "data": {
+                    "sender": {"user_id": 10001, "nickname": "Bot"},
+                    "message": "我之前说过的话",
+                }
+            }
+        )
+        event = _BotEvent(bot=bot)
+        result = await fetch_message_by_id(event, "12345")
+        self.assertEqual(result["sender_id"], "10001")
+        self.assertEqual(result["sender_name"], "Bot")
+        self.assertEqual(result["preview"], "我之前说过的话")
+        self.assertEqual(bot.calls[0][0], "get_msg")
+        self.assertEqual(bot.calls[0][1], {"message_id": 12345})
+
+    async def test_returns_empty_without_bot(self) -> None:
+        event = _MetaEvent()
+        self.assertEqual(await fetch_message_by_id(event, "1"), {})
+
+    async def test_returns_empty_on_error(self) -> None:
+        event = _BotEvent(bot=_FakeBot(raise_error=True))
+        self.assertEqual(await fetch_message_by_id(event, "1"), {})
+
+    async def test_returns_empty_for_blank_id(self) -> None:
+        event = _BotEvent(bot=_FakeBot(response={}))
+        self.assertEqual(await fetch_message_by_id(event, ""), {})
+
+    async def test_parses_chain_style_message(self) -> None:
+        bot = _FakeBot(
+            response={
+                "sender": {"user_id": 20002, "card": "群昵称"},
+                "message": [
+                    {"type": "text", "data": {"text": "分段"}},
+                    {"type": "image", "data": {"file": "a.png"}},
+                    {"type": "text", "data": {"text": "内容"}},
+                ],
+            }
+        )
+        result = await fetch_message_by_id(_BotEvent(bot=bot), "88")
+        self.assertEqual(result["sender_name"], "群昵称")
+        self.assertEqual(result["preview"], "分段内容")
+
+
+class GroupContextMessageIdTests(unittest.TestCase):
+    def test_record_returns_record_with_message_id(self) -> None:
+        mgr = GroupContextManager()
+        rec = mgr.record("g", "u1", "A", "内容", message_id="100")
+        self.assertIsNotNone(rec)
+        self.assertEqual(rec.message_id, "100")
+
+    def test_find_by_message_id(self) -> None:
+        mgr = GroupContextManager()
+        mgr.record("g", "u1", "A", "第一条", message_id="100")
+        mgr.record("g", "u2", "B", "第二条", message_id="200")
+        found = mgr.find_by_message_id("g", "200")
+        self.assertIsNotNone(found)
+        self.assertEqual(found.text, "第二条")
+        self.assertEqual(found.sender_name, "B")
+
+    def test_find_by_message_id_miss_returns_none(self) -> None:
+        mgr = GroupContextManager()
+        mgr.record("g", "u1", "A", "内容", message_id="100")
+        self.assertIsNone(mgr.find_by_message_id("g", "999"))
+        self.assertIsNone(mgr.find_by_message_id("other", "100"))
+        self.assertIsNone(mgr.find_by_message_id("g", ""))
+
+    def test_index_cleaned_when_evicted(self) -> None:
+        """deque 满时挤出的旧记录必须从索引中移除，避免内存泄漏。"""
+        mgr = GroupContextManager(max_messages=2)
+        mgr.record("g", "u1", "A", "一", message_id="1")
+        mgr.record("g", "u2", "B", "二", message_id="2")
+        mgr.record("g", "u3", "C", "三", message_id="3")
+        self.assertIsNone(mgr.find_by_message_id("g", "1"))
+        self.assertIsNotNone(mgr.find_by_message_id("g", "3"))
+
+    def test_bot_message_labeled_with_bot_label(self) -> None:
+        mgr = GroupContextManager()
+        mgr.record("g", "u1", "Alice", "在吗")
+        mgr.record("g", "10001", "Bot", "在的", is_bot=True)
+        context = mgr.get_recent_context("g", bot_label="你")
+        self.assertIn("Alice: 在吗", context)
+        self.assertIn("你: 在的", context)
+        self.assertNotIn("Bot: 在的", context)
+
+    def test_custom_bot_label(self) -> None:
+        mgr = GroupContextManager()
+        mgr.record("g", "10001", "Bot", "我说的", is_bot=True)
+        context = mgr.get_recent_context("g", bot_label="溯溪")
+        self.assertIn("溯溪: 我说的", context)
+
+    def test_exclude_message_id_removes_current_message(self) -> None:
+        """当前消息已是 prompt 主体，不应重复出现在背景记录里。"""
+        mgr = GroupContextManager()
+        mgr.record("g", "u1", "A", "历史消息", message_id="1")
+        mgr.record("g", "u2", "B", "当前消息", message_id="2")
+        context = mgr.get_recent_context("g", exclude_message_id="2")
+        self.assertIn("历史消息", context)
+        self.assertNotIn("当前消息", context)
+
+    def test_exclude_nonexistent_id_keeps_all(self) -> None:
+        mgr = GroupContextManager()
+        mgr.record("g", "u1", "A", "消息一", message_id="1")
+        context = mgr.get_recent_context("g", exclude_message_id="999")
+        self.assertIn("消息一", context)
+
+    def test_reply_annotation_resolved_from_buffer(self) -> None:
+        """引用目标在缓冲内时，标注应带上真实发送者与原文。"""
+        mgr = GroupContextManager()
+        mgr.record("g", "u1", "Alice", "今天天气不错", message_id="1")
+        mgr.record("g", "u2", "Bob", "确实", message_id="2", reply_to_id="1")
+        context = mgr.get_recent_context("g")
+        self.assertIn("Bob（回复 Alice「今天天气不错」）: 确实", context)
+
+    def test_reply_annotation_marks_bot_target(self) -> None:
+        """引用的是 bot 自己的发言时，标注应指向 bot_label。"""
+        mgr = GroupContextManager()
+        mgr.record("g", "10001", "Bot", "我建议这样做", message_id="1", is_bot=True)
+        mgr.record("g", "u1", "Alice", "念一下", message_id="2", reply_to_id="1")
+        context = mgr.get_recent_context("g", bot_label="你")
+        self.assertIn("回复 你「我建议这样做」", context)
+
+    def test_reply_annotation_falls_back_to_preview(self) -> None:
+        """引用目标不在缓冲时用引用段自带的预览兜底。"""
+        mgr = GroupContextManager()
+        mgr.record(
+            "g",
+            "u1",
+            "Alice",
+            "同意",
+            message_id="2",
+            reply_to_id="999",
+            reply_to_name="Carol",
+            reply_to_preview="很久以前的话",
+        )
+        context = mgr.get_recent_context("g")
+        self.assertIn("Alice（回复 Carol「很久以前的话」）: 同意", context)
+
+    def test_reply_annotation_name_only(self) -> None:
+        mgr = GroupContextManager()
+        mgr.record("g", "u1", "A", "嗯", message_id="1", reply_to_name="Bob")
+        self.assertIn("A（回复 Bob）: 嗯", mgr.get_recent_context("g"))
+
+    def test_no_annotation_without_reply(self) -> None:
+        mgr = GroupContextManager()
+        mgr.record("g", "u1", "A", "普通消息", message_id="1")
+        self.assertEqual(mgr.get_recent_context("g"), "A: 普通消息")
+
+    def test_update_max_rebuilds_index(self) -> None:
+        mgr = GroupContextManager(max_messages=5)
+        for i in range(5):
+            mgr.record("g", f"u{i}", f"U{i}", f"消息{i}", message_id=str(i))
+        mgr.update_max(2)
+        # 缩容后仍能按 ID 反查保留下来的记录
+        self.assertIsNotNone(mgr.find_by_message_id("g", "4"))
+
+    def test_reply_to_target_outside_window_still_annotated(self) -> None:
+        """引用目标已滑出注入窗口，但仍在缓冲内时应能解析出标注。"""
+        mgr = GroupContextManager(max_messages=10)
+        mgr.record("g", "u1", "Alice", "最早的话", message_id="1")
+        for i in range(2, 6):
+            mgr.record("g", "u9", "Other", f"填充{i}", message_id=str(i))
+        mgr.record("g", "u2", "Bob", "回应", message_id="6", reply_to_id="1")
+        # n=2 只取最后两条，但引用解析基于完整缓冲
+        context = mgr.get_recent_context("g", n=2)
+        self.assertIn("回复 Alice「最早的话」", context)
+        self.assertNotIn("最早的话」）: 填充", context)
+
+
+class ReplyConfigTests(unittest.TestCase):
+    def test_new_defaults(self) -> None:
+        cfg = build_plugin_config({})
+        self.assertTrue(cfg.group_context_record_bot)
+        self.assertEqual(cfg.group_context_bot_label, "你")
+        self.assertTrue(cfg.reply_context_enabled)
+        self.assertTrue(cfg.reply_context_api_fallback)
+
+    def test_can_be_disabled(self) -> None:
+        cfg = build_plugin_config(
+            {
+                "group_context_record_bot": False,
+                "reply_context_enabled": False,
+                "reply_context_api_fallback": False,
+            }
+        )
+        self.assertFalse(cfg.group_context_record_bot)
+        self.assertFalse(cfg.reply_context_enabled)
+        self.assertFalse(cfg.reply_context_api_fallback)
+
+    def test_bot_label_customizable(self) -> None:
+        cfg = build_plugin_config({"group_context_bot_label": "溯溪"})
+        self.assertEqual(cfg.group_context_bot_label, "溯溪")
+
+    def test_blank_bot_label_falls_back_to_default(self) -> None:
+        cfg = build_plugin_config({"group_context_bot_label": "   "})
+        self.assertEqual(cfg.group_context_bot_label, "你")
+
+    def test_all_new_keys_present_in_defaults(self) -> None:
+        """新配置项必须在 DEFAULTS 中，否则 /convflow set 无法修改。"""
+        from astrbot_plugin_conversation_flow.core.config import DEFAULTS
+
+        for key in (
+            "group_context_record_bot",
+            "group_context_bot_label",
+            "reply_context_enabled",
+            "reply_context_api_fallback",
+        ):
+            self.assertIn(key, DEFAULTS)
 
 
 class NewConfigTests(unittest.TestCase):

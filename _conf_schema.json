@@ -184,6 +184,30 @@
     "hint": "开启后只在 bot 被@或被回复时才注入群聊上下文；关闭则每次群聊消息都注入（消耗更多 Token）。",
     "default": true
   },
+  "group_context_record_bot": {
+    "type": "bool",
+    "description": "[群聊上下文] 把 bot 自己的发言记入上下文",
+    "hint": "开启后 bot 每次实际发出的回复也会写进群聊上下文缓冲，并在注入时标注为 bot 自己说过的话。关闭则上下文里只有别人的发言，bot 容易把自己说过的话误认成别人说的。推荐开启。",
+    "default": true
+  },
+  "group_context_bot_label": {
+    "type": "string",
+    "description": "[群聊上下文] bot 自己发言的标注名",
+    "hint": "注入上下文时用于标注 bot 自己那几行的称谓。默认「你」，即记录里显示为「你: ……」。也可填 bot 的昵称。",
+    "default": "你"
+  },
+  "reply_context_enabled": {
+    "type": "bool",
+    "description": "[引用消息] 启用引用消息指向说明",
+    "hint": "开启后，当用户引用（回复）某条消息再发言时，会明确告诉 LLM 被引用的那句话是谁说的、内容是什么，避免模型把被引用内容误当成用户本人的诉求，或把自己说过的话原样复述一遍。依赖 OneBot v11 的 reply 消息段。推荐开启。",
+    "default": true
+  },
+  "reply_context_api_fallback": {
+    "type": "bool",
+    "description": "[引用消息] 本地缓冲未命中时调用 API 反查",
+    "hint": "被引用消息不在插件本地缓冲、且引用段自身没带内容预览时，调用 OneBot 的 get_msg 接口反查发送者与内容。会增加一次协议端请求；关闭则该情况下退化为不注入指向说明。",
+    "default": true
+  },
   "topic_context_enabled": {
     "type": "bool",
     "description": "[话题上下文] 启用话题上下文注入",
