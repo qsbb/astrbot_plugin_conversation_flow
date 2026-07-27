@@ -15,7 +15,7 @@
 
 ## 当前实现信息
 
-- 当前版本：`0.6.1`（自本版本起采用三段式无 v 前缀格式）；AstrBot 兼容范围：`>=4.16.0,<5`。
+- 当前版本：`0.6.3`（自 `0.6.1` 起采用三段式无 v 前缀格式）；AstrBot 兼容范围：`>=4.16.0,<5`。
 - 命令入口：`/convflow` 命令组，支持 `status`、`config`、`reload`、`set`、`silence_test`、`air_reset`、`mood_reset`、`reset_stats`、`help`。
 - 页面入口：当前实现未提供固定 Plugin Page 管理页；配置可在 AstrBot Dashboard 编辑，运行时也可使用 `/convflow` 命令。
 

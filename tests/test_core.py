@@ -1632,14 +1632,47 @@ class MoodConfigTests(unittest.TestCase):
 class NaturalToolCallPromptTests(unittest.TestCase):
     def test_instruction_forbids_mechanism_words(self) -> None:
         text = NATURAL_TOOL_CALL_INSTRUCTION
-        self.assertIn("第一人称", text)
         for word in ("工具名", "函数名", "接口名"):
             self.assertIn(word, text)
+
+    def test_instruction_suppresses_pre_call_status_messages(self) -> None:
+        text = NATURAL_TOOL_CALL_INSTRUCTION
+        self.assertIn("只发起工具调用，不输出给用户看的文字", text)
+        self.assertIn('不要先发送"好，我弄一下"', text)
+        self.assertIn("两段式播报", text)
+        self.assertNotIn("用第一人称的自然动作描述你正在做什么", text)
+
+    def test_instruction_handles_sticker_collection_naturally(self) -> None:
+        text = NATURAL_TOOL_CALL_INSTRUCTION
+        self.assertIn("收藏、保存或收下表情包", text)
+        self.assertIn("不要重新描述、分类或评价表情内容", text)
+        self.assertIn("如果工具已经直接向用户发送结果", text)
 
     def test_instruction_covers_failure_wording(self) -> None:
         text = NATURAL_TOOL_CALL_INSTRUCTION
         self.assertIn("权限", text)
         self.assertIn("不要编原因", text)
+        self.assertIn("服务式追问", text)
+
+    def test_instruction_forbids_asking_permission_before_searching(self) -> None:
+        """不确定时应直接检索，不能把"要不我帮你搜搜看"抛给用户等点头。"""
+        text = NATURAL_TOOL_CALL_INSTRUCTION
+        self.assertIn("要不我帮你搜搜看", text)
+        self.assertIn("直接去查再回答", text)
+        # 只读操作不需要事先征求同意
+        self.assertIn("只读操作直接做", text)
+
+    def test_instruction_limits_confirmation_to_side_effect_actions(self) -> None:
+        """收紧"等待用户确认"的口径，避免被当成"该查先问"的借口。"""
+        text = NATURAL_TOOL_CALL_INSTRUCTION
+        self.assertIn("副作用", text)
+        self.assertNotIn("必须等待用户确认，或操作会持续较久", text)
+
+    def test_instruction_forbids_fabricating_when_lookup_fails(self) -> None:
+        """查不到要说不清楚，不能凭印象补细节。"""
+        text = NATURAL_TOOL_CALL_INSTRUCTION
+        self.assertIn("直说这块你不清楚", text)
+        self.assertIn("不要用印象里的内容补全细节", text)
 
 
 class AtTargetsTests(unittest.TestCase):
@@ -1891,9 +1924,18 @@ class DecoratingHookPriorityTests(unittest.TestCase):
 
     def test_version_is_plain_semver(self) -> None:
         version = self.plugin_main.__version__
-        self.assertEqual(version, "0.6.1")
         self.assertFalse(version.startswith("v"))
-        self.assertEqual(len(version.split(".")), 3)
+        self.assertRegex(version, r"^\d+\.\d+\.\d+$")
+
+    def test_version_matches_metadata(self) -> None:
+        """main.py 的 __version__ 必须与 metadata.yaml 声明一致。"""
+        metadata = pathlib.Path(__file__).resolve().parents[1] / "metadata.yaml"
+        declared = ""
+        for line in metadata.read_text(encoding="utf-8").splitlines():
+            if line.startswith("version:"):
+                declared = line.split(":", 1)[1].strip().strip("\"'")
+                break
+        self.assertEqual(self.plugin_main.__version__, declared)
 
 
 class _ChainResult:

@@ -61,7 +61,7 @@ from .core.prompts import (
 from .core.scene import SceneInput, detect_scene
 from .core.silence_judge import SilenceJudge
 
-__version__ = "0.6.1"
+__version__ = "0.6.3"
 
 
 @register(
