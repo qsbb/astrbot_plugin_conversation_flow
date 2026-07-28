@@ -22,8 +22,11 @@ class ChunkConfig:
     llm_assist: bool = False
 
 
-# 句末标点（中英文）
-_SENTENCE_END = re.compile(r"([。！？!?…\n])")
+# 强句末标点。省略号表示停顿/延续，不应在“嘛……不太行”中间断开。
+# 连续标点和紧随其后的闭合引号作为一个整体，避免从标点串内部切段。
+_SENTENCE_END = re.compile(
+    r"(?:[。！？!?]+[”’」』】》）)\]\"']*|\n+)"
+)
 # 段落分隔（连续换行）
 _PARAGRAPH_SPLIT = re.compile(r"\n\s*\n+")
 # 代码块围栏
@@ -143,28 +146,23 @@ class Chunker:
         return segments
 
     def _split_by_sentence(self, text: str) -> list[str]:
-        """按句末标点（。！？!?…\\n）切分，累积到 min_length 成段。"""
+        """按强句末标点切分，累积到 min_length 成段。"""
         if not text:
             return []
-        parts = _SENTENCE_END.split(text)
-        # re.split with capture group: ["text", "。", "text", "！", ...]
+
         current = ""
-        i = 0
         segments: list[str] = []
-        while i < len(parts):
-            chunk = parts[i]
-            if i + 1 < len(parts) and _SENTENCE_END.fullmatch(parts[i + 1] or ""):
-                chunk = chunk + parts[i + 1]
-                i += 2
-            else:
-                i += 1
-            if not chunk:
-                continue
+
+        start = 0
+        for match in _SENTENCE_END.finditer(text):
+            chunk = text[start : match.end()]
+            start = match.end()
             current += chunk
-            # 累积到一定长度就成段
             if len(current) >= self._chunk_cfg.min_length:
                 segments.append(current.strip())
                 current = ""
+
+        current += text[start:]
         if current.strip():
             segments.append(current.strip())
         return segments

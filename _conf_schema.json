@@ -166,6 +166,24 @@
     "hint": "实验性思考中断合并触发时，从插件维护的未回复消息中取出最近 N 条作为上下文注入新请求，弥补 LLM 公开对话历史过短导致上下文缺失。默认 5 条；设为 0 则不主动注入（仅依赖 LLM 自带历史）。仅在 experimental_thinking_merge_enabled=true 时生效。",
     "default": 5
   },
+  "private_context_bridge_enabled": {
+    "type": "bool",
+    "description": "[私聊上下文] 启用短消息承接兜底",
+    "hint": "记录少量已实际回复的私聊轮次。遇到‘试试能不能用’、简称、纠正等短承接语时，把最近对象和任务重新靠近当前请求；普通长消息在框架历史完整时不会重复注入。",
+    "default": true
+  },
+  "private_context_bridge_max_turns": {
+    "type": "int",
+    "description": "[私聊上下文] 最近完成轮次数",
+    "hint": "承接兜底最多保留和注入多少个已完成轮次，仅驻留内存，范围 1-10。默认 3。",
+    "default": 3
+  },
+  "private_context_bridge_short_max_chars": {
+    "type": "int",
+    "description": "[私聊上下文] 短承接消息长度上限",
+    "hint": "不超过该字符数的私聊消息会主动获得最近轮次提示，用于名称、简称、省略式追问和纠正。范围 4-200，默认 40。",
+    "default": 40
+  },
   "group_context_enabled": {
     "type": "bool",
     "description": "[群聊上下文] 启用群聊上下文注入",

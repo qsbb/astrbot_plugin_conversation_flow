@@ -54,6 +54,7 @@ from .core.prompts import (
     INTERRUPT_THINKING_HISTORY_TEMPLATE,
     INTERRUPT_THINKING_HISTORY_WITH_CONTEXT_TEMPLATE,
     NATURAL_TOOL_CALL_INSTRUCTION,
+    PRIVATE_CONTEXT_BRIDGE_TEMPLATE,
     MOOD_ANNOYED_INSTRUCTION,
     MOOD_LAZY_INSTRUCTION,
     PLAIN_TEXT_INSTRUCTION,
@@ -75,7 +76,7 @@ from .core.request_context import (
 )
 from .core.silence_judge import SilenceJudge
 
-__version__ = "0.6.5"
+__version__ = "0.6.6"
 RELATIONSHIP_PLUGIN_NAME = "astrbot_plugin_relationship"
 RELATIONSHIP_SNAPSHOT_CONTRACT_NAME = "relationship.snapshot"
 RELATIONSHIP_SNAPSHOT_CONTRACT_MAJOR = "1"
@@ -103,6 +104,8 @@ class ConversationalFlowPlugin(Star):
     INTERCEPTED_KEY = "conv_flow_intercepted"
     # event extra 上用于标记"群聊上下文本轮已注入"的 key
     GROUP_CONTEXT_INJECTED_KEY = "conv_flow_group_context_injected"
+    # event extra 上用于标记"私聊短消息承接上下文已注入"的 key
+    PRIVATE_CONTEXT_INJECTED_KEY = "conv_flow_private_context_injected"
     # event extra 上用于标记"场景感知指令本轮已注入"的 key。
     # 场景/情绪指令允许模型输出 silence_marker，响应阶段需据此检测 marker。
     SCENE_INJECTED_KEY = "conv_flow_scene_injected"
@@ -138,7 +141,10 @@ class ConversationalFlowPlugin(Star):
         )
         self.silence_judge = SilenceJudge(cfg=self.config, llm=self.llm)
         self.chunker = Chunker(cfg=self.config, llm=self.llm)
-        self.tracker = ConversationTracker(ttl_ms=self.config.interrupt_state_ttl_ms)
+        self.tracker = ConversationTracker(
+            ttl_ms=self.config.interrupt_state_ttl_ms,
+            max_history_turns=self.config.private_context_bridge_max_turns,
+        )
         self.tracker.update_interrupt_config(
             self.config.interrupt_window_ms, self.config.interrupt_scope
         )
@@ -179,6 +185,7 @@ class ConversationalFlowPlugin(Star):
             "scene_hinted": 0,
             "mood_silenced": 0,
             "mood_hinted": 0,
+            "private_context_bridged": 0,
             "total_requests": 0,
         }
 
@@ -269,6 +276,9 @@ class ConversationalFlowPlugin(Star):
         )
         self.tracker.update_interrupt_config(
             self.config.interrupt_window_ms, self.config.interrupt_scope
+        )
+        self.tracker.update_history_limit(
+            self.config.private_context_bridge_max_turns
         )
         self.group_context.update_max(self.config.group_context_max_messages)
         self.air_guard.update_config(
@@ -382,6 +392,8 @@ class ConversationalFlowPlugin(Star):
         self._inject_group_context(event, req, seq, is_wake)
         # 话题上下文注入：帮助 LLM 理解当前话题（群聊上下文已注入时自动跳过）
         self._inject_topic_context(event, req, seq)
+        # 私聊短消息承接：补回分段/主动发送后可能未进入框架历史的最近轮次
+        self._inject_private_context_bridge(event, req, seq, user_text)
         # 引用消息指向说明：消除"被引用内容是谁说的"歧义
         # 必须在上下文注入之后，让指向说明更靠近 prompt 末尾、权重更高
         try:
@@ -771,6 +783,10 @@ class ConversationalFlowPlugin(Star):
             f"(max={self.config.group_context_max_messages}, "
             f"woken_only={self.config.group_context_only_when_woken}, "
             f"record_bot={self.config.group_context_record_bot})\n"
+            f"- 私聊上下文承接: "
+            f"{'on' if self.config.private_context_bridge_enabled else 'off'} "
+            f"(turns={self.config.private_context_bridge_max_turns}, "
+            f"short<={self.config.private_context_bridge_short_max_chars})\n"
             f"- 引用消息: {'on' if self.config.reply_context_enabled else 'off'} "
             f"(api_fallback={self.config.reply_context_api_fallback})\n"
             f"- 话题上下文: {'on' if self.config.topic_context_enabled else 'off'} "
@@ -799,6 +815,7 @@ class ConversationalFlowPlugin(Star):
             f"- 沉默次数: {self._stats['silenced']}\n"
             f"- 分段次数: {self._stats['chunked']}\n"
             f"- 插话合并: {self._stats['interrupted']}\n"
+            f"- 私聊上下文承接: {self._stats['private_context_bridged']}\n"
             f"- 拦截命中: {self._stats['intercepted']}\n"
             f"- 读空气拦截: {self._stats['air_guarded']}\n"
             f"- 场景拦截: {self._stats['scene_guarded']} "
@@ -1317,6 +1334,80 @@ class ConversationalFlowPlugin(Star):
             self.config.topic_context_max_messages,
         )
 
+    def _inject_private_context_bridge(
+        self,
+        event: AstrMessageEvent,
+        req: Any,
+        seq: Any,
+        user_text: str,
+    ) -> None:
+        """为私聊短承接语补入最近已完成轮次。
+
+        分段发送会主动 ``event.send`` 并停止默认交付，不同 AstrBot 版本对这类
+        回复是否写入公开历史的处理并不一致。插件只缓存少量实际回复；长消息且
+        框架历史完整时跳过注入，短补充/简称则主动把指代对象拉近到当前请求。
+        """
+        if not self.config.private_context_bridge_enabled:
+            return
+        if self._get_group_id(event):
+            return
+        current = str(user_text or "").strip()
+        if not current or current.startswith("/"):
+            return
+
+        turns = self.tracker.get_recent_turns(
+            event, self.config.private_context_bridge_max_turns
+        )
+        if not turns:
+            return
+
+        history_texts = [
+            text
+            for turn in turns
+            for text in (*turn.user_texts, turn.bot_text)
+            if str(text).strip()
+        ]
+        is_short_followup = (
+            len(current) <= self.config.private_context_bridge_short_max_chars
+        )
+        if not is_short_followup and self._request_context_contains(
+            req, history_texts
+        ):
+            return
+
+        lines: list[str] = []
+        for turn in turns:
+            for text in turn.user_texts:
+                preview = self._context_bridge_preview(text)
+                if preview:
+                    lines.append(f"用户: {preview}")
+            bot_preview = self._context_bridge_preview(turn.bot_text)
+            if bot_preview:
+                lines.append(f"你: {bot_preview}")
+        if not lines:
+            return
+
+        instruction = PRIVATE_CONTEXT_BRIDGE_TEMPLATE.format(
+            context="\n".join(lines)
+        )
+        self._inject_instruction(req, instruction, "private context bridge")
+        self._set_extra(event, self.PRIVATE_CONTEXT_INJECTED_KEY, True)
+        self._stats["private_context_bridged"] += 1
+        self.logger.info(
+            "[conv-flow] seq=%s private context bridged (turns=%s, short=%s)",
+            seq,
+            len(turns),
+            is_short_followup,
+        )
+
+    @staticmethod
+    def _context_bridge_preview(text: Any, max_chars: int = 600) -> str:
+        """压缩单条历史文本，限制兜底上下文的 Token 体积。"""
+        compact = " ".join(str(text or "").split())
+        if len(compact) <= max_chars:
+            return compact
+        return compact[: max_chars - 1].rstrip() + "…"
+
     async def _inject_reply_context(
         self, event: AstrMessageEvent, req: Any, seq: Any
     ) -> None:
@@ -1832,17 +1923,18 @@ class ConversationalFlowPlugin(Star):
             self.mood.record_reply(scope_key)
 
     def _record_bot_message(self, event: AstrMessageEvent, text: str) -> None:
-        """把 bot 实际发出的回复写回群聊上下文缓冲。
+        """记录 bot 实际回复，并按需写回群聊上下文缓冲。
 
-        协议端不会给出 bot 自己发言的 message_id（发送 API 的返回值不经过
-        本钩子），因此这里记录的 message_id 为空，靠 ``is_bot`` 标记身份。
-        用户引用 bot 发言时通过 get_msg 的 sender_id 判定，不依赖本记录。
+        最近完成轮次由 tracker 暂存在内存中，供私聊短消息承接。群聊侧协议端
+        不会给出 bot 自己发言的 message_id（发送 API 返回值不经过本钩子），
+        因此群缓冲记录的 message_id 为空，靠 ``is_bot`` 标记身份。
         """
+        if not text or not text.strip():
+            return
+        self.tracker.record_response(event, text)
         if not self.config.group_context_enabled:
             return
         if not self.config.group_context_record_bot:
-            return
-        if not text or not text.strip():
             return
         group_id = self._get_group_id(event)
         if not group_id:

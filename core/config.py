@@ -35,6 +35,9 @@ DEFAULTS: dict[str, Any] = {
     "interrupt_window_ms": 30000,
     "interrupt_state_ttl_ms": 600000,
     "interrupt_scope": "sender",
+    "private_context_bridge_enabled": True,
+    "private_context_bridge_max_turns": 3,
+    "private_context_bridge_short_max_chars": 40,
     "group_context_enabled": True,
     "group_context_max_messages": 10,
     "group_context_only_when_woken": True,
@@ -253,6 +256,31 @@ def normalize_config(raw: dict[str, Any] | None) -> dict[str, Any]:
         scope if scope in _VALID_SCOPES else DEFAULTS["interrupt_scope"]
     )
 
+    out["private_context_bridge_enabled"] = _coerce_bool(
+        raw.get("private_context_bridge_enabled"),
+        DEFAULTS["private_context_bridge_enabled"],
+    )
+    out["private_context_bridge_max_turns"] = min(
+        10,
+        max(
+            1,
+            _coerce_int(
+                raw.get("private_context_bridge_max_turns"),
+                DEFAULTS["private_context_bridge_max_turns"],
+            ),
+        ),
+    )
+    out["private_context_bridge_short_max_chars"] = min(
+        200,
+        max(
+            4,
+            _coerce_int(
+                raw.get("private_context_bridge_short_max_chars"),
+                DEFAULTS["private_context_bridge_short_max_chars"],
+            ),
+        ),
+    )
+
     out["group_context_enabled"] = _coerce_bool(
         raw.get("group_context_enabled"), DEFAULTS["group_context_enabled"]
     )
@@ -450,6 +478,9 @@ class PluginConfig:
     interrupt_window_ms: int = 30000
     interrupt_state_ttl_ms: int = 600000
     interrupt_scope: str = "sender"
+    private_context_bridge_enabled: bool = True
+    private_context_bridge_max_turns: int = 3
+    private_context_bridge_short_max_chars: int = 40
     group_context_enabled: bool = True
     group_context_max_messages: int = 10
     group_context_only_when_woken: bool = True

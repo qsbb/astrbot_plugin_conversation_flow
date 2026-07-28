@@ -17,9 +17,19 @@ class PendingRequest:
     finished: bool = False
     response_started: bool = False
     user_texts: list[str] = field(default_factory=list)
+    history_recorded: bool = False
     interrupt_token: dict[str, Any] = field(
         default_factory=lambda: {"cancelled": False, "completed": False}
     )
+
+
+@dataclass(frozen=True)
+class CompletedTurn:
+    """一次已经产生实际回复的对话轮次。"""
+
+    user_texts: tuple[str, ...]
+    bot_text: str
+    completed_at: float
 
 
 @dataclass
@@ -32,6 +42,7 @@ class ConversationState:
     discarded: set[int] = field(default_factory=set)
     last_user_text: str = ""
     last_bot_text: str = ""
+    recent_turns: list[CompletedTurn] = field(default_factory=list)
     last_active_ts: float = 0.0
 
     def cleanup_finished(self) -> None:
@@ -61,9 +72,10 @@ class ConversationTracker:
     MERGE_HINT_EXTRA_KEY = "conv_flow_merge_hint"
     UMO_EXTRA_KEY = "conv_flow_umo"
 
-    def __init__(self, ttl_ms: int = 600000) -> None:
+    def __init__(self, ttl_ms: int = 600000, max_history_turns: int = 3) -> None:
         self._states: dict[str, ConversationState] = {}
         self._ttl_seconds = max(10.0, ttl_ms / 1000.0)
+        self._max_history_turns = max(1, int(max_history_turns))
         self._interrupt_window_ms: int = 30000
         self._scope: str = "sender"
 
@@ -71,6 +83,13 @@ class ConversationTracker:
         """更新插话检测时间窗和群聊中断作用域（运行时配置变更后调用）。"""
         self._interrupt_window_ms = max(0, window_ms)
         self._scope = scope
+
+    def update_history_limit(self, max_history_turns: int) -> None:
+        """更新短期对话轮次上限，并立即收缩已有会话。"""
+        self._max_history_turns = max(1, int(max_history_turns))
+        for state in self._states.values():
+            if len(state.recent_turns) > self._max_history_turns:
+                state.recent_turns = state.recent_turns[-self._max_history_turns :]
 
     def get_state(self, umo: str) -> ConversationState:
         state = self._states.get(umo)
@@ -271,6 +290,8 @@ class ConversationTracker:
         if state is None:
             return
         pending = state.pending.get(seq)
+        if bot_text:
+            self.record_response(event, bot_text)
         if pending:
             pending.finished = True
             pending.interrupt_token["completed"] = True
@@ -279,6 +300,49 @@ class ConversationTracker:
         if bot_text:
             state.last_bot_text = bot_text
         state.last_active_ts = time.time()
+
+    def record_response(self, event: Any, bot_text: str) -> bool:
+        """记录一次实际回复，供后续私聊短消息承接使用。
+
+        记录与请求完成状态分离：语音等下游交付可能稍后才把 token 标为完成，
+        但回复文本在装饰阶段已经确定。重复调用按 pending 上的标记幂等处理。
+        """
+        text = str(bot_text or "").strip()
+        seq = self._get_extra(event, self.SEQ_EXTRA_KEY)
+        if seq is None or not text:
+            return False
+        state = self._states.get(self._get_umo(event))
+        if state is None:
+            return False
+        pending = state.pending.get(seq)
+        if pending is None or pending.history_recorded:
+            return False
+        user_texts = tuple(
+            str(item).strip() for item in pending.user_texts if str(item).strip()
+        )
+        if not user_texts:
+            return False
+        state.recent_turns.append(
+            CompletedTurn(
+                user_texts=user_texts,
+                bot_text=text,
+                completed_at=time.time(),
+            )
+        )
+        if len(state.recent_turns) > self._max_history_turns:
+            state.recent_turns = state.recent_turns[-self._max_history_turns :]
+        pending.history_recorded = True
+        state.last_bot_text = text
+        state.last_active_ts = time.time()
+        return True
+
+    def get_recent_turns(self, event: Any, limit: int = 0) -> list[CompletedTurn]:
+        """返回当前会话最近已完成的轮次副本，按时间从旧到新排列。"""
+        state = self._states.get(self._get_umo(event))
+        if state is None or not state.recent_turns:
+            return []
+        count = max(1, int(limit)) if limit else self._max_history_turns
+        return list(state.recent_turns[-count:])
 
     def _build_merge_hint(
         self,

@@ -157,6 +157,7 @@ from astrbot_plugin_conversation_flow.core.prompts import (  # noqa: E402
     INTERCEPT_INJECT_INSTRUCTION,
     INTERRUPT_THINKING_HISTORY_WITH_CONTEXT_TEMPLATE,
     NATURAL_TOOL_CALL_INSTRUCTION,
+    PRIVATE_CONTEXT_BRIDGE_TEMPLATE,
     CHUNKING_INSTRUCTION,
     SCENE_TARGET_HINT_NAMED,
     SCENE_TARGET_HINT_UNKNOWN,
@@ -281,6 +282,40 @@ class ChunkerTests(unittest.TestCase):
         self.assertTrue(result[1].endswith("！"))
         self.assertTrue(result[2].endswith("？"))
 
+    def test_ellipsis_is_continuation_not_sentence_boundary(self) -> None:
+        cfg = build_plugin_config(
+            {
+                "chunking_min_length": 20,
+                "chunking_max_segments": 5,
+                "chunking_preserve_paragraphs": False,
+            }
+        )
+        chunker = Chunker(cfg, _LLM())
+        text = (
+            "17岁。喜欢驾驶无人机和机械，厨艺还行但整理房间嘛……不太行。"
+            "平时看着挺随和，但正事上还是靠谱的。"
+        )
+
+        result = chunker.split(text)
+
+        self.assertTrue(any("房间嘛……不太行。" in segment for segment in result), result)
+        self.assertFalse(any(segment.endswith("…") for segment in result[:-1]), result)
+
+    def test_repeated_punctuation_keeps_closing_quote(self) -> None:
+        cfg = build_plugin_config(
+            {
+                "chunking_min_length": 12,
+                "chunking_max_segments": 5,
+                "chunking_preserve_paragraphs": False,
+            }
+        )
+        chunker = Chunker(cfg, _LLM())
+        text = "她认真地问：“现在真的可以出发了吗？！”随后大家收拾好装备，一起向集合地点出发。"
+
+        result = chunker.split(text)
+
+        self.assertTrue(any(segment.endswith("？！”") for segment in result), result)
+
     def test_long_paragraph_still_split_by_sentence(self) -> None:
         """超长段落即使有双空行仍按句末标点切分。"""
         cfg = build_plugin_config(
@@ -344,6 +379,22 @@ class ConfigTests(unittest.TestCase):
         cfg = build_plugin_config({"interrupt_thinking_merge_context_count": -3})
         self.assertEqual(cfg.interrupt_thinking_merge_context_count, 0)
 
+    def test_private_context_bridge_defaults(self) -> None:
+        cfg = build_plugin_config({})
+        self.assertTrue(cfg.private_context_bridge_enabled)
+        self.assertEqual(cfg.private_context_bridge_max_turns, 3)
+        self.assertEqual(cfg.private_context_bridge_short_max_chars, 40)
+
+    def test_private_context_bridge_limits_are_clamped(self) -> None:
+        cfg = build_plugin_config(
+            {
+                "private_context_bridge_max_turns": 99,
+                "private_context_bridge_short_max_chars": 1,
+            }
+        )
+        self.assertEqual(cfg.private_context_bridge_max_turns, 10)
+        self.assertEqual(cfg.private_context_bridge_short_max_chars, 4)
+
     def test_topic_context_defaults(self) -> None:
         cfg = build_plugin_config({})
         self.assertFalse(cfg.topic_context_enabled)
@@ -393,6 +444,17 @@ class ThinkingMergeContextPromptTests(unittest.TestCase):
         )
         self.assertIn("第一句", result)
         self.assertIn("最新消息", result)
+
+
+class PrivateContextBridgePromptTests(unittest.TestCase):
+    def test_template_keeps_referents_and_corrections(self) -> None:
+        self.assertIn("{context}", PRIVATE_CONTEXT_BRIDGE_TEMPLATE)
+        self.assertIn("试试", PRIVATE_CONTEXT_BRIDGE_TEMPLATE)
+        self.assertIn("名称、术语", PRIVATE_CONTEXT_BRIDGE_TEMPLATE)
+        self.assertIn("纠正", PRIVATE_CONTEXT_BRIDGE_TEMPLATE)
+
+    def test_template_allows_independent_new_topic(self) -> None:
+        self.assertIn("独立的新话题", PRIVATE_CONTEXT_BRIDGE_TEMPLATE)
 
 
 class DelayTests(unittest.TestCase):
@@ -803,6 +865,164 @@ class ConversationTrackerTests(unittest.TestCase):
         event = _ImageEvent([_MockImage(url="http://example.com/a.png")])
         text = tracker._get_user_text(event)
         self.assertEqual(text, "[图片]")
+
+    def test_completed_turn_records_user_and_actual_reply(self) -> None:
+        tracker = ConversationTracker()
+        event = _Event("PrivateMessage:qq:1", "你看看这个链接")
+        tracker.begin_request(event)
+
+        tracker.finish_response(event, bot_text="这是一个标签搜索工具。")
+
+        turns = tracker.get_recent_turns(event)
+        self.assertEqual(len(turns), 1)
+        self.assertEqual(turns[0].user_texts, ("你看看这个链接",))
+        self.assertEqual(turns[0].bot_text, "这是一个标签搜索工具。")
+
+    def test_response_recording_is_idempotent_before_delivery_finishes(self) -> None:
+        tracker = ConversationTracker()
+        event = _Event("PrivateMessage:qq:1", "上一条")
+        tracker.begin_request(event)
+
+        self.assertTrue(tracker.record_response(event, "已经回复"))
+        self.assertFalse(tracker.record_response(event, "已经回复"))
+        tracker.finish_response(event, bot_text="已经回复")
+
+        self.assertEqual(len(tracker.get_recent_turns(event)), 1)
+
+    def test_recent_turns_respect_updated_limit(self) -> None:
+        tracker = ConversationTracker(max_history_turns=3)
+        events = []
+        for index in range(3):
+            event = _Event("PrivateMessage:qq:1", f"用户消息{index}")
+            tracker.begin_request(event, detect_interrupt=False)
+            tracker.finish_response(event, bot_text=f"回复{index}")
+            events.append(event)
+
+        tracker.update_history_limit(2)
+
+        turns = tracker.get_recent_turns(events[-1])
+        self.assertEqual([turn.bot_text for turn in turns], ["回复1", "回复2"])
+
+    def test_recent_turns_are_isolated_by_session(self) -> None:
+        tracker = ConversationTracker()
+        first = _Event("PrivateMessage:qq:1", "会话一的问题")
+        second = _Event("PrivateMessage:qq:2", "会话二的问题")
+        tracker.begin_request(first, detect_interrupt=False)
+        tracker.finish_response(first, bot_text="只属于会话一的回复")
+
+        self.assertEqual(tracker.get_recent_turns(second), [])
+
+
+class PrivateContextBridgeTests(unittest.TestCase):
+    @staticmethod
+    def _plugin():
+        from astrbot_plugin_conversation_flow.main import ConversationalFlowPlugin
+
+        plugin = object.__new__(ConversationalFlowPlugin)
+        plugin.config = build_plugin_config(
+            {
+                "private_context_bridge_enabled": True,
+                "private_context_bridge_max_turns": 3,
+                "private_context_bridge_short_max_chars": 40,
+            }
+        )
+        plugin.tracker = ConversationTracker(max_history_turns=3)
+        plugin.logger = _Logger()
+        plugin._stats = {"private_context_bridged": 0}
+        return plugin
+
+    @staticmethod
+    def _instruction_text(req) -> str:
+        part = req.extra_user_content_parts[0]
+        return getattr(part, "text", None) or part.get("text", "")
+
+    @staticmethod
+    def _complete_turn(plugin, umo: str, user_text: str, bot_text: str) -> None:
+        event = _Event(umo, user_text)
+        plugin.tracker.begin_request(event, detect_interrupt=False)
+        plugin.tracker.finish_response(event, bot_text=bot_text)
+
+    def test_short_try_message_inherits_link_object(self) -> None:
+        plugin = self._plugin()
+        umo = "PrivateMessage:qq:1"
+        self._complete_turn(
+            plugin,
+            umo,
+            "你看看这个是什么 https://sakizuki-danboorusearch.hf.space",
+            "这是一个 Danbooru 标签搜索工具。",
+        )
+        event = _Event(umo, "你试试能不能用")
+        plugin.tracker.begin_request(event, detect_interrupt=False)
+        req = types.SimpleNamespace(
+            extra_user_content_parts=[], system_prompt="", contexts=[]
+        )
+
+        plugin._inject_private_context_bridge(event, req, 2, event.message_str)
+
+        instruction = self._instruction_text(req)
+        self.assertIn("sakizuki-danboorusearch.hf.space", instruction)
+        self.assertIn("Danbooru 标签搜索工具", instruction)
+        self.assertTrue(event.get_extra(plugin.PRIVATE_CONTEXT_INJECTED_KEY))
+
+    def test_short_name_continues_previous_plugin_lookup(self) -> None:
+        plugin = self._plugin()
+        umo = "PrivateMessage:qq:1"
+        self._complete_turn(
+            plugin,
+            umo,
+            "你看一下插件列表，应该有枢模块",
+            "你说的具体名称是什么？",
+        )
+        event = _Event(umo, "orchestration hub")
+        plugin.tracker.begin_request(event, detect_interrupt=False)
+        req = types.SimpleNamespace(
+            extra_user_content_parts=[], system_prompt="", contexts=[]
+        )
+
+        plugin._inject_private_context_bridge(event, req, 2, event.message_str)
+
+        instruction = self._instruction_text(req)
+        self.assertIn("插件列表", instruction)
+        self.assertIn("orchestration hub", event.message_str)
+        self.assertIn("名称、术语", instruction)
+
+    def test_long_message_skips_when_framework_history_is_complete(self) -> None:
+        plugin = self._plugin()
+        umo = "PrivateMessage:qq:1"
+        previous_user = "上一轮用户提出了一个明确的问题"
+        previous_bot = "上一轮已经给出了完整回答"
+        self._complete_turn(plugin, umo, previous_user, previous_bot)
+        event = _Event(
+            umo,
+            "这是一个内容足够完整且不需要依赖上一轮指代的新问题，请只处理当前主题，"
+            "同时根据本条消息中已经给出的全部条件独立作答，不需要回顾之前的话题。",
+        )
+        plugin.tracker.begin_request(event, detect_interrupt=False)
+        req = types.SimpleNamespace(
+            extra_user_content_parts=[],
+            system_prompt="",
+            contexts=[previous_user, previous_bot],
+        )
+
+        plugin._inject_private_context_bridge(event, req, 2, event.message_str)
+
+        self.assertEqual(req.extra_user_content_parts, [])
+        self.assertFalse(event.get_extra(plugin.PRIVATE_CONTEXT_INJECTED_KEY))
+
+    def test_group_message_never_uses_private_context_bridge(self) -> None:
+        plugin = self._plugin()
+        umo = "GroupMessage:qq:100"
+        self._complete_turn(plugin, umo, "群里上一条", "群里上一轮回复")
+        event = _Event(umo, "试试")
+        event.get_group_id = lambda: "100"
+        plugin.tracker.begin_request(event, detect_interrupt=False)
+        req = types.SimpleNamespace(
+            extra_user_content_parts=[], system_prompt="", contexts=[]
+        )
+
+        plugin._inject_private_context_bridge(event, req, 2, event.message_str)
+
+        self.assertEqual(req.extra_user_content_parts, [])
 
 
 class _GroupEvent:
@@ -1349,6 +1569,9 @@ class ReplyConfigTests(unittest.TestCase):
         for key in (
             "group_context_record_bot",
             "group_context_bot_label",
+            "private_context_bridge_enabled",
+            "private_context_bridge_max_turns",
+            "private_context_bridge_short_max_chars",
             "reply_context_enabled",
             "reply_context_api_fallback",
         ):
@@ -1714,6 +1937,13 @@ class NaturalToolCallPromptTests(unittest.TestCase):
         text = NATURAL_TOOL_CALL_INSTRUCTION
         self.assertIn("直说这块你不清楚", text)
         self.assertIn("不要用印象里的内容补全细节", text)
+
+    def test_instruction_allows_explicit_plugin_development_questions(self) -> None:
+        """用户明确问插件列表/实现时，不能再被“插件名禁说”误伤。"""
+        text = NATURAL_TOOL_CALL_INSTRUCTION
+        self.assertIn("用户明确询问已安装插件", text)
+        self.assertIn("可以直接回答真实名称与状态", text)
+        self.assertIn("不能假装检查过", text)
 
 
 class AtTargetsTests(unittest.TestCase):

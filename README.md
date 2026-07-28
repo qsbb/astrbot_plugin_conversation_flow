@@ -7,7 +7,7 @@
 | 字 | 模块 | 说明 |
 |----|------|------|
 | [知](https://github.com/qsbb/astrbot_plugin_active_learner) | 知识学习 | 自动检索注入、多源学习、交叉验证 |
-| [言](https://github.com/qsbb/astrbot_plugin_conversation_flow) | 对话调节 | 沉默判断、智能分段、插话衔接（本插件） |
+| [言](https://github.com/qsbb/astrbot_plugin_conversation_flow) | 对话调节 | 沉默判断、智能分段、上下文承接（本插件） |
 | [序](https://github.com/qsbb/astrbot_plugin_identity_guardian) | 身份管理 | 关系感知、权限边界、群组行动 |
 | [情](https://github.com/qsbb/astrbot_plugin_relationship) | 关系状态 | 情绪、好感、信任、熟悉度状态记录与只读建议 |
 | [声](https://github.com/qsbb/astrbot_plugin_voice_hub) | 语音合成 | 双 TTS 后端、多音色管理、AI 导演 |
@@ -25,7 +25,7 @@
 
 | 阶段 | 能力 | 解决的痛点 |
 |---|---|---|
-| `on_llm_request` | 沉默判断 + 群聊读空气 + 拟人化情绪 + 场景感知 + 上下文/引用说明 + 图片意图 + 自然工具调用 | bot 逢 @ 必回且永远精神饱满；多 bot 刷屏；打断群友对话；缺少上下文；引用归属错乱；图片消息一刀切；暴露工具机制词 |
+| `on_llm_request` | 沉默判断 + 私聊承接 + 群聊读空气 + 拟人化情绪 + 场景感知 + 上下文/引用说明 + 图片意图 + 自然工具调用 | bot 逢 @ 必回且永远精神饱满；短追问丢失上一轮对象；多 bot 刷屏；打断群友对话；引用归属错乱；图片消息一刀切；暴露工具机制词 |
 | `on_llm_response` | 沉默标记检测 + 拦截标记检测 | 主 LLM 已生成回复但应静默 |
 | `on_decorating_result` | 智能分段回复 + 纯文本后处理 | 一大串文字糊在一条消息里；Markdown 格式破坏聊天自然度 |
 | `event_message_type(GROUP_MESSAGE)` | 群聊上下文采集（含 bot 自身发言与引用关系） | 群聊被唤醒时提供最近对话作为背景，并保留"谁在回复谁"的指向 |
@@ -42,7 +42,7 @@
 - LLM 主动分段时，每段保留不切，尊重模型意图。
 
 **保底：正则切分**
-- 如果 LLM 没有主动分段（无双空行），插件按句末标点（`。！？!?…`）切分；
+- 如果 LLM 没有主动分段（无双空行），插件按强句末标点（`。！？!?`）切分；省略号表示停顿或延续，不作为切分边界；
 - 超长段落（> `chunking_long_paragraph_threshold`，默认 20）即使有双空行也按句末标点继续切分；
 - 短段落（≤ threshold）保留不切。
 
@@ -123,6 +123,16 @@
 | `interrupt_window_ms` | `30000` | 插话检测时间窗口（毫秒）。仅当上一条消息在此窗口内且尚未完成回复时，新消息才算插话并中断旧回复；超过此时间的旧请求视为已完成，不会被打断 |
 | `interrupt_state_ttl_ms` | `600000` | 会话状态保留时长，超时自动清理 |
 | `interrupt_scope` | `sender` | 群聊中断作用域：`room`=房间内任何新消息可中断；`sender`=仅同一发送者的新消息可中断（推荐）；`mention_or_sender`=同一发送者或明确 @/回复 bot 时中断 |
+
+#### 私聊上下文承接
+
+| 字段 | 默认 | 说明 |
+|---|---|---|
+| `private_context_bridge_enabled` | `true` | 启用已完成私聊轮次的短承接兜底 |
+| `private_context_bridge_max_turns` | `3` | 最近完成轮次数，范围 1-10 |
+| `private_context_bridge_short_max_chars` | `40` | 主动承接的短消息长度上限，范围 4-200 |
+
+插件会在内存中保留少量“用户消息 + 实际交付回复”。遇到“试试能不能用”、单独给出的名称/术语、纠正语等短消息时，把最近明确对象和未完成任务重新放到当前请求附近。普通长消息若 AstrBot 公开历史已经完整，则不重复注入；当前消息明显开启新话题时，提示词要求忽略不相关历史。缓存不写磁盘，会随会话 TTL、重载或重启清理。
 
 #### 群聊上下文注入
 
@@ -409,7 +419,7 @@ astrbot_plugin_conversation_flow/
     ├── scene.py                  # 群聊场景感知（对谁说话，规则判定不调用 LLM）
     ├── group_context.py          # 群聊上下文管理（deque 缓存 + message_id 索引）
     ├── message_meta.py           # 消息元信息：message_id / 引用目标 / @ 目标 / 纯文本正文
-    └── interrupt_tracker.py      # 会话级 in-flight 状态管理（含作用域）
+    └── interrupt_tracker.py      # 会话级 in-flight 状态与最近完成轮次（含作用域）
 ```
 
 ## 兼容性
