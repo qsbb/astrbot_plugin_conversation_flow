@@ -139,6 +139,12 @@ from astrbot_plugin_conversation_flow.core.interrupt_tracker import (  # noqa: E
 from astrbot_plugin_conversation_flow.core.group_context import (  # noqa: E402
     GroupContextManager,
 )
+from astrbot_plugin_conversation_flow.core.followup_guard import (  # noqa: E402
+    LEVEL_HARD,
+    LEVEL_SOFT,
+    FollowupGuard,
+    is_followup_offer,
+)
 from astrbot_plugin_conversation_flow.core.mood import (  # noqa: E402
     MOOD_ANNOYED,
     MOOD_LAZY,
@@ -157,6 +163,7 @@ from astrbot_plugin_conversation_flow.core.prompts import (  # noqa: E402
     INTERCEPT_INJECT_INSTRUCTION,
     INTERRUPT_THINKING_HISTORY_WITH_CONTEXT_TEMPLATE,
     NATURAL_TOOL_CALL_INSTRUCTION,
+    build_followup_guard_instruction,
     PRIVATE_CONTEXT_BRIDGE_TEMPLATE,
     CHUNKING_INSTRUCTION,
     SCENE_TARGET_HINT_NAMED,
@@ -354,7 +361,61 @@ class ChunkingPromptTests(unittest.TestCase):
         self.assertEqual(cfg.chunking_long_paragraph_threshold, 20)
 
 
+class FollowupGuardTests(unittest.TestCase):
+    def test_detects_service_offer_only_at_reply_tail(self) -> None:
+        self.assertTrue(is_followup_offer("结论已经整理好了。还需要我帮你查别的吗？"))
+        self.assertTrue(is_followup_offer("有需要随时告诉我。"))
+        self.assertFalse(is_followup_offer("我还需要你提供具体报错。"))
+        self.assertFalse(is_followup_offer("你说的是哪个插件？"))
+
+    def test_streak_escalates_and_normal_reply_resets(self) -> None:
+        guard = FollowupGuard(streak_limit=2)
+        first = guard.record_reply("session:user", "还需要我帮你做别的吗？")
+        second = guard.record_reply("session:user", "有需要随时告诉我。")
+        self.assertEqual(first.level, LEVEL_SOFT)
+        self.assertEqual(second.level, LEVEL_HARD)
+
+        guard.record_reply("session:user", "配置已经更新完成。")
+        self.assertEqual(guard.peek("session:user").streak, 0)
+
+    def test_window_expiry_and_disabled_mode(self) -> None:
+        now = [10.0]
+        guard = FollowupGuard(window_seconds=60, clock=lambda: now[0])
+        guard.record_reply("session:user", "有需要随时告诉我。")
+        now[0] = 71.0
+        self.assertEqual(guard.peek("session:user").streak, 0)
+
+        guard.update_config(False, 2, 60)
+        decision = guard.record_reply("session:user", "还需要我帮你查吗？")
+        self.assertEqual(decision.streak, 0)
+
+    def test_prompt_strength_follows_streak_level(self) -> None:
+        guard = FollowupGuard(streak_limit=2)
+        soft = guard.record_reply("session:user", "还需要我帮你查吗？")
+        hard = guard.record_reply("session:user", "有需要随时告诉我。")
+        self.assertIn("改用陈述式收尾", build_followup_guard_instruction(soft))
+        self.assertIn("禁止再次使用征询", build_followup_guard_instruction(hard))
+
+
 class ConfigTests(unittest.TestCase):
+    def test_followup_guard_defaults_and_clamps(self) -> None:
+        defaults = build_plugin_config({})
+        self.assertTrue(defaults.followup_guard_enabled)
+        self.assertEqual(defaults.followup_streak_limit, 2)
+        self.assertEqual(defaults.followup_window_seconds, 900)
+
+        clamped = build_plugin_config(
+            {"followup_streak_limit": 0, "followup_window_seconds": 1}
+        )
+        self.assertEqual(clamped.followup_streak_limit, 1)
+        self.assertEqual(clamped.followup_window_seconds, 60)
+
+        capped = build_plugin_config(
+            {"followup_streak_limit": 101, "followup_window_seconds": 86401}
+        )
+        self.assertEqual(capped.followup_streak_limit, 100)
+        self.assertEqual(capped.followup_window_seconds, 86400)
+
     def test_experimental_thinking_merge_defaults_off(self) -> None:
         cfg = build_plugin_config({})
         self.assertFalse(cfg.experimental_thinking_merge_enabled)
@@ -1903,20 +1964,11 @@ class NaturalToolCallPromptTests(unittest.TestCase):
         self.assertIn("权限", text)
         self.assertIn("不要编原因", text)
 
-    def test_instruction_delegates_followup_suppression_to_relationship(self) -> None:
-        """服务式追问抑制已归口到情，本模块不得再出现同类约束。
-
-        情（astrbot_plugin_relationship）持有关系状态与压力作用域，能按连续追问
-        轮次做 soft/hard 分档；言只能给静态规则。两边同时约束会让同一请求收到
-        两段措辞不一致的提示词，模型行为不可预期。
-        """
-        text = NATURAL_TOOL_CALL_INSTRUCTION
-        for phrase in ("服务式追问", "还需要我", "随时告诉我", "征询"):
-            self.assertNotIn(
-                phrase,
-                text,
-                msg=f"{phrase!r} 属情的职责，不应在言的工具调用指令中重复约束",
-            )
+    def test_instruction_keeps_followup_rules_in_dedicated_block(self) -> None:
+        text = build_followup_guard_instruction()
+        self.assertIn("不要用服务式征询收尾", text)
+        self.assertIn("随时待命", text)
+        self.assertNotIn("收尾方式", NATURAL_TOOL_CALL_INSTRUCTION)
 
     def test_instruction_forbids_asking_permission_before_searching(self) -> None:
         """不确定时应直接检索，不能把"要不我帮你搜搜看"抛给用户等点头。"""

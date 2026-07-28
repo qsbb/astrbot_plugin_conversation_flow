@@ -238,6 +238,28 @@
     "hint": "窗口内 Bot 已回复过几次晚安/谢谢/拜拜等收尾话术后，再遇到同类消息就静默。建议 1-2。填 0 关闭这条规则。",
     "default": 2
   },
+  "followup_guard_enabled": {
+    "type": "bool",
+    "description": "[收尾方式] 抑制服务式追问收尾",
+    "hint": "抑制『还需要我帮你……吗』『有需要随时告诉我』等客服式收尾。只约束表达方式，不阻止必要的澄清问题；按当前会话和用户独立统计。",
+    "default": true
+  },
+  "followup_streak_limit": {
+    "type": "int",
+    "description": "[收尾方式] 连续追问强约束阈值",
+    "hint": "连续出现多少轮服务式追问后，从提醒改为禁止征询式结尾。默认 2。",
+    "default": 2,
+    "minimum": 1,
+    "maximum": 100
+  },
+  "followup_window_seconds": {
+    "type": "int",
+    "description": "[收尾方式] 连续追问统计窗口秒数",
+    "hint": "超过该时间未再次出现服务式追问时自然清零。默认 900 秒。",
+    "default": 900,
+    "minimum": 60,
+    "maximum": 86400
+  },
   "scene_awareness_enabled": {
     "type": "bool",
     "description": "[场景感知] 启用群聊场景感知",

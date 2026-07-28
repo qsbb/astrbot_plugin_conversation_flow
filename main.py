@@ -23,6 +23,7 @@ from .core.chunker import Chunker
 from .core.config import PluginConfig, build_plugin_config, normalize_config
 from .core.delay import calculate_segment_delay_ms
 from .core.group_context import GroupContextManager
+from .core.followup_guard import FollowupGuard
 from .core.intercept import InterceptJudge
 from .core.interrupt_tracker import ConversationTracker
 from .core.llm_service import LLMService
@@ -54,6 +55,7 @@ from .core.prompts import (
     INTERRUPT_THINKING_HISTORY_TEMPLATE,
     INTERRUPT_THINKING_HISTORY_WITH_CONTEXT_TEMPLATE,
     NATURAL_TOOL_CALL_INSTRUCTION,
+    build_followup_guard_instruction,
     PRIVATE_CONTEXT_BRIDGE_TEMPLATE,
     MOOD_ANNOYED_INSTRUCTION,
     MOOD_LAZY_INSTRUCTION,
@@ -156,6 +158,11 @@ class ConversationalFlowPlugin(Star):
             window_seconds=self.config.group_air_guard_window_seconds,
             max_bot_replies=self.config.group_air_guard_max_bot_replies,
             polite_loop_limit=self.config.group_air_guard_polite_loop_limit,
+        )
+        self.followup_guard = FollowupGuard(
+            enabled=self.config.followup_guard_enabled,
+            streak_limit=self.config.followup_streak_limit,
+            window_seconds=self.config.followup_window_seconds,
         )
         self.mood = MoodTracker(
             window_seconds=self.config.mood_window_seconds,
@@ -285,6 +292,11 @@ class ConversationalFlowPlugin(Star):
             self.config.group_air_guard_window_seconds,
             self.config.group_air_guard_max_bot_replies,
             self.config.group_air_guard_polite_loop_limit,
+        )
+        self.followup_guard.update_config(
+            self.config.followup_guard_enabled,
+            self.config.followup_streak_limit,
+            self.config.followup_window_seconds,
         )
         self.mood.update_config(
             self.config.mood_window_seconds,
@@ -448,6 +460,15 @@ class ConversationalFlowPlugin(Star):
         if self.config.chunking_enabled:
             self._inject_chunking_instruction(req)
 
+        # 服务式追问抑制属于对话收尾节奏，由言统一注入并按实际交付计数。
+        if self.config.followup_guard_enabled:
+            decision = self.followup_guard.peek(self._followup_scope_key(event))
+            self._inject_instruction(
+                req,
+                build_followup_guard_instruction(decision),
+                "followup guard",
+            )
+
         # 自然工具调用：约束 bot 描述自身动作的措辞，不暴露工具名与报错原文
         if self.config.natural_tool_call_enabled:
             self._inject_natural_tool_call_instruction(req)
@@ -591,6 +612,7 @@ class ConversationalFlowPlugin(Star):
                 self._update_result_plain_text(event, text)
             self._record_bot_message(event, text)
             self._record_air_reply(event, text)
+            self._record_followup_reply(event, text)
             self._record_mood_reply(event)
             self._publish_delivery_plan(event, [text], text, voice_requested)
             if not voice_requested:
@@ -604,6 +626,7 @@ class ConversationalFlowPlugin(Star):
                 self._update_result_plain_text(event, text)
             self._record_bot_message(event, text)
             self._record_air_reply(event, text)
+            self._record_followup_reply(event, text)
             self._record_mood_reply(event)
             self._publish_delivery_plan(event, [text], text, voice_requested)
             if not voice_requested:
@@ -630,6 +653,7 @@ class ConversationalFlowPlugin(Star):
                 self._update_result_plain_text(event, text)
             self._record_bot_message(event, text)
             self._record_air_reply(event, text)
+            self._record_followup_reply(event, text)
             self._record_mood_reply(event)
             return
 
@@ -693,6 +717,8 @@ class ConversationalFlowPlugin(Star):
         self._record_bot_message(event, final_text)
         # 分段发送只算一次回复：读空气限制的是"接话次数"，不是消息条数
         self._record_air_reply(event, final_text)
+        if sent_text_parts:
+            self._record_followup_reply(event, final_text)
         self._record_mood_reply(event)
         self.tracker.finish_response(event, bot_text=final_text)
 
@@ -753,6 +779,7 @@ class ConversationalFlowPlugin(Star):
             self.config.interrupt_state_ttl_ms / 1000.0
         )
         air_stale = self.air_guard.cleanup_stale()
+        followup_stale = self.followup_guard.cleanup_stale()
         mood_stale = self.mood.cleanup_stale(
             self.config.interrupt_state_ttl_ms / 1000.0
         )
@@ -765,6 +792,7 @@ class ConversationalFlowPlugin(Star):
                 f" 本群窗口内: 回复 {air_now['bot_replies']} 次, "
                 f"收尾话术 {air_now['polite_replies']} 次"
             )
+        followup_now = self.followup_guard.stats(self._followup_scope_key(event))
         text = (
             "对话流控制 - 运行状态\n"
             f"- 沉默判断: {'on' if self.config.silence_enabled else 'off'} ({self.config.silence_strategy})\n"
@@ -797,6 +825,10 @@ class ConversationalFlowPlugin(Star):
             f"max_replies={self.config.group_air_guard_max_bot_replies}, "
             f"polite_limit={self.config.group_air_guard_polite_loop_limit})"
             f"{air_text}\n"
+            f"- 服务式追问抑制: {'on' if self.config.followup_guard_enabled else 'off'} "
+            f"(window={self.config.followup_window_seconds}s, "
+            f"streak={followup_now['streak']}/{self.config.followup_streak_limit}, "
+            f"level={followup_now['level']})\n"
             f"- 场景感知: {'on' if self.config.scene_awareness_enabled else 'off'} "
             f"(guard_to_other={self.config.scene_awareness_guard_to_other}, "
             f"hint_to_group={self.config.scene_awareness_hint_to_group}, "
@@ -809,7 +841,7 @@ class ConversationalFlowPlugin(Star):
             f"source={self._mood_source})\n"
             f"- 自然工具调用: {'on' if self.config.natural_tool_call_enabled else 'off'}\n"
             f"- 活跃会话: {active_sessions} (清理过期 {stale_cleaned}, 群缓冲 {group_stale}, "
-            f"读空气 {air_stale}, 情绪 {mood_stale})\n"
+            f"读空气 {air_stale}, 追问 {followup_stale}, 情绪 {mood_stale})\n"
             "统计:\n"
             f"- 总请求: {self._stats['total_requests']}\n"
             f"- 沉默次数: {self._stats['silenced']}\n"
@@ -925,6 +957,16 @@ class ConversationalFlowPlugin(Star):
         self.mood.reset(scope_key)
         yield event.plain_result("当前会话的情绪状态已恢复。")
 
+    @convflow_group.command("followup_reset")
+    async def convflow_followup_reset(self, event: AstrMessageEvent):
+        """清空当前会话用户的服务式追问连续计数。"""
+        scope_key = self._followup_scope_key(event)
+        if not scope_key:
+            yield event.plain_result("无法识别当前会话，未重置追问计数。")
+            return
+        self.followup_guard.reset(scope_key)
+        yield event.plain_result("当前会话的服务式追问计数已清空。")
+
     @convflow_group.command("help")
     async def convflow_help(self, event: AstrMessageEvent):
         """显示帮助。"""
@@ -936,6 +978,7 @@ class ConversationalFlowPlugin(Star):
             "/convflow set <key> <value> - 修改配置项\n"
             "/convflow silence_test <text> - 测试沉默预判断\n"
             "/convflow air_reset - 清空本群读空气窗口\n"
+            "/convflow followup_reset - 清空当前会话的追问收尾计数\n"
             "/convflow mood_reset - 恢复当前会话的情绪状态\n"
             "/convflow reset_stats - 重置统计\n"
             "/convflow help - 显示本帮助"
@@ -1222,6 +1265,14 @@ class ConversationalFlowPlugin(Star):
         except Exception:
             pass
         return ""
+
+    def _followup_scope_key(self, event: AstrMessageEvent) -> str:
+        """按统一会话与发送者隔离追问计数，兼容群聊和私聊。"""
+        umo = self.tracker._get_umo(event)
+        sender_id = self.tracker._get_sender_id(event)
+        if not umo or not sender_id:
+            return ""
+        return f"{umo}:user:{sender_id}"
 
     def _get_sender_name(self, event: AstrMessageEvent) -> str:
         """安全获取发送者昵称。"""
@@ -1913,6 +1964,14 @@ class ConversationalFlowPlugin(Star):
         if not group_id:
             return
         self.air_guard.record_reply(group_id, text)
+
+    def _record_followup_reply(self, event: AstrMessageEvent, text: str) -> None:
+        """记录已通过静默/中断与文本装饰检查的最终回复。"""
+        if not self.config.followup_guard_enabled or not text or not text.strip():
+            return
+        scope_key = self._followup_scope_key(event)
+        if scope_key:
+            self.followup_guard.record_reply(scope_key, text)
 
     def _record_mood_reply(self, event: AstrMessageEvent) -> None:
         """实际回复后解除该会话的连续静默计数。"""

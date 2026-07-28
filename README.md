@@ -16,7 +16,7 @@
 ## 当前实现信息
 
 - 版本号以 `metadata.yaml` 的 `version` 为唯一事实源，代码侧引用 `main.__version__`；本文档不登记具体版本号。AstrBot 兼容范围：`>=4.16,<5`。
-- 命令入口：`/convflow` 命令组，支持 `status`、`config`、`reload`、`set`、`silence_test`、`air_reset`、`mood_reset`、`reset_stats`、`help`。
+- 命令入口：`/convflow` 命令组，支持 `status`、`config`、`reload`、`set`、`silence_test`、`air_reset`、`followup_reset`、`mood_reset`、`reset_stats`、`help`。
 - 页面入口：当前实现未提供固定 Plugin Page 管理页；配置可在 AstrBot Dashboard 编辑，运行时也可使用 `/convflow` 命令。
 
 ## 这是什么
@@ -25,9 +25,9 @@
 
 | 阶段 | 能力 | 解决的痛点 |
 |---|---|---|
-| `on_llm_request` | 沉默判断 + 私聊承接 + 群聊读空气 + 拟人化情绪 + 场景感知 + 上下文/引用说明 + 图片意图 + 自然工具调用 | bot 逢 @ 必回且永远精神饱满；短追问丢失上一轮对象；多 bot 刷屏；打断群友对话；引用归属错乱；图片消息一刀切；暴露工具机制词 |
+| `on_llm_request` | 沉默判断 + 私聊承接 + 群聊读空气 + 拟人化情绪 + 场景感知 + 上下文/引用说明 + 图片意图 + 收尾约束 + 自然工具调用 | bot 逢 @ 必回且永远精神饱满；短追问丢失上一轮对象；多 bot 刷屏；打断群友对话；引用归属错乱；图片消息一刀切；重复客服式收尾；暴露工具机制词 |
 | `on_llm_response` | 沉默标记检测 + 拦截标记检测 | 主 LLM 已生成回复但应静默 |
-| `on_decorating_result` | 智能分段回复 + 纯文本后处理 | 一大串文字糊在一条消息里；Markdown 格式破坏聊天自然度 |
+| `on_decorating_result` | 智能分段回复 + 纯文本后处理 + 最终收尾计数 | 一大串文字糊在一条消息里；Markdown 格式破坏聊天自然度；原始但未发送的回复污染行为计数 |
 | `event_message_type(GROUP_MESSAGE)` | 群聊上下文采集（含 bot 自身发言与引用关系） | 群聊被唤醒时提供最近对话作为背景，并保留"谁在回复谁"的指向 |
 | 贯穿全阶段 | 插话中断处理 + 智能拦截 | bot 还在思考时用户追加消息；不良内容自动拒绝 |
 
@@ -195,6 +195,16 @@ OneBot v11 的消息事件自带 `message_id`，引用消息以 `reply` 段携�
 收尾话术的判定要求"整条消息除了客套没别的内容"：先放过超长文本与带疑问标记（`？`/怎么/为什么/能不能…）的消息，再把命中的客套话连同语气词、标点一起剔除，若剩下的实义字符仍够多就不算收尾。因此"那就晚安啦～"算收尾，而"这个插件的分段功能怎么配置，谢谢""明天几点集合？晚安"都会正常回复——不是简单按长度截断。
 
 被误拦时用 `/convflow air_reset` 清空本群窗口计数，立刻恢复回复。`/convflow status` 在群里会附带显示本群窗口内的回复次数与收尾话术次数，方便现场核对。
+
+#### 服务式追问收尾抑制
+
+| 字段 | 默认 | 说明 |
+|---|---|---|
+| `followup_guard_enabled` | `true` | 抑制“还需要我帮你……吗”“有需要随时告诉我”等客服式收尾 |
+| `followup_streak_limit` | `2` | 连续命中多少轮后从提醒升级为禁止征询式结尾 |
+| `followup_window_seconds` | `900` | 连续计数的有效窗口，超时自然清零 |
+
+该功能对私聊和群聊都生效，按“统一会话 + 当前用户”隔离。检测只看最终回复尾部，不拦截正文中的必要澄清问题；普通陈述式收尾会立即清零连续次数。言只统计已经通过静默、插话和文本装饰检查的回复，多段主动发送时按实际发送成功的合并文本统计一次。误判时可用 `/convflow followup_reset` 清空当前会话用户的计数。
 
 #### 拟人化情绪
 
@@ -386,6 +396,7 @@ Event B 的 LLM 完成
 /convflow set <key> <val>  - 修改配置项并持久化
 /convflow silence_test <text> - 测试沉默预判断（需 prejudge/both 策略）
 /convflow air_reset        - 清空本群读空气窗口计数
+/convflow followup_reset   - 清空当前会话的追问收尾计数
 /convflow mood_reset       - 恢复当前会话的情绪状态
 /convflow reset_stats      - 重置统计
 /convflow help             - 显示帮助
@@ -415,6 +426,7 @@ astrbot_plugin_conversation_flow/
     ├── image_intent.py           # 图片检测 + 可见性判断（图片意图判断）
     ├── intercept.py              # 智能拦截（注入式，融入主思维链）
     ├── air_guard.py              # 群聊读空气（滑动窗口计数，不调用 LLM）
+    ├── followup_guard.py         # 服务式追问收尾识别与会话级连续计数
     ├── mood.py                   # 拟人化情绪（会话疲劳与回复意愿）
     ├── scene.py                  # 群聊场景感知（对谁说话，规则判定不调用 LLM）
     ├── group_context.py          # 群聊上下文管理（deque 缓存 + message_id 索引）

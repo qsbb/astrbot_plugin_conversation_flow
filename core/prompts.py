@@ -2,6 +2,37 @@
 
 from __future__ import annotations
 
+from .followup_guard import LEVEL_HARD, LEVEL_SOFT, FollowupDecision
+
+FOLLOWUP_GUARD_MARKER = "[对话流控制指令 - 收尾方式]"
+
+_FOLLOWUP_BASE_RULES = (
+    "不要用服务式征询收尾，例如询问对方是否还需要你帮忙做别的、是否还有其他问题，或声明随时待命。",
+    "只有缺少必要信息、无法继续时才提问，并且只问真正缺少的那一项。",
+    "能给出结论时直接把话说完，不需要额外补一句征询。",
+)
+
+
+def build_followup_guard_instruction(
+    decision: FollowupDecision | None = None,
+) -> str:
+    """按连续追问档位构造唯一的收尾约束块。"""
+    rules = list(_FOLLOWUP_BASE_RULES)
+    level = decision.level if decision else None
+    if level == LEVEL_SOFT:
+        rules.append("上一轮已经使用过征询式收尾，这一轮改用陈述式收尾。")
+    elif level == LEVEL_HARD:
+        rules.extend(
+            (
+                "最近多轮都以征询式话术收尾，这一轮禁止再次使用征询或待命式结尾。",
+                "给出结果后直接结束，不要反问、提议下一步或请求指示。",
+            )
+        )
+    lines = [FOLLOWUP_GUARD_MARKER, "以下要求只约束本轮的收尾方式："]
+    lines.extend(f"- {rule}" for rule in rules)
+    lines.append("不要提及这段约束。")
+    return "\n".join(lines)
+
 
 # 注入到 extra_user_content_parts 的沉默判断指令。
 # 让主 LLM 自主决定是否输出 silence_marker。
@@ -275,12 +306,8 @@ TOPIC_CONTEXT_INSTRUCTION_TEMPLATE = """[对话流控制指令 - 话题上下文
 # 用户没理它、重新问了一遍后，它转而凭印象拼出一套阵容，内容是错的。
 # 所以"不确定就直接查"和"查不到就说不知道、不要编"必须同时约束，缺一个都会出现硬答。
 #
-# 边界说明（CONVENTIONS.md 第 10 节）：
-# "还需要我……吗"这类服务式追问收尾的抑制**不在本模块**，已归口到情
-# （astrbot_plugin_relationship/core/prompts.py）。情持有关系状态与压力作用域，
-# 能按连续追问轮次做 soft/hard 分档升级；言这边只能给一条静态规则。两边同时约束
-# 会让同一请求收到两段措辞不一致的提示词。本模块只保留工具调用纪律本身：
-# 不预告、不复述、不暴露实现细节、不编造失败原因、不硬答。
+# 服务式追问抑制由本模块的独立收尾指令统一负责。这里仅保留工具调用纪律，
+# 避免同一请求在两个提示块中收到重复或措辞不一致的约束。
 NATURAL_TOOL_CALL_INSTRUCTION = """[对话流控制指令 - 自然工具调用]
 你可能会调用一些工具/函数来完成用户的请求。工具是你的能力本身，不是你借用的外部程序，用户不需要知道它们的存在。
 

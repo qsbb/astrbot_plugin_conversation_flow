@@ -50,6 +50,9 @@ DEFAULTS: dict[str, Any] = {
     "group_air_guard_window_seconds": 120,
     "group_air_guard_max_bot_replies": 6,
     "group_air_guard_polite_loop_limit": 2,
+    "followup_guard_enabled": True,
+    "followup_streak_limit": 2,
+    "followup_window_seconds": 900,
     "scene_awareness_enabled": True,
     # 硬拦截默认关闭：场景判定基于规则，误判时代价是"该回的没回"，
     # 比"多回一句"更让人困惑。默认只注入软指令，由模型自己决定。
@@ -328,6 +331,28 @@ def normalize_config(raw: dict[str, Any] | None) -> dict[str, Any]:
             DEFAULTS["group_air_guard_polite_loop_limit"],
         ),
     )
+    out["followup_guard_enabled"] = _coerce_bool(
+        raw.get("followup_guard_enabled"), DEFAULTS["followup_guard_enabled"]
+    )
+    out["followup_streak_limit"] = min(
+        100,
+        max(
+            1,
+            _coerce_int(
+                raw.get("followup_streak_limit"), DEFAULTS["followup_streak_limit"]
+            ),
+        ),
+    )
+    out["followup_window_seconds"] = min(
+        86400,
+        max(
+            60,
+            _coerce_int(
+                raw.get("followup_window_seconds"),
+                DEFAULTS["followup_window_seconds"],
+            ),
+        ),
+    )
     out["scene_awareness_enabled"] = _coerce_bool(
         raw.get("scene_awareness_enabled"), DEFAULTS["scene_awareness_enabled"]
     )
@@ -490,6 +515,9 @@ class PluginConfig:
     group_air_guard_window_seconds: int = 120
     group_air_guard_max_bot_replies: int = 6
     group_air_guard_polite_loop_limit: int = 2
+    followup_guard_enabled: bool = True
+    followup_streak_limit: int = 2
+    followup_window_seconds: int = 900
     scene_awareness_enabled: bool = True
     scene_awareness_guard_to_other: bool = False
     scene_awareness_hint_to_group: bool = False

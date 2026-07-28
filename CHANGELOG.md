@@ -13,10 +13,15 @@
 ### Added
 
 - 新增 `private_context_bridge_enabled`、`private_context_bridge_max_turns`、`private_context_bridge_short_max_chars` 三项配置与 `/convflow status` 诊断统计。
+- 新增会话级服务式追问抑制：识别“还需要我帮你……吗”“有需要随时告诉我”等收尾，按最终装饰后的交付文本连续计数，并提供 `/convflow followup_reset`。
+
+### Changed
+
+- 服务式追问抑制从“情”迁回“言”统一管理。基础规则与 soft/hard 分档只注入一次；被插话丢弃或静默标记拦下的原始 LLM 输出不再污染追问计数。
 
 ### Tests
 
-- 新增省略号、连续句末标点、已完成轮次幂等记录、历史容量收缩、链接后短追问、插件名称补充、完整公开历史去重及开发信息例外测试。
+- 新增省略号、连续句末标点、已完成轮次幂等记录、历史容量收缩、链接后短追问、插件名称补充、完整公开历史去重、开发信息例外、追问识别与分档升级测试。
 
 ## 0.6.5 - 2026-07-28
 
