@@ -15,7 +15,7 @@
 
 ## 当前实现信息
 
-- 当前版本：`0.6.3`（自 `0.6.1` 起采用三段式无 v 前缀格式）；AstrBot 兼容范围：`>=4.16.0,<5`。
+- 版本号以 `metadata.yaml` 的 `version` 为唯一事实源，代码侧引用 `main.__version__`；本文档不登记具体版本号。AstrBot 兼容范围：`>=4.16,<5`。
 - 命令入口：`/convflow` 命令组，支持 `status`、`config`、`reload`、`set`、`silence_test`、`air_reset`、`mood_reset`、`reset_stats`、`help`。
 - 页面入口：当前实现未提供固定 Plugin Page 管理页；配置可在 AstrBot Dashboard 编辑，运行时也可使用 `/convflow` 命令。
 
@@ -411,7 +411,7 @@ astrbot_plugin_conversation_flow/
 
 ## 兼容性
 
-- AstrBot `>=4.16.0, <5`
+- AstrBot `>=4.16, <5`
 - 依赖钩子：`@filter.on_llm_request` / `@filter.on_llm_response` / `@filter.on_decorating_result` / `@filter.on_waiting_llm_request` / `@filter.event_message_type`
 - **AstrBot v4.26.6+ 注意**：框架调用钩子时会传入大量额外位置参数（`on_waiting_llm_request` 被传 13 个、`on_llm_request` 被传 14 个）。v0.2.3+ 已为所有钩子加 `*args, **kwargs` 兜底；低于 v0.2.3 会报 `takes N positional arguments but M were given`
 - 已测试适配器：`aiocqhttp`（其他适配器理论可用，但 `event.send()` 行为可能略有差异）

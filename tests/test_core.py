@@ -1652,7 +1652,21 @@ class NaturalToolCallPromptTests(unittest.TestCase):
         text = NATURAL_TOOL_CALL_INSTRUCTION
         self.assertIn("权限", text)
         self.assertIn("不要编原因", text)
-        self.assertIn("服务式追问", text)
+
+    def test_instruction_delegates_followup_suppression_to_relationship(self) -> None:
+        """服务式追问抑制已归口到情，本模块不得再出现同类约束。
+
+        情（astrbot_plugin_relationship）持有关系状态与压力作用域，能按连续追问
+        轮次做 soft/hard 分档；言只能给静态规则。两边同时约束会让同一请求收到
+        两段措辞不一致的提示词，模型行为不可预期。
+        """
+        text = NATURAL_TOOL_CALL_INSTRUCTION
+        for phrase in ("服务式追问", "还需要我", "随时告诉我", "征询"):
+            self.assertNotIn(
+                phrase,
+                text,
+                msg=f"{phrase!r} 属情的职责，不应在言的工具调用指令中重复约束",
+            )
 
     def test_instruction_forbids_asking_permission_before_searching(self) -> None:
         """不确定时应直接检索，不能把"要不我帮你搜搜看"抛给用户等点头。"""

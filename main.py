@@ -61,7 +61,7 @@ from .core.prompts import (
 from .core.scene import SceneInput, detect_scene
 from .core.silence_judge import SilenceJudge
 
-__version__ = "0.6.3"
+__version__ = "0.6.4"
 
 
 @register(
@@ -271,7 +271,11 @@ class ConversationalFlowPlugin(Star):
             self.tracker._get_user_text(event)[:80],
         )
 
-    @filter.on_llm_request()
+    # priority=500：凝心溯溪系列 on_llm_request 区间为 200-800，数值越大越先执行。
+    # 顺序为 序 800（身份安全边界）> 知 700（知识事实）> 情 600（表达约束）>
+    # 言 500。本钩子可能触发沉默并截断整轮，必须排在最后，否则前序模块的
+    # 注入与状态记录会被跳过。
+    @filter.on_llm_request(priority=500)
     async def on_llm_request(
         self, event: AstrMessageEvent, req: Any, *args: Any, **kwargs: Any
     ) -> None:
@@ -388,7 +392,9 @@ class ConversationalFlowPlugin(Star):
     # 主钩子：on_llm_response
     # ------------------------------------------------------------------
 
-    @filter.on_llm_response()
+    # priority=500：与本插件 on_llm_request 保持同档，沉默/插话判定在响应阶段
+    # 同样排在知 700、情 600 之后，确保它们先完成各自的响应后处理与统计。
+    @filter.on_llm_response(priority=500)
     async def on_llm_response(
         self, event: AstrMessageEvent, response: Any, *args: Any, **kwargs: Any
     ) -> None:
