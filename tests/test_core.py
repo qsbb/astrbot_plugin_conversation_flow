@@ -759,6 +759,33 @@ class ConversationTrackerTests(unittest.TestCase):
         state = tracker.get_state("session")
         self.assertEqual(len(state.pending), 1)
 
+    def test_interrupt_token_cancels_inflight_delivery(self) -> None:
+        tracker = ConversationTracker()
+        first = _Event("session", "第一句")
+        second = _Event("session", "第二句")
+        tracker.begin_request(first)
+        token = tracker.get_interrupt_token(first)
+
+        tracker.begin_request(second)
+
+        self.assertTrue(token["cancelled"])
+        self.assertTrue(tracker.is_discarded(first))
+
+    def test_completed_delivery_is_cleaned_before_next_request(self) -> None:
+        tracker = ConversationTracker()
+        first = _Event("session", "第一句")
+        second = _Event("session", "第二句")
+        tracker.begin_request(first)
+        token = tracker.get_interrupt_token(first)
+        tracker.mark_response_started(first)
+        token["completed"] = True
+
+        tracker.begin_request(second)
+
+        self.assertFalse(token["cancelled"])
+        self.assertFalse(tracker.is_discarded(first))
+        self.assertFalse(tracker.has_merge_hint(second))
+
     def test_user_texts_aggregates_across_thinking_merge_chain(self) -> None:
         tracker = ConversationTracker()
         first = _Event("session", "第一句")

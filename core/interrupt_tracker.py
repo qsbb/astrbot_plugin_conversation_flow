@@ -17,6 +17,9 @@ class PendingRequest:
     finished: bool = False
     response_started: bool = False
     user_texts: list[str] = field(default_factory=list)
+    interrupt_token: dict[str, Any] = field(
+        default_factory=lambda: {"cancelled": False, "completed": False}
+    )
 
 
 @dataclass
@@ -33,6 +36,14 @@ class ConversationState:
 
     def cleanup_finished(self) -> None:
         """清理已完成的 pending，保留 discarded 一小段时间避免重复检测。"""
+        completed = {
+            seq
+            for seq, pending in self.pending.items()
+            if pending.interrupt_token.get("completed")
+        }
+        for seq in completed:
+            self.pending[seq].finished = True
+            self.discarded.discard(seq)
         self.pending = {s: p for s, p in self.pending.items() if not p.finished}
 
 
@@ -71,6 +82,8 @@ class ConversationTracker:
     def cleanup_stale(self) -> int:
         """清理过期会话状态，返回清理数量。"""
         now = time.time()
+        for state in self._states.values():
+            state.cleanup_finished()
         stale = [
             umo
             for umo, state in self._states.items()
@@ -99,6 +112,9 @@ class ConversationTracker:
         umo = self._compute_scoped_umo(event, is_wake=is_wake)
         self._set_extra(event, self.UMO_EXTRA_KEY, umo)
         state = self.get_state(umo)
+
+        # 下游交付插件通过共享 token 标记完成；在下一轮开始前收敛遗留状态。
+        state.cleanup_finished()
 
         if len(self._states) > 50:
             self.cleanup_stale()
@@ -135,9 +151,11 @@ class ConversationTracker:
                         and (window_s <= 0 or (now - p.started_at) <= window_s)
                     ):
                         other_state.discarded.add(p.seq)
+                        p.interrupt_token["cancelled"] = True
         if detect_interrupt and active_pending:
             for pending in active_pending:
                 state.discarded.add(pending.seq)
+                pending.interrupt_token["cancelled"] = True
             merge_candidates = [
                 pending
                 for pending in active_pending
@@ -210,6 +228,8 @@ class ConversationTracker:
         pending = state.pending.pop(seq, None)
         if pending:
             pending.finished = True
+            pending.interrupt_token["cancelled"] = True
+            pending.interrupt_token["completed"] = True
         state.discarded.discard(seq)
         state.last_active_ts = time.time()
 
@@ -223,6 +243,13 @@ class ConversationTracker:
         if state is None:
             return False
         return seq in state.discarded
+
+    def get_interrupt_token(self, event: Any) -> dict[str, Any]:
+        """返回供下游交付方协作取消的可变 token。"""
+        seq = self._get_extra(event, self.SEQ_EXTRA_KEY)
+        state = self._states.get(self._get_umo(event)) if seq is not None else None
+        pending = state.pending.get(seq) if state is not None else None
+        return pending.interrupt_token if pending is not None else {}
 
     def has_merge_hint(self, event: Any) -> bool:
         return bool(self._get_extra(event, self.MERGE_HINT_EXTRA_KEY))
@@ -246,6 +273,7 @@ class ConversationTracker:
         pending = state.pending.get(seq)
         if pending:
             pending.finished = True
+            pending.interrupt_token["completed"] = True
         state.discarded.discard(seq)
         state.cleanup_finished()
         if bot_text:

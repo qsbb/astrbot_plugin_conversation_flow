@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 import pathlib
 from typing import Any
@@ -25,7 +26,7 @@ from .core.group_context import GroupContextManager
 from .core.intercept import InterceptJudge
 from .core.interrupt_tracker import ConversationTracker
 from .core.llm_service import LLMService
-from .core.mood import MOOD_ANNOYED, MoodTracker
+from .core.mood import MOOD_ANNOYED, MOOD_LAZY, MOOD_NORMAL, MoodDecision, MoodTracker
 from .core.message_meta import (
     extract_at_targets,
     extract_plain_text,
@@ -59,9 +60,30 @@ from .core.prompts import (
     CHUNKING_INSTRUCTION,
 )
 from .core.scene import SceneInput, detect_scene
+from .core.request_context import (
+    OWNER_CONVERSATION_FLOW,
+    OWNER_RELATIONSHIP,
+    PHASE_DECORATING_RESULT,
+    PHASE_LLM_REQUEST,
+    PHASE_LLM_RESPONSE,
+    PHASE_MESSAGE,
+    add_reason,
+    ensure_context,
+    get_artifact,
+    set_artifact,
+    set_flag,
+)
 from .core.silence_judge import SilenceJudge
 
-__version__ = "0.6.4"
+__version__ = "0.6.5"
+RELATIONSHIP_PLUGIN_NAME = "astrbot_plugin_relationship"
+RELATIONSHIP_SNAPSHOT_CONTRACT_NAME = "relationship.snapshot"
+RELATIONSHIP_SNAPSHOT_CONTRACT_MAJOR = "1"
+VOICE_PLUGIN_NAME = "astrbot_plugin_voice_hub"
+VOICE_DELIVERY_CONTRACT_NAME = "voice.delivery"
+VOICE_DELIVERY_CONTRACT_MAJOR = "1"
+DELIVERY_PLAN_EXTRA_KEY = "conversation_flow.delivery_plan"
+DELIVERY_PLAN_VERSION = "1.0"
 
 
 @register(
@@ -72,6 +94,8 @@ __version__ = "0.6.4"
 )
 class ConversationalFlowPlugin(Star):
     """对话流控制主插件类。"""
+
+    PLUGIN_HEALTH_CONTRACT = "plugin.health@1.0"
 
     # event extra 上用于标记"已发送分段"的 key
     SENT_CHUNKS_KEY = "conv_flow_sent_chunks"
@@ -138,6 +162,8 @@ class ConversationalFlowPlugin(Star):
             silence_chance_percent=self.config.mood_silence_chance_percent,
             max_consecutive_silences=self.config.mood_max_consecutive_silences,
         )
+        self._mood_source = "local_fallback"
+        self._contract_warnings: set[str] = set()
 
         # bot 自身 ID 缓存（首次从事件解析后复用）
         self._self_id_cache: str = ""
@@ -172,6 +198,20 @@ class ConversationalFlowPlugin(Star):
             self.config.group_context_enabled,
             self.config.intercept_enabled,
         )
+
+    def plugin_health(self) -> dict[str, object]:
+        checks = {
+            "config_ready": getattr(self, "config", None) is not None,
+            "tracker_ready": getattr(self, "tracker", None) is not None,
+            "chunker_ready": getattr(self, "chunker", None) is not None,
+        }
+        reasons = [name.upper() for name, passed in checks.items() if not passed]
+        return {
+            "status": "ok" if not reasons else "unhealthy",
+            "checks": checks,
+            "reasons": reasons,
+            "version": __version__,
+        }
 
     # ------------------------------------------------------------------
     # 配置处理
@@ -257,6 +297,12 @@ class ConversationalFlowPlugin(Star):
         self, event: AstrMessageEvent, *args: Any, **kwargs: Any
     ) -> None:
         """会话锁外登记请求，使后续消息能及时使旧请求失效。"""
+        request_context = ensure_context(event, PHASE_MESSAGE)
+        add_reason(
+            request_context,
+            OWNER_CONVERSATION_FLOW,
+            "REQUEST_REGISTERED",
+        )
         is_wake = self._is_wake(event)
         seq = self.tracker.begin_request(
             event,
@@ -280,6 +326,12 @@ class ConversationalFlowPlugin(Star):
         self, event: AstrMessageEvent, req: Any, *args: Any, **kwargs: Any
     ) -> None:
         """LLM 请求前：注册会话状态、做沉默判断、注入插话合并上下文。"""
+        request_context = ensure_context(event, PHASE_LLM_REQUEST)
+        add_reason(
+            request_context,
+            OWNER_CONVERSATION_FLOW,
+            "FLOW_REQUEST_STARTED",
+        )
         self._stats["total_requests"] += 1
         umo = self.tracker._get_umo(event)
         user_text = (event.get_message_str() or "").strip()
@@ -399,6 +451,12 @@ class ConversationalFlowPlugin(Star):
         self, event: AstrMessageEvent, response: Any, *args: Any, **kwargs: Any
     ) -> None:
         """LLM 响应后：检查是否被插话取代、检查沉默标记。"""
+        request_context = ensure_context(event, PHASE_LLM_RESPONSE)
+        add_reason(
+            request_context,
+            OWNER_CONVERSATION_FLOW,
+            "FLOW_RESPONSE_STARTED",
+        )
         seq = event.get_extra(ConversationTracker.SEQ_EXTRA_KEY)
         self.tracker.mark_response_started(event)
 
@@ -439,6 +497,12 @@ class ConversationalFlowPlugin(Star):
         self, event: AstrMessageEvent, *args: Any, **kwargs: Any
     ) -> None:
         """结果装饰阶段：二次检查 + 智能分段发送。"""
+        request_context = ensure_context(event, PHASE_DECORATING_RESULT)
+        add_reason(
+            request_context,
+            OWNER_CONVERSATION_FLOW,
+            "FLOW_DECORATING_STARTED",
+        )
         seq = event.get_extra(ConversationTracker.SEQ_EXTRA_KEY)
 
         # 0) 已发送过分段（防重入）
@@ -470,6 +534,9 @@ class ConversationalFlowPlugin(Star):
         if not is_llm:
             self.tracker.finish_response(event)
             return
+
+        # 声在较低优先级消费同一结果；这里先通过版本化契约固定本轮交付决策。
+        voice_requested = await self._voice_delivery_requested(event, result)
 
         text = ""
         try:
@@ -513,7 +580,9 @@ class ConversationalFlowPlugin(Star):
             self._record_bot_message(event, text)
             self._record_air_reply(event, text)
             self._record_mood_reply(event)
-            self.tracker.finish_response(event, bot_text=text)
+            self._publish_delivery_plan(event, [text], text, voice_requested)
+            if not voice_requested:
+                self.tracker.finish_response(event, bot_text=text)
             return
 
         candidates = self.chunker.split_candidates(text)
@@ -524,7 +593,9 @@ class ConversationalFlowPlugin(Star):
             self._record_bot_message(event, text)
             self._record_air_reply(event, text)
             self._record_mood_reply(event)
-            self.tracker.finish_response(event, bot_text=text)
+            self._publish_delivery_plan(event, [text], text, voice_requested)
+            if not voice_requested:
+                self.tracker.finish_response(event, bot_text=text)
             return
 
         # 多段：需要主动发送
@@ -540,6 +611,15 @@ class ConversationalFlowPlugin(Star):
                 segments = self.chunker.split(text)
         else:
             segments = self.chunker.split(text)
+
+        self._publish_delivery_plan(event, segments, text, voice_requested)
+        if voice_requested:
+            if text_modified:
+                self._update_result_plain_text(event, text)
+            self._record_bot_message(event, text)
+            self._record_air_reply(event, text)
+            self._record_mood_reply(event)
+            return
 
         # 保存原始文本用于发送失败回退
         original_text = text
@@ -617,6 +697,7 @@ class ConversationalFlowPlugin(Star):
         记录内容带上 message_id 与引用关系，使后续能精确判断
         "用户引用的是谁的哪句话"。
         """
+        ensure_context(event, PHASE_MESSAGE)
         if not self.config.group_context_enabled:
             return
         group_id = self._get_group_id(event)
@@ -654,8 +735,8 @@ class ConversationalFlowPlugin(Star):
     @convflow_group.command("status")
     async def convflow_status(self, event: AstrMessageEvent):
         """查看插件运行状态。"""
-        active_sessions = sum(1 for s in self.tracker._states.values() if s.pending)
         stale_cleaned = self.tracker.cleanup_stale()
+        active_sessions = sum(1 for s in self.tracker._states.values() if s.pending)
         group_stale = self.group_context.cleanup_stale(
             self.config.interrupt_state_ttl_ms / 1000.0
         )
@@ -708,7 +789,8 @@ class ConversationalFlowPlugin(Star):
             f"- 拟人化情绪: {'on' if self.config.mood_enabled else 'off'} "
             f"(private={self.config.mood_private_enabled}, "
             f"window={self.config.mood_window_seconds}s, "
-            f"chance={self.config.mood_silence_chance_percent}%)\n"
+            f"chance={self.config.mood_silence_chance_percent}%, "
+            f"source={self._mood_source})\n"
             f"- 自然工具调用: {'on' if self.config.natural_tool_call_enabled else 'off'}\n"
             f"- 活跃会话: {active_sessions} (清理过期 {stale_cleaned}, 群缓冲 {group_stale}, "
             f"读空气 {air_stale}, 情绪 {mood_stale})\n"
@@ -1354,6 +1436,176 @@ class ConversationalFlowPlugin(Star):
             return f"private:{umo}" if umo else ""
         return ""
 
+    def _get_plugin_instance(self, plugin_name: str) -> Any | None:
+        getter = getattr(self.context, "get_star_instance", None)
+        if not callable(getter):
+            return None
+        try:
+            return getter(plugin_name)
+        except Exception as exc:
+            self.logger.debug(
+                "[conv-flow] plugin lookup failed: plugin=%s error=%s",
+                plugin_name,
+                exc,
+            )
+            return None
+
+    def _contract_compatible(
+        self,
+        provider: Any, declaration_method: str, name: str, major: str
+    ) -> bool:
+        declare = getattr(provider, declaration_method, None)
+        if not callable(declare):
+            self._warn_contract_once(name, f"missing {declaration_method}()")
+            return False
+        try:
+            contract = declare()
+        except Exception as exc:
+            self._warn_contract_once(name, f"declaration failed: {type(exc).__name__}")
+            return False
+        if not isinstance(contract, dict):
+            self._warn_contract_once(name, "declaration is not a mapping")
+            return False
+        version = str(contract.get("version") or "")
+        compatible = contract.get("name") == name and version.split(".", 1)[0] == major
+        if not compatible:
+            self._warn_contract_once(
+                name,
+                f"got name={contract.get('name')!r} version={version!r}",
+            )
+        return compatible
+
+    def _warn_contract_once(self, name: str, detail: str) -> None:
+        key = f"{name}:{detail}"
+        if key in self._contract_warnings:
+            return
+        self._contract_warnings.add(key)
+        self.logger.warning("[conv-flow] incompatible contract %s: %s", name, detail)
+
+    async def _voice_delivery_requested(self, event: Any, result: Any) -> bool:
+        provider = self._get_plugin_instance(VOICE_PLUGIN_NAME)
+        if provider is None or not self._contract_compatible(
+            provider,
+            "voice_delivery_contract",
+            VOICE_DELIVERY_CONTRACT_NAME,
+            VOICE_DELIVERY_CONTRACT_MAJOR,
+        ):
+            return False
+        planner = getattr(provider, "plan_voice_delivery", None)
+        if not callable(planner):
+            return False
+        try:
+            decision = planner(event, result)
+            if inspect.isawaitable(decision):
+                decision = await decision
+        except Exception as exc:
+            self.logger.warning("[conv-flow] voice delivery planning failed: %s", exc)
+            return False
+        return bool(isinstance(decision, dict) and decision.get("requested"))
+
+    def _publish_delivery_plan(
+        self,
+        event: Any,
+        segments: list[str],
+        original_text: str,
+        voice_requested: bool,
+    ) -> None:
+        cleaned_segments = [str(item).strip() for item in segments if str(item).strip()]
+        plan = {
+            "version": DELIVERY_PLAN_VERSION,
+            "segments": cleaned_segments or [original_text],
+            "original_text": original_text,
+            "voice_requested": bool(voice_requested),
+            "interrupt_token": self.tracker.get_interrupt_token(event),
+        }
+        self._set_extra(event, DELIVERY_PLAN_EXTRA_KEY, plan)
+        request_context = ensure_context(event, PHASE_DECORATING_RESULT)
+        set_artifact(
+            request_context,
+            OWNER_CONVERSATION_FLOW,
+            "delivery_plan",
+            plan,
+        )
+        set_flag(
+            request_context,
+            OWNER_CONVERSATION_FLOW,
+            "delivery_plan_ready",
+            True,
+        )
+        add_reason(
+            request_context,
+            OWNER_CONVERSATION_FLOW,
+            "DELIVERY_PLAN_READY",
+        )
+
+    async def _relationship_mood_decision(
+        self, event: Any, user_text: str
+    ) -> MoodDecision | None:
+        request_context = ensure_context(event, PHASE_LLM_REQUEST)
+        payload = get_artifact(
+            request_context,
+            OWNER_RELATIONSHIP,
+            "snapshot",
+        )
+        if not isinstance(payload, dict):
+            provider = self._get_plugin_instance(RELATIONSHIP_PLUGIN_NAME)
+            if provider is None or not self._contract_compatible(
+                provider,
+                "relationship_snapshot_contract",
+                RELATIONSHIP_SNAPSHOT_CONTRACT_NAME,
+                RELATIONSHIP_SNAPSHOT_CONTRACT_MAJOR,
+            ):
+                return None
+            reader = getattr(provider, "get_relationship_snapshot", None)
+            if not callable(reader):
+                return None
+            bot_id = self._get_self_id(event)
+            user_id = self.tracker._get_sender_id(event)
+            if not bot_id or not user_id:
+                return None
+            try:
+                payload = reader(bot_id, user_id, self._get_group_id(event) or None)
+                if inspect.isawaitable(payload):
+                    payload = await payload
+            except Exception as exc:
+                self.logger.warning("[conv-flow] relationship snapshot failed: %s", exc)
+                return None
+        if not isinstance(payload, dict):
+            return None
+        version = str(payload.get("version") or "")
+        if version.split(".", 1)[0] != RELATIONSHIP_SNAPSHOT_CONTRACT_MAJOR:
+            return None
+        mood = str(payload.get("mood") or MOOD_NORMAL)
+        if mood not in {MOOD_NORMAL, MOOD_LAZY, MOOD_ANNOYED}:
+            mood = MOOD_NORMAL
+        try:
+            willingness = max(0, min(100, int(payload.get("willingness", 100))))
+        except (TypeError, ValueError):
+            willingness = 100
+        silence = payload.get("silence")
+        silence = silence if isinstance(silence, dict) else {}
+        urgent = any(
+            marker in (user_text or "").lower()
+            for marker in (
+                "救命",
+                "求助",
+                "帮帮我",
+                "紧急",
+                "出事了",
+                "怎么办",
+                "help",
+                "urgent",
+                "emergency",
+            )
+        )
+        should_silence = bool(silence.get("suggested")) and not urgent
+        return MoodDecision(
+            mood=mood,
+            willingness=willingness,
+            should_silence=should_silence,
+            reason=str(silence.get("reason") or "relationship snapshot"),
+        )
+
     async def _apply_mood(
         self, event: AstrMessageEvent, req: Any, seq: Any, user_text: str
     ) -> bool:
@@ -1368,12 +1620,18 @@ class ConversationalFlowPlugin(Star):
         if not scope_key:
             return False
 
-        decision = self.mood.evaluate(scope_key, user_text)
+        decision = await self._relationship_mood_decision(event, user_text)
+        if decision is None:
+            decision = self.mood.evaluate(scope_key, user_text)
+            self._mood_source = "local_fallback"
+        else:
+            self._mood_source = "relationship.snapshot@1"
         self.logger.debug(
-            "[conv-flow] seq=%s mood=%s willingness=%s reason=%s",
+            "[conv-flow] seq=%s mood=%s willingness=%s source=%s reason=%s",
             seq,
             decision.mood,
             decision.willingness,
+            self._mood_source,
             decision.reason,
         )
         if decision.should_silence:

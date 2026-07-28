@@ -188,6 +188,8 @@ OneBot v11 的消息事件自带 `message_id`，引用消息以 `reply` 段携�
 
 #### 拟人化情绪
 
+安装兼容的“情”插件后，本插件通过 `relationship.snapshot@1` 消费统一关系快照，不再推进本地情绪计数；下表配置仅作为“情”缺失、不可用或契约不兼容时的显式 fallback。`/convflow status` 会显示当前来源，`mood_reset` 只重置本地 fallback 状态。
+
 | 字段 | 默认 | 说明 |
 |---|---|---|
 | `mood_enabled` | `true` | 启用会话级回复意愿变化，默认只作用于群聊 |
@@ -318,9 +320,10 @@ prejudge 粗筛 + inject 兜底。prejudge 判定非沉默时仍注入指令，�
 6. 段数 > `max_segments` 时合并末尾几段；
 7. 可选 LLM 辅助：超长文本调用一次轻量 LLM 重新规划切分点，并匹配回原文避免改词。
 
-发送策略（v0.2.0+ 结果所有权修复）：
+发送策略：
 - **不分段或单段**：直接 in-place 修改 `result.chain`，不调用 `stop_event()`，让框架正常发送，避免与 TTS 等结果装饰插件冲突；
-- **多段**：`clear_result()` + `stop_event()` + 循环 `await event.send()`；全部发送失败时回退原始文本；
+- **多段文本**：未请求语音时使用 `clear_result()` + `stop_event()` + 循环 `await event.send()`；全部发送失败时回退原始文本；
+- **多段语音**：言通过 `conversation_flow.delivery_plan@1` 把逻辑分段和中断令牌交给声，声逐段合成，言不提前抢占发送权；
 - **含非文本组件**（图片/语音等）：跳过文本替换和分段，保留原结果链。
 
 默认推荐 `per_char` 模式：每个有效字符 35ms，单段延迟限制在 500ms～4000ms；也可切换为 `fixed` 模式使用固定 800ms 延迟。
@@ -419,7 +422,7 @@ astrbot_plugin_conversation_flow/
 ## 已知限制
 
 1. **沉默判断依赖 LLM 遵循指令**：弱模型可能不严格输出 `<SILENCE/>`，建议使用 `prejudge` 或 `both` 兜底。
-2. **插话检测仅在 LLM 思考期间生效**：若旧回复已进入 `on_decorating_result`，无法阻止其发送。
+2. **已发送内容无法撤回**：逻辑中断可停止尚未发送的文本段，也可取消声仍在进行的语音合成；已经通过平台发出的段落仍无法自动撤回。
 3. **`event.send()` 时机**：分段发送依赖适配器实现，极少数适配器可能不支持在 `stop_event()` 后主动发送。
 4. **跨进程会话状态**：本插件状态在内存中，AstrBot 重启后会丢失（这是预期行为）。
 5. **`message_id` 依赖平台能力**：引用关系还原依赖 OneBot v11 的 `message_id` 与 `reply` 段。不提供这些字段的适配器会退化为仅按对象名/预览标注；`get_msg` 兜底反查也需适配器支持该 API。
