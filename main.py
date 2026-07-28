@@ -76,7 +76,7 @@ from .core.request_context import (
 )
 from .core.silence_judge import SilenceJudge
 
-__version__ = "0.6.6"
+__version__ = "0.6.5"
 RELATIONSHIP_PLUGIN_NAME = "astrbot_plugin_relationship"
 RELATIONSHIP_SNAPSHOT_CONTRACT_NAME = "relationship.snapshot"
 RELATIONSHIP_SNAPSHOT_CONTRACT_MAJOR = "1"
