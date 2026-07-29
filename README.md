@@ -153,10 +153,14 @@
 | `group_context_enabled` | `true` | bot 在群聊被 @/回复时注入最近群聊消息作为背景 |
 | `group_context_max_messages` | `10` | 获取的最近群聊消息条数上限 |
 | `group_context_only_when_woken` | `true` | 仅在被唤醒时注入；关闭则每次群聊消息都注入（消耗更多 Token） |
+| `group_context_reverse_wake_enabled` | `true` | 支持同一用户先发正文、随后单独 @Bot 的反向唤醒 |
+| `group_context_reverse_wake_seconds` | `15` | 反向唤醒只承接该时间窗内尚未消费的同用户正文，范围 1-120 秒 |
 | `group_context_record_bot` | `true` | 把 bot 自己发出的回复也写回群聊上下文，注入时单独标注归属 |
 | `group_context_bot_label` | `你` | 注入上下文时对 bot 自身发言的称谓 |
 
 群聊上下文由插件自行维护（按 group_id 缓存最近 N 条消息），AstrBot 没有跨平台"获取群聊历史"API。命令消息（以 `/` 开头）不会被记录到群聊上下文，避免污染。
+
+当用户采用“`吃什么好呢` → 单独 `@Bot`”的发送顺序时，AstrBot 原生空 @ 流程只会等待 @ 之后的下一条消息，不会向前取正文。反向唤醒会在内置等待器启动前，把同一群、同一用户、短时间内尚未消费且未曾唤醒 bot 的上一条纯文本恢复为当前问题；带图片、引用或其他 @ 的消息不会被不完整地搬运，连续空 @ 也不会重复回答同一条正文，超时后仍保持 AstrBot 原生行为。
 
 上下文按如下格式渲染，`（回复 …）` 标注来自 OneBot v11 的 `message_id` 反查：
 

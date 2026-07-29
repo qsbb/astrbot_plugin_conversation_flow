@@ -41,6 +41,8 @@ DEFAULTS: dict[str, Any] = {
     "group_context_enabled": True,
     "group_context_max_messages": 10,
     "group_context_only_when_woken": True,
+    "group_context_reverse_wake_enabled": True,
+    "group_context_reverse_wake_seconds": 15,
     "group_context_record_bot": True,
     "group_context_bot_label": "你",
     "group_air_guard_enabled": True,
@@ -298,6 +300,20 @@ def normalize_config(raw: dict[str, Any] | None) -> dict[str, Any]:
         raw.get("group_context_only_when_woken"),
         DEFAULTS["group_context_only_when_woken"],
     )
+    out["group_context_reverse_wake_enabled"] = _coerce_bool(
+        raw.get("group_context_reverse_wake_enabled"),
+        DEFAULTS["group_context_reverse_wake_enabled"],
+    )
+    out["group_context_reverse_wake_seconds"] = min(
+        120,
+        max(
+            1,
+            _coerce_int(
+                raw.get("group_context_reverse_wake_seconds"),
+                DEFAULTS["group_context_reverse_wake_seconds"],
+            ),
+        ),
+    )
     out["group_context_record_bot"] = _coerce_bool(
         raw.get("group_context_record_bot"),
         DEFAULTS["group_context_record_bot"],
@@ -509,6 +525,8 @@ class PluginConfig:
     group_context_enabled: bool = True
     group_context_max_messages: int = 10
     group_context_only_when_woken: bool = True
+    group_context_reverse_wake_enabled: bool = True
+    group_context_reverse_wake_seconds: int = 15
     group_context_record_bot: bool = True
     group_context_bot_label: str = "你"
     group_air_guard_enabled: bool = True

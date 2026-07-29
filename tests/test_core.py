@@ -34,8 +34,15 @@ class _MockPlain:
         self.text = text
 
 
+class At:
+    def __init__(self, qq="", name=""):
+        self.qq = qq
+        self.name = name
+
+
 astrbot_mc_module.Image = _MockImage
 astrbot_mc_module.Plain = _MockPlain
+astrbot_mc_module.At = At
 astrbot_api_module.message_components = astrbot_mc_module
 
 # mock astrbot.api.event（filter 装饰器记录 priority，供入口钩子测试使用）
@@ -74,7 +81,11 @@ class _MockFilter:
 
     @staticmethod
     def event_message_type(*args, **kwargs):
-        return _identity_decorator()
+        def deco(fn):
+            HOOK_PRIORITIES[fn.__name__] = kwargs.get("priority")
+            return fn
+
+        return deco
 
     @staticmethod
     def command_group(*_args, **_kwargs):
@@ -1163,6 +1174,192 @@ class GroupContextManagerTests(unittest.TestCase):
         self.assertEqual(mgr.get_recent_context("g"), "")
 
 
+    def test_find_recent_user_message_is_scoped_and_consumed_once(self) -> None:
+        mgr = GroupContextManager()
+        record = mgr.record("group1", "user1", "Alice", "what should I eat")
+        self.assertIsNotNone(record)
+
+        match = mgr.find_recent_user_message(
+            "group1", "user1", max_age_seconds=15, now=record.timestamp + 2
+        )
+        self.assertIs(match, record)
+        self.assertIsNone(
+            mgr.find_recent_user_message(
+                "group1", "user2", max_age_seconds=15, now=record.timestamp + 2
+            )
+        )
+        self.assertIsNone(
+            mgr.find_recent_user_message(
+                "group2", "user1", max_age_seconds=15, now=record.timestamp + 2
+            )
+        )
+        self.assertIsNone(
+            mgr.find_recent_user_message(
+                "group1", "user1", max_age_seconds=15, now=record.timestamp + 16
+            )
+        )
+
+        record.reverse_wake_consumed = True
+        self.assertIsNone(
+            mgr.find_recent_user_message(
+                "group1", "user1", max_age_seconds=15, now=record.timestamp + 2
+            )
+        )
+
+        mgr.record(
+            "group1",
+            "user1",
+            "Alice",
+            "already handled",
+            reverse_wake_eligible=False,
+        )
+        self.assertIsNone(
+            mgr.find_recent_user_message(
+                "group1", "user1", max_age_seconds=15, now=record.timestamp + 2
+            )
+        )
+
+
+class _ReverseWakeEvent:
+    def __init__(
+        self,
+        group_id: str = "group1",
+        sender_id: str = "user1",
+        self_id: str = "bot1",
+        target_id: str = "bot1",
+    ) -> None:
+        self.unified_msg_origin = f"aiocqhttp:GroupMessage:{group_id}"
+        self.message_str = ""
+        self._extra = {}
+        self.message_obj = types.SimpleNamespace(
+            message=[At(qq=target_id, name="bot")],
+            message_id="mention-message",
+            message_str="",
+            self_id=self_id,
+            group_id=group_id,
+            sender_id=sender_id,
+            sender=types.SimpleNamespace(nickname=sender_id, card=""),
+        )
+
+    def get_message_str(self) -> str:
+        return self.message_str
+
+    def get_messages(self):
+        return self.message_obj.message
+
+    def get_group_id(self) -> str:
+        return self.message_obj.group_id
+
+    def get_sender_id(self) -> str:
+        return self.message_obj.sender_id
+
+    def get_self_id(self) -> str:
+        return self.message_obj.self_id
+
+    def set_extra(self, key, value) -> None:
+        self._extra[key] = value
+
+    def get_extra(self, key):
+        return self._extra.get(key)
+
+
+class ReverseWakeTests(unittest.IsolatedAsyncioTestCase):
+    @staticmethod
+    def _plugin():
+        from astrbot_plugin_conversation_flow.main import ConversationalFlowPlugin
+
+        plugin = object.__new__(ConversationalFlowPlugin)
+        plugin.config = build_plugin_config({})
+        plugin.group_context = GroupContextManager()
+        plugin.tracker = ConversationTracker()
+        plugin.logger = _Logger()
+        plugin._self_id_cache = ""
+        return plugin
+
+    async def test_restores_preceding_text_before_empty_mention_handler(self) -> None:
+        plugin = self._plugin()
+        record = plugin.group_context.record(
+            "group1",
+            "user1",
+            "Alice",
+            "what should I eat",
+            message_id="source-message",
+        )
+        event = _ReverseWakeEvent()
+
+        await plugin.restore_preceding_message_for_empty_mention(event)
+
+        self.assertEqual(event.message_str, "what should I eat")
+        self.assertEqual(event.message_obj.message_str, "what should I eat")
+        self.assertEqual(len(event.message_obj.message), 2)
+        self.assertIsInstance(event.message_obj.message[-1], _MockPlain)
+        self.assertEqual(event.message_obj.message[-1].text, "what should I eat")
+        self.assertTrue(record.reverse_wake_consumed)
+        self.assertTrue(event.get_extra(plugin.REVERSE_WAKE_RESTORED_KEY))
+        self.assertEqual(
+            event.get_extra(plugin.REVERSE_WAKE_SOURCE_MESSAGE_ID_KEY),
+            "source-message",
+        )
+        self.assertEqual(
+            plugin._context_exclude_message_id(event), "source-message"
+        )
+        self.assertEqual(
+            HOOK_PRIORITIES["restore_preceding_message_for_empty_mention"],
+            sys.maxsize,
+        )
+
+    async def test_records_only_unhandled_plain_text_as_reverse_wake_source(self) -> None:
+        plugin = self._plugin()
+        source = _ReverseWakeEvent()
+        source.message_str = "what should I eat"
+        source.message_obj.message = [_MockPlain("what should I eat")]
+        source.message_obj.message_str = source.message_str
+        source.message_obj.message_id = "source-message"
+        source.is_at_or_wake_command = False
+
+        await plugin.on_group_message(source)
+        mention = _ReverseWakeEvent()
+        await plugin.restore_preceding_message_for_empty_mention(mention)
+
+        self.assertEqual(mention.message_str, "what should I eat")
+        self.assertEqual(
+            mention.get_extra(plugin.REVERSE_WAKE_SOURCE_MESSAGE_ID_KEY),
+            "source-message",
+        )
+
+        already_woken = _ReverseWakeEvent()
+        already_woken.message_str = "handled already"
+        already_woken.message_obj.message = [_MockPlain("handled already")]
+        already_woken.message_obj.message_str = already_woken.message_str
+        already_woken.message_obj.message_id = "handled-message"
+        already_woken.is_at_or_wake_command = True
+        await plugin.on_group_message(already_woken)
+
+        next_mention = _ReverseWakeEvent()
+        await plugin.restore_preceding_message_for_empty_mention(next_mention)
+        self.assertEqual(next_mention.message_str, "")
+
+    async def test_does_not_repeat_consumed_text_or_restore_other_target(self) -> None:
+        plugin = self._plugin()
+        plugin.group_context.record(
+            "group1", "user1", "Alice", "what should I eat"
+        )
+
+        first = _ReverseWakeEvent()
+        await plugin.restore_preceding_message_for_empty_mention(first)
+
+        repeated = _ReverseWakeEvent()
+        await plugin.restore_preceding_message_for_empty_mention(repeated)
+        self.assertEqual(repeated.message_str, "")
+        self.assertEqual(len(repeated.message_obj.message), 1)
+
+        plugin.group_context.record("group1", "user1", "Alice", "new question")
+        other_target = _ReverseWakeEvent(target_id="someone-else")
+        await plugin.restore_preceding_message_for_empty_mention(other_target)
+        self.assertEqual(other_target.message_str, "")
+        self.assertEqual(len(other_target.message_obj.message), 1)
+
+
 class InterruptWindowTests(unittest.TestCase):
     def test_expired_pending_not_interrupted(self) -> None:
         tracker = ConversationTracker()
@@ -1634,6 +1831,8 @@ class ReplyConfigTests(unittest.TestCase):
         for key in (
             "group_context_record_bot",
             "group_context_bot_label",
+            "group_context_reverse_wake_enabled",
+            "group_context_reverse_wake_seconds",
             "private_context_bridge_enabled",
             "private_context_bridge_max_turns",
             "private_context_bridge_short_max_chars",
@@ -1653,6 +1852,8 @@ class NewConfigTests(unittest.TestCase):
         self.assertTrue(cfg.group_context_enabled)
         self.assertEqual(cfg.group_context_max_messages, 10)
         self.assertTrue(cfg.group_context_only_when_woken)
+        self.assertTrue(cfg.group_context_reverse_wake_enabled)
+        self.assertEqual(cfg.group_context_reverse_wake_seconds, 15)
 
     def test_interrupt_scope_validates(self) -> None:
         cfg = build_plugin_config({"interrupt_scope": "invalid"})
@@ -1663,6 +1864,14 @@ class NewConfigTests(unittest.TestCase):
     def test_group_context_max_messages_clamped(self) -> None:
         cfg = build_plugin_config({"group_context_max_messages": 0})
         self.assertEqual(cfg.group_context_max_messages, 1)
+
+    def test_reverse_wake_window_clamped(self) -> None:
+        low = build_plugin_config({"group_context_reverse_wake_seconds": 0})
+        high = build_plugin_config({"group_context_reverse_wake_seconds": 999})
+        disabled = build_plugin_config({"group_context_reverse_wake_enabled": False})
+        self.assertEqual(low.group_context_reverse_wake_seconds, 1)
+        self.assertEqual(high.group_context_reverse_wake_seconds, 120)
+        self.assertFalse(disabled.group_context_reverse_wake_enabled)
 
 
 class AirGuardConfigTests(unittest.TestCase):

@@ -30,6 +30,8 @@ class GroupMessageRecord:
     reply_to_id: str = ""
     reply_to_name: str = ""
     reply_to_preview: str = ""
+    reverse_wake_eligible: bool = True
+    reverse_wake_consumed: bool = False
 
     def has_reply(self) -> bool:
         """只要有任一引用线索（id / 对象名 / 预览）就算带引用。"""
@@ -79,6 +81,7 @@ class GroupContextManager:
         reply_to_id: str = "",
         reply_to_name: str = "",
         reply_to_preview: str = "",
+        reverse_wake_eligible: bool = True,
     ) -> GroupMessageRecord | None:
         """记录一条群聊消息。空文本跳过，返回落库的记录。"""
         if not group_id or not text or not text.strip():
@@ -99,6 +102,7 @@ class GroupContextManager:
             reply_to_id=str(reply_to_id or ""),
             reply_to_name=(reply_to_name or "").strip(),
             reply_to_preview=(reply_to_preview or "").strip(),
+            reverse_wake_eligible=bool(reverse_wake_eligible),
         )
         queue.records.append(rec)
         # deque 满时最旧一条被挤出，同步清理索引
@@ -119,6 +123,37 @@ class GroupContextManager:
         if queue is None:
             return None
         return queue.index.get(str(message_id))
+
+    def find_recent_user_message(
+        self,
+        group_id: str,
+        sender_id: str,
+        max_age_seconds: float,
+        now: float | None = None,
+    ) -> GroupMessageRecord | None:
+        """查找可用于“先发正文、后单独 @”的最近同发送者消息。
+
+        已被反向唤醒消费的记录不会再次返回，避免连续空 @ 重复回答同一个问题。
+        """
+        if not group_id or not sender_id or max_age_seconds <= 0:
+            return None
+        queue = self._queues.get(group_id)
+        if queue is None or not queue.records:
+            return None
+        current = time.time() if now is None else float(now)
+        sender = str(sender_id)
+        for rec in reversed(queue.records):
+            if current - rec.timestamp > max_age_seconds:
+                break
+            if (
+                rec.is_bot
+                or not rec.reverse_wake_eligible
+                or rec.sender_id != sender
+                or rec.reverse_wake_consumed
+            ):
+                continue
+            return rec
+        return None
 
     def get_recent_speakers(
         self, group_id: str, n: int = 0, exclude_sender_id: str = ""

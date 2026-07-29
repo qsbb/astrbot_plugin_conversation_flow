@@ -202,6 +202,18 @@
     "hint": "开启后只在 bot 被@或被回复时才注入群聊上下文；关闭则每次群聊消息都注入（消耗更多 Token）。",
     "default": true
   },
+  "group_context_reverse_wake_enabled": {
+    "type": "bool",
+    "description": "[群聊上下文] 支持先发正文再单独 @Bot",
+    "hint": "开启后，同一用户在同一群里刚发完正文又单独 @Bot 时，会把前一条正文恢复为本轮问题，避免进入 AstrBot 的空 @ 等待流程。",
+    "default": true
+  },
+  "group_context_reverse_wake_seconds": {
+    "type": "int",
+    "description": "[群聊上下文] 反向唤醒时间窗（秒）",
+    "hint": "只会承接该秒数内同一用户尚未消费的最近正文。范围 1-120，默认 15；时间窗越大，误取旧话题的概率越高。",
+    "default": 15
+  },
   "group_context_record_bot": {
     "type": "bool",
     "description": "[群聊上下文] 把 bot 自己的发言记入上下文",

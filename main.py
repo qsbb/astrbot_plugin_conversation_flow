@@ -12,10 +12,12 @@ import asyncio
 import inspect
 import json
 import pathlib
+from sys import maxsize
 from typing import Any
 
 from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent, filter
+from astrbot.api.message_components import Plain
 from astrbot.api.star import Context, Star, StarTools, register
 
 from .core.air_guard import AirGuard
@@ -82,7 +84,7 @@ from .core.request_context import (
 )
 from .core.silence_judge import SilenceJudge
 
-__version__ = "0.7.0"
+__version__ = "0.7.1"
 RELATIONSHIP_PLUGIN_NAME = "astrbot_plugin_relationship"
 RELATIONSHIP_SNAPSHOT_CONTRACT_NAME = "relationship.snapshot"
 RELATIONSHIP_SNAPSHOT_CONTRACT_MAJOR = "1"
@@ -116,6 +118,9 @@ class ConversationalFlowPlugin(Star):
     INTERCEPTED_KEY = "conv_flow_intercepted"
     # event extra 上用于标记"群聊上下文本轮已注入"的 key
     GROUP_CONTEXT_INJECTED_KEY = "conv_flow_group_context_injected"
+    # event extra 上用于标记“先发正文、后单独 @”已恢复成本轮正文的 key
+    REVERSE_WAKE_RESTORED_KEY = "conv_flow_reverse_wake_restored"
+    REVERSE_WAKE_SOURCE_MESSAGE_ID_KEY = "conv_flow_reverse_wake_source_message_id"
     # event extra 上用于标记"私聊短消息承接上下文已注入"的 key
     PRIVATE_CONTEXT_INJECTED_KEY = "conv_flow_private_context_injected"
     # event extra 上用于标记"场景感知指令本轮已注入"的 key。
@@ -752,6 +757,69 @@ class ConversationalFlowPlugin(Star):
     # 群聊消息监听：缓存最近群聊消息供被唤醒时注入
     # ------------------------------------------------------------------
 
+    # 与 AstrBot 内置 session-control handler 使用相同的最高优先级，但内置
+    # handler 注册更早，会先接管已存在的 waiter。这里只处理尚未进入 waiter 的
+    # “先发正文、后单独 @bot”，并在内置 empty-mention handler 之前补回正文。
+    @filter.event_message_type(filter.EventMessageType.GROUP_MESSAGE, priority=maxsize)
+    async def restore_preceding_message_for_empty_mention(
+        self, event: AstrMessageEvent, *args: Any, **kwargs: Any
+    ) -> None:
+        """把同一用户刚发出的正文恢复为随后空 @ 的当前问题。"""
+        if (
+            not self.config.group_context_enabled
+            or not self.config.group_context_reverse_wake_enabled
+        ):
+            return
+        if (event.get_message_str() or "").strip():
+            return
+
+        message_obj = getattr(event, "message_obj", None)
+        chain = getattr(message_obj, "message", None)
+        if not isinstance(chain, list) or len(chain) != 1:
+            return
+
+        self_id = self._get_self_id(event)
+        targets = extract_at_targets(event)
+        if (
+            not self_id
+            or targets.at_all
+            or len(targets.ids) != 1
+            or targets.ids[0] != self_id
+        ):
+            return
+
+        group_id = self._get_group_id(event)
+        sender_id = self.tracker._get_sender_id(event)
+        record = self.group_context.find_recent_user_message(
+            group_id,
+            sender_id,
+            self.config.group_context_reverse_wake_seconds,
+        )
+        if record is None:
+            return
+
+        try:
+            chain.append(Plain(text=record.text))
+            event.message_str = record.text
+            if message_obj is not None:
+                message_obj.message_str = record.text
+        except Exception as exc:
+            self.logger.debug("[conv-flow] reverse wake restore failed: %s", exc)
+            return
+
+        record.reverse_wake_consumed = True
+        self._set_extra(event, self.REVERSE_WAKE_RESTORED_KEY, True)
+        self._set_extra(
+            event, self.REVERSE_WAKE_SOURCE_MESSAGE_ID_KEY, record.message_id
+        )
+        self.logger.info(
+            "[conv-flow] reverse wake restored preceding message "
+            "(group=%s, sender=%s, text=%r)",
+            group_id,
+            sender_id,
+            record.text[:80],
+        )
+
     @filter.event_message_type(filter.EventMessageType.GROUP_MESSAGE, priority=1000)
     async def on_group_message(
         self, event: AstrMessageEvent, *args: Any, **kwargs: Any
@@ -762,6 +830,8 @@ class ConversationalFlowPlugin(Star):
         "用户引用的是谁的哪句话"。
         """
         ensure_context(event, PHASE_MESSAGE)
+        if self._get_extra(event, self.REVERSE_WAKE_RESTORED_KEY) is True:
+            return
         if not self.config.group_context_enabled:
             return
         group_id = self._get_group_id(event)
@@ -775,6 +845,16 @@ class ConversationalFlowPlugin(Star):
         if not text or text.startswith("/"):
             return
         reply_ref = extract_reply_ref(event)
+        chain = getattr(getattr(event, "message_obj", None), "message", None)
+        plain_text_only = isinstance(chain, list) and bool(chain) and all(
+            isinstance(component, Plain) for component in chain
+        )
+        reverse_wake_eligible = (
+            plain_text_only
+            and not bool(getattr(event, "is_at_or_wake_command", False))
+            and extract_at_targets(event).is_empty()
+            and reply_ref.is_empty()
+        )
         self.group_context.record(
             group_id,
             sender_id,
@@ -785,6 +865,7 @@ class ConversationalFlowPlugin(Star):
             reply_to_id=reply_ref.message_id,
             reply_to_name=reply_ref.sender_name,
             reply_to_preview=reply_ref.preview,
+            reverse_wake_eligible=reverse_wake_eligible,
         )
 
     # ------------------------------------------------------------------
@@ -836,6 +917,8 @@ class ConversationalFlowPlugin(Star):
             f"- 群聊上下文: {'on' if self.config.group_context_enabled else 'off'} "
             f"(max={self.config.group_context_max_messages}, "
             f"woken_only={self.config.group_context_only_when_woken}, "
+            f"reverse_wake={self.config.group_context_reverse_wake_enabled}/"
+            f"{self.config.group_context_reverse_wake_seconds}s, "
             f"record_bot={self.config.group_context_record_bot})\n"
             f"- 私聊上下文承接: "
             f"{'on' if self.config.private_context_bridge_enabled else 'off'} "
@@ -1438,7 +1521,7 @@ class ConversationalFlowPlugin(Star):
             group_id,
             self.config.group_context_max_messages,
             bot_label=bot_label,
-            exclude_message_id=get_message_id(event),
+            exclude_message_id=self._context_exclude_message_id(event),
         )
         if not context:
             return
@@ -1500,7 +1583,7 @@ class ConversationalFlowPlugin(Star):
             group_id,
             self.config.topic_context_max_messages,
             bot_label=bot_label,
-            exclude_message_id=get_message_id(event),
+            exclude_message_id=self._context_exclude_message_id(event),
         )
         if not context:
             return
@@ -1514,6 +1597,16 @@ class ConversationalFlowPlugin(Star):
             group_id,
             self.config.topic_context_max_messages,
         )
+
+    def _context_exclude_message_id(self, event: AstrMessageEvent) -> str:
+        """返回上下文渲染时应排除的当前问题来源消息 ID。"""
+        if self._get_extra(event, self.REVERSE_WAKE_RESTORED_KEY) is True:
+            source_message_id = self._get_extra(
+                event, self.REVERSE_WAKE_SOURCE_MESSAGE_ID_KEY
+            )
+            if source_message_id:
+                return str(source_message_id)
+        return get_message_id(event)
 
     def _inject_private_context_bridge(
         self,
