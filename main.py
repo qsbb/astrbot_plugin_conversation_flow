@@ -20,6 +20,7 @@ from astrbot.api.star import Context, Star, StarTools, register
 
 from .core.air_guard import AirGuard
 from .core.chunker import Chunker
+from .core.component_delivery import build_component_delivery_plan
 from .core.config import PluginConfig, build_plugin_config, normalize_config
 from .core.delay import calculate_segment_delay_ms
 from .core.group_context import GroupContextManager
@@ -64,7 +65,9 @@ from .core.prompts import (
 )
 from .core.scene import SceneInput, detect_scene
 from .core.request_context import (
+    OWNER_ACTIVE_LEARNER,
     OWNER_CONVERSATION_FLOW,
+    OWNER_IDENTITY_GUARDIAN,
     OWNER_RELATIONSHIP,
     PHASE_DECORATING_RESULT,
     PHASE_LLM_REQUEST,
@@ -73,12 +76,13 @@ from .core.request_context import (
     add_reason,
     ensure_context,
     get_artifact,
+    render_prompt_fragments,
     set_artifact,
     set_flag,
 )
 from .core.silence_judge import SilenceJudge
 
-__version__ = "0.6.5"
+__version__ = "0.7.0"
 RELATIONSHIP_PLUGIN_NAME = "astrbot_plugin_relationship"
 RELATIONSHIP_SNAPSHOT_CONTRACT_NAME = "relationship.snapshot"
 RELATIONSHIP_SNAPSHOT_CONTRACT_MAJOR = "1"
@@ -87,6 +91,12 @@ VOICE_DELIVERY_CONTRACT_NAME = "voice.delivery"
 VOICE_DELIVERY_CONTRACT_MAJOR = "1"
 DELIVERY_PLAN_EXTRA_KEY = "conversation_flow.delivery_plan"
 DELIVERY_PLAN_VERSION = "1.0"
+SERIES_PROMPT_MARKER = "[凝心溯溪协同上下文]"
+SERIES_PROMPT_OWNERS = (
+    OWNER_IDENTITY_GUARDIAN,
+    OWNER_ACTIVE_LEARNER,
+    OWNER_RELATIONSHIP,
+)
 
 
 @register(
@@ -397,6 +407,10 @@ class ConversationalFlowPlugin(Star):
         if await self._apply_scene_awareness(event, req, seq, is_wake):
             return
 
+        # 序、知、情都保留独立注入作为缺少“言”时的降级路径。言在这里把已登记
+        # 片段事务性收敛为一次稳定注入，避免重复内容和插件加载顺序漂移。
+        self._compose_series_prompt_fragments(request_context, req)
+
         # 图片意图必须在空文本判断前执行，纯图片消息的 user_text 通常为空
         self._inject_image_intent_instruction(event, req, seq)
 
@@ -606,9 +620,21 @@ class ConversationalFlowPlugin(Star):
         #    链路已先加入音频组件，本插件不再分段、不清空结果、不 stop_event()。
         has_non_text = self._has_non_text_components(event)
 
-        # 6) 不分段或仅有非文本组件：in-place 修改结果，不抢占发送权
-        if not self.config.chunking_enabled or has_non_text:
-            if text_modified and not has_non_text:
+        # 6) 混合组件按链中位置分段，图片、音频和文件保持原对象与相对顺序。
+        if has_non_text:
+            await self._handle_component_chain(
+                event,
+                result,
+                text,
+                voice_requested,
+                seq,
+                request_context,
+            )
+            return
+
+        # 6.5) 纯文本且关闭分段：in-place 修改结果，不抢占发送权
+        if not self.config.chunking_enabled:
+            if text_modified:
                 self._update_result_plain_text(event, text)
             self._record_bot_message(event, text)
             self._record_air_reply(event, text)
@@ -1140,7 +1166,7 @@ class ConversationalFlowPlugin(Star):
             req, NATURAL_TOOL_CALL_INSTRUCTION, "natural tool call"
         )
 
-    def _inject_instruction(self, req: Any, instruction: str, label: str) -> None:
+    def _inject_instruction(self, req: Any, instruction: str, label: str) -> bool:
         """通用指令注入：优先 extra_user_content_parts，降级到 system_prompt。"""
         try:
             parts = getattr(req, "extra_user_content_parts", None)
@@ -1149,20 +1175,124 @@ class ConversationalFlowPlugin(Star):
                     from astrbot.core.agent.message import TextPart
 
                     parts.append(TextPart(text=instruction))
-                    return
+                    return True
                 except Exception:
                     parts.append({"type": "text", "text": instruction})
-                    return
+                    return True
         except Exception as exc:
             self.logger.debug("[conv-flow] %s inject via parts failed: %s", label, exc)
         # 降级到 system_prompt
         try:
             current = getattr(req, "system_prompt", None) or ""
             req.system_prompt = current + "\n\n" + instruction
+            return True
         except Exception as exc:
             self.logger.warning(
                 "[conv-flow] %s inject via system_prompt failed: %s", label, exc
             )
+            return False
+
+    def _compose_series_prompt_fragments(
+        self, request_context: dict[str, Any], req: Any
+    ) -> bool:
+        rendered = render_prompt_fragments(request_context, SERIES_PROMPT_OWNERS)
+        text = str(rendered.get("text") or "").strip()
+        fragments = rendered.get("fragments")
+        if not text or not isinstance(fragments, list):
+            return False
+
+        contents: set[str] = set()
+        artifacts = request_context.get("artifacts")
+        if isinstance(artifacts, dict):
+            for owner in SERIES_PROMPT_OWNERS:
+                owned = artifacts.get(owner)
+                if not isinstance(owned, dict):
+                    continue
+                items = owned.get("prompt_fragments")
+                if not isinstance(items, list):
+                    continue
+                contents.update(
+                    item["content"].strip()
+                    for item in items
+                    if isinstance(item, dict)
+                    and isinstance(item.get("content"), str)
+                )
+        contents.discard("")
+
+        try:
+            parts = getattr(req, "extra_user_content_parts", None)
+        except Exception:
+            parts = None
+        original_parts = list(parts) if isinstance(parts, list) else None
+        try:
+            original_system_prompt = getattr(req, "system_prompt", None)
+        except Exception:
+            original_system_prompt = None
+
+        removed = 0
+        if isinstance(parts, list) and contents:
+            kept = []
+            for part in parts:
+                part_text = getattr(part, "text", None)
+                if part_text is None and isinstance(part, dict):
+                    part_text = part.get("text")
+                if isinstance(part_text, str) and part_text.strip() in contents:
+                    removed += 1
+                    continue
+                kept.append(part)
+            parts[:] = kept
+
+        if isinstance(original_system_prompt, str) and contents:
+            updated = original_system_prompt
+            for content in sorted(contents, key=len, reverse=True):
+                if content in updated:
+                    updated = updated.replace(content, "", 1)
+                    removed += 1
+            if updated != original_system_prompt:
+                try:
+                    req.system_prompt = updated
+                except Exception:
+                    pass
+
+        composed_text = f"{SERIES_PROMPT_MARKER}\n{text}"
+        if not self._inject_instruction(req, composed_text, "series prompt composition"):
+            if original_parts is not None and isinstance(parts, list):
+                parts[:] = original_parts
+            if original_system_prompt is not None:
+                try:
+                    req.system_prompt = original_system_prompt
+                except Exception:
+                    pass
+            add_reason(
+                request_context,
+                OWNER_CONVERSATION_FLOW,
+                "PROMPT_COMPOSITION_FAILED",
+            )
+            return False
+
+        set_flag(
+            request_context,
+            OWNER_CONVERSATION_FLOW,
+            "prompt_composed",
+            True,
+        )
+        set_artifact(
+            request_context,
+            OWNER_CONVERSATION_FLOW,
+            "prompt_composition",
+            {
+                "fragment_count": len(fragments),
+                "chars": int(rendered.get("chars") or 0),
+                "removed_direct_injections": removed,
+                "fragments": fragments,
+            },
+        )
+        add_reason(
+            request_context,
+            OWNER_CONVERSATION_FLOW,
+            "PROMPT_FRAGMENTS_COMPOSED",
+        )
+        return True
 
     def _inject_image_intent_instruction(
         self, event: AstrMessageEvent, req: Any, seq: Any
@@ -2015,6 +2145,149 @@ class ConversationalFlowPlugin(Star):
         if value:
             self._self_id_cache = value
         return value
+
+    async def _handle_component_chain(
+        self,
+        event: AstrMessageEvent,
+        result: Any,
+        text: str,
+        voice_requested: bool,
+        seq: Any,
+        request_context: dict[str, Any],
+    ) -> None:
+        try:
+            from astrbot.api.message_components import Plain
+
+            original_chain = list(getattr(result, "chain", ()) or ())
+            plan = build_component_delivery_plan(
+                original_chain,
+                plain_type=Plain,
+                split_text=(
+                    self.chunker.split
+                    if self.config.chunking_enabled
+                    else lambda value: [value]
+                ),
+                transform_text=(
+                    strip_markdown_format if self.config.plain_text_mode else None
+                ),
+            )
+        except Exception as exc:
+            self.logger.debug("[conv-flow] component delivery planning failed: %s", exc)
+            self._record_bot_message(event, text)
+            self._record_air_reply(event, text)
+            self._record_followup_reply(event, text)
+            self._record_mood_reply(event)
+            self._publish_delivery_plan(event, [text], text, voice_requested)
+            if not voice_requested:
+                self.tracker.finish_response(event, bot_text=text)
+            return
+
+        text_segments = list(plan.text_segments) or [text]
+        self._publish_delivery_plan(event, text_segments, text, voice_requested)
+        set_artifact(
+            request_context,
+            OWNER_CONVERSATION_FLOW,
+            "component_delivery",
+            {
+                "unit_count": len(plan.units),
+                "text_segment_count": len(plan.text_segments),
+                "split_changed": plan.split_changed,
+                "voice_requested": voice_requested,
+            },
+        )
+
+        # 没有真正拆成多个文本气泡时只原地更新组件，保留 AstrBot 默认发送权。
+        if not plan.split_changed or voice_requested:
+            if plan.changed:
+                try:
+                    result.chain[:] = [
+                        component for unit in plan.units for component in unit
+                    ]
+                except Exception:
+                    pass
+            self._record_bot_message(event, text)
+            self._record_air_reply(event, text)
+            self._record_followup_reply(event, text)
+            self._record_mood_reply(event)
+            if not voice_requested:
+                self.tracker.finish_response(event, bot_text=text)
+            add_reason(
+                request_context,
+                OWNER_CONVERSATION_FLOW,
+                "COMPONENT_CHAIN_PRESERVED",
+            )
+            return
+
+        self._clear_result(event)
+        self._set_extra(event, self.SENT_CHUNKS_KEY, True)
+        try:
+            event.stop_event()
+        except Exception:
+            pass
+
+        sent_text: list[str] = []
+        sent_units = 0
+        interrupted = False
+        for index, unit in enumerate(plan.units):
+            if self.config.interrupt_enabled and self.tracker.is_discarded(event):
+                interrupted = True
+                self.logger.info(
+                    "[conv-flow] seq=%s component delivery stopped by interruption",
+                    seq,
+                )
+                break
+            unit_text = "".join(
+                str(getattr(component, "text", "") or "")
+                for component in unit
+                if isinstance(component, Plain)
+            ).strip()
+            if index > 0 and unit_text:
+                delay_ms = calculate_segment_delay_ms(unit_text, self.config)
+                if delay_ms > 0:
+                    try:
+                        await asyncio.sleep(delay_ms / 1000)
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception:
+                        pass
+                if self.config.interrupt_enabled and self.tracker.is_discarded(event):
+                    interrupted = True
+                    break
+            try:
+                await event.send(event.chain_result(list(unit)))
+                sent_units += 1
+                if unit_text:
+                    sent_text.append(unit_text)
+            except Exception as exc:
+                self.logger.warning(
+                    "[conv-flow] failed to send component unit %s: %s", index, exc
+                )
+
+        if not sent_units and not interrupted:
+            try:
+                await event.send(event.chain_result(original_chain))
+                sent_units = 1
+                sent_text = [text] if text.strip() else []
+            except Exception as exc:
+                self.logger.warning(
+                    "[conv-flow] seq=%s component fallback failed: %s", seq, exc
+                )
+
+        final_text = "\n".join(sent_text)
+        self._stats["chunked"] += 1
+        if sent_units:
+            self._record_bot_message(event, final_text)
+            self._record_air_reply(event, final_text)
+            self._record_followup_reply(event, final_text)
+            self._record_mood_reply(event)
+        self.tracker.finish_response(event, bot_text=final_text)
+        add_reason(
+            request_context,
+            OWNER_CONVERSATION_FLOW,
+            "COMPONENT_DELIVERY_CANCELLED"
+            if interrupted
+            else "COMPONENT_DELIVERY_COMPLETED",
+        )
 
     def _has_non_text_components(self, event: AstrMessageEvent) -> bool:
         """检查结果链中是否有非 Plain 文本组件（图片、音频等）。"""

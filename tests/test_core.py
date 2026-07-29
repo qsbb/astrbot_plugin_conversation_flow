@@ -128,6 +128,9 @@ from astrbot_plugin_conversation_flow.core.air_guard import (  # noqa: E402
     is_polite_closing,
 )
 from astrbot_plugin_conversation_flow.core.chunker import Chunker  # noqa: E402
+from astrbot_plugin_conversation_flow.core.component_delivery import (  # noqa: E402
+    build_component_delivery_plan,
+)
 from astrbot_plugin_conversation_flow.core.config import build_plugin_config  # noqa: E402
 from astrbot_plugin_conversation_flow.core.delay import (  # noqa: E402
     calculate_segment_delay_ms,
@@ -194,6 +197,7 @@ from astrbot_plugin_conversation_flow.core.image_intent import (  # noqa: E402
     is_image_visible_to_llm,
 )
 from astrbot_plugin_conversation_flow.core.intercept import InterceptJudge  # noqa: E402
+from astrbot_plugin_conversation_flow.core import request_context  # noqa: E402
 
 
 class _Event:
@@ -2261,6 +2265,73 @@ class DecoratingHookPriorityTests(unittest.TestCase):
         self.assertEqual(self.plugin_main.__version__, declared)
 
 
+class PromptCompositionTests(unittest.TestCase):
+    def test_composer_replaces_direct_fragments_with_one_ordered_part(self) -> None:
+        from astrbot_plugin_conversation_flow.main import ConversationalFlowPlugin
+
+        class Part:
+            def __init__(self, text):
+                self.text = text
+
+        req = types.SimpleNamespace(
+            extra_user_content_parts=[Part("relationship"), Part("identity")],
+            system_prompt="base",
+        )
+        context = request_context.new_context()
+        request_context.add_prompt_fragment(
+            context,
+            request_context.OWNER_RELATIONSHIP,
+            "relationship.expression",
+            "relationship",
+            priority=300,
+        )
+        request_context.add_prompt_fragment(
+            context,
+            request_context.OWNER_IDENTITY_GUARDIAN,
+            "identity.boundary",
+            "identity",
+            priority=100,
+        )
+        plugin = ConversationalFlowPlugin.__new__(ConversationalFlowPlugin)
+        plugin.logger = _Logger()
+
+        self.assertTrue(plugin._compose_series_prompt_fragments(context, req))
+
+        texts = [
+            part.get("text") if isinstance(part, dict) else part.text
+            for part in req.extra_user_content_parts
+        ]
+        self.assertEqual(len(texts), 1)
+        self.assertIn("[凝心溯溪协同上下文]", texts[0])
+        self.assertLess(texts[0].index("identity"), texts[0].index("relationship"))
+        artifact = request_context.get_artifact(
+            context,
+            request_context.OWNER_CONVERSATION_FLOW,
+            "prompt_composition",
+        )
+        self.assertEqual(artifact["fragment_count"], 2)
+        self.assertEqual(artifact["removed_direct_injections"], 2)
+
+    def test_composer_ignores_malformed_foreign_owner_section(self) -> None:
+        from astrbot_plugin_conversation_flow.main import ConversationalFlowPlugin
+
+        req = types.SimpleNamespace(extra_user_content_parts=[], system_prompt="base")
+        context = request_context.new_context()
+        request_context.add_prompt_fragment(
+            context,
+            request_context.OWNER_RELATIONSHIP,
+            "relationship.expression",
+            "relationship",
+            priority=300,
+        )
+        context["artifacts"][request_context.OWNER_IDENTITY_GUARDIAN] = "invalid"
+        plugin = ConversationalFlowPlugin.__new__(ConversationalFlowPlugin)
+        plugin.logger = _Logger()
+
+        self.assertTrue(plugin._compose_series_prompt_fragments(context, req))
+        self.assertEqual(len(req.extra_user_content_parts), 1)
+
+
 class _ChainResult:
     def __init__(self, chain) -> None:
         self.chain = chain
@@ -2274,8 +2345,8 @@ class _ChainEvent:
         return self._result
 
 
-class NonTextSkipTests(unittest.TestCase):
-    """结果链已有音频等非文本组件时（声先处理场景），言应跳过分段。"""
+class NonTextDetectionTests(unittest.TestCase):
+    """非文本组件识别为组件感知分段选择正确路径。"""
 
     @classmethod
     def setUpClass(cls) -> None:
@@ -2289,17 +2360,63 @@ class NonTextSkipTests(unittest.TestCase):
     def test_pure_text_chain_allows_chunking(self) -> None:
         self.assertFalse(self._has_non_text([_MockPlain("你好"), _MockPlain("再见")]))
 
-    def test_audio_component_triggers_skip(self) -> None:
+    def test_audio_component_selects_component_aware_path(self) -> None:
         class _Record:  # 模拟声插件加入的语音组件
             pass
 
         self.assertTrue(self._has_non_text([_MockPlain("你好"), _Record()]))
 
-    def test_image_component_triggers_skip(self) -> None:
+    def test_image_component_selects_component_aware_path(self) -> None:
         self.assertTrue(self._has_non_text([_MockImage(url="http://x/1.png")]))
 
     def test_empty_chain_allows_default_flow(self) -> None:
         self.assertFalse(self._has_non_text([]))
+
+
+class ComponentDeliveryPlanTests(unittest.TestCase):
+    def test_splits_adjacent_plain_buffer_and_keeps_media_order(self) -> None:
+        image = _MockImage(url="https://example.test/image.png")
+        plan = build_component_delivery_plan(
+            [_MockPlain("第一段|"), _MockPlain("第二段"), image, _MockPlain("结尾")],
+            plain_type=_MockPlain,
+            split_text=lambda value: value.split("|"),
+        )
+
+        self.assertTrue(plan.changed)
+        self.assertTrue(plan.split_changed)
+        self.assertEqual(plan.text_segments, ("第一段", "第二段", "结尾"))
+        self.assertIs(plan.units[2][0], image)
+        self.assertEqual(
+            [
+                unit[0].text
+                for unit in (plan.units[0], plan.units[1], plan.units[3])
+            ],
+            ["第一段", "第二段", "结尾"],
+        )
+
+    def test_unchanged_mixed_chain_keeps_default_delivery(self) -> None:
+        image = _MockImage(url="https://example.test/image.png")
+        plan = build_component_delivery_plan(
+            [_MockPlain("说明"), image],
+            plain_type=_MockPlain,
+            split_text=lambda value: [value],
+        )
+
+        self.assertFalse(plan.changed)
+        self.assertFalse(plan.split_changed)
+        self.assertIs(plan.units[1][0], image)
+
+    def test_text_transform_does_not_claim_multibubble_split(self) -> None:
+        plan = build_component_delivery_plan(
+            [_MockPlain("**说明**")],
+            plain_type=_MockPlain,
+            split_text=lambda value: [value],
+            transform_text=lambda value: value.replace("**", ""),
+        )
+
+        self.assertTrue(plan.changed)
+        self.assertFalse(plan.split_changed)
+        self.assertEqual(plan.units[0][0].text, "说明")
 
 
 if __name__ == "__main__":
