@@ -848,14 +848,78 @@ class _ProviderRequest:
         self.extra_user_content_parts = extra_user_content_parts or []
 
 
+class _TextPart:
+    def __init__(self, text=""):
+        self.text = text
+
+
+class _BrokenTextPart:
+    @property
+    def text(self):
+        raise RuntimeError("broken text part")
+
+
+class _CollectingLogger:
+    def __init__(self):
+        self.entries = []
+
+    def info(self, message, *args):
+        self.entries.append(message % args if args else message)
+
+    def __getattr__(self, name):
+        return lambda *args, **kwargs: None
+
+
 class ImageIntentTests(unittest.TestCase):
-    def test_prompt_treats_cute_memes_as_social_interaction(self) -> None:
-        self.assertIn("卖萌/撒娇/求关注/希望互动", IMAGE_INTENT_INSTRUCTION)
-        self.assertIn("绝不能判为话题收口型", IMAGE_INTENT_INSTRUCTION)
-        self.assertIn("回复最多保留 1～2 句", IMAGE_INTENT_INSTRUCTION)
+    def test_prompt_separates_media_form_from_conversation_role(self) -> None:
+        for label in (
+            "reaction_sticker",
+            "avatar_or_portrait",
+            "content_image",
+            "social_bid",
+            "stance_or_reaction",
+            "content_request",
+            "acknowledgement",
+            "closure",
+        ):
+            self.assertIn(label, IMAGE_INTENT_INSTRUCTION)
+
+    def test_prompt_does_not_treat_sticker_as_closure(self) -> None:
+        self.assertIn("表情包不等于结束话题", IMAGE_INTENT_INSTRUCTION)
         self.assertIn(
-            "不要提及“图片意图判断”、图片识别、视觉模型", IMAGE_INTENT_INSTRUCTION
+            "“是表情包”“只发了一张图”“表示收到”“点赞或点头”都不能单独证明",
+            IMAGE_INTENT_INSTRUCTION,
         )
+        self.assertIn("只有以下条件同时满足", IMAGE_INTENT_INSTRUCTION)
+        for condition in (
+            "当前问题或任务已经完成",
+            "没有尚未回答的问题、请求或需要承接的情绪",
+            "明确表达告别、停止交流或不再继续",
+            "不是卖萌、求关注、表达亲近或等待互动",
+        ):
+            self.assertIn(condition, IMAGE_INTENT_INSTRUCTION)
+
+    def test_prompt_does_not_infer_avatar_from_appearance(self) -> None:
+        self.assertIn(
+            "不得因为图片是方形、动漫人物特写或没有文字，就断言它是头像",
+            IMAGE_INTENT_INSTRUCTION,
+        )
+        self.assertIn("不要根据图片凭空推断", IMAGE_INTENT_INSTRUCTION)
+
+    def test_prompt_prefers_response_when_ambiguous(self) -> None:
+        self.assertIn(
+            "不确定时优先用一句自然口语回应，不要沉默",
+            IMAGE_INTENT_INSTRUCTION,
+        )
+        self.assertIn("social_bid 通常回复一句，最多两句", IMAGE_INTENT_INSTRUCTION)
+        self.assertIn(
+            "不要自行复制、推测或计算好感度或亲密关系",
+            IMAGE_INTENT_INSTRUCTION,
+        )
+
+    def test_prompt_treats_smug_character_image_as_reaction_not_avatar(self) -> None:
+        self.assertIn("这个表情也太得意了", IMAGE_INTENT_INSTRUCTION)
+        self.assertIn("不要问“这是你新换的头像吗”", IMAGE_INTENT_INSTRUCTION)
 
     def test_request_images_prefer_provider_field(self) -> None:
         event = _ImageEvent([_MockImage(url="event.png")])
@@ -941,6 +1005,134 @@ class ImageIntentTests(unittest.TestCase):
         visible, source = is_image_visible_to_llm(req, event)
         self.assertTrue(visible)
         self.assertTrue(source.startswith("visual_summary:"))
+
+    def test_visible_when_text_part_contains_image_caption(self) -> None:
+        event = _ImageEvent([_MockImage(url="event.png")])
+        req = _ProviderRequest(
+            extra_user_content_parts=[
+                _TextPart("<image_caption>角色叉腰露出得意的表情</image_caption>")
+            ]
+        )
+        visible, source = is_image_visible_to_llm(req, event)
+        self.assertTrue(visible)
+        self.assertEqual(source, "extra_user_content_parts:image_caption")
+        self.assertNotIn("得意", source)
+
+    def test_broken_text_part_is_ignored_safely(self) -> None:
+        event = _ImageEvent([_MockImage(url="event.png")])
+        req = _ProviderRequest(
+            extra_user_content_parts=[
+                _BrokenTextPart(),
+                _TextPart("<image_caption>角色正在挥手</image_caption>"),
+            ]
+        )
+        visible, source = is_image_visible_to_llm(req, event)
+        self.assertTrue(visible)
+        self.assertEqual(source, "extra_user_content_parts:image_caption")
+
+    def test_visible_when_dict_contains_image_caption(self) -> None:
+        event = _ImageEvent([_MockImage(url="event.png")])
+        req = _ProviderRequest(
+            extra_user_content_parts=[
+                {
+                    "type": "text",
+                    "text": "<image_caption>一张聊天记录截图</image_caption>",
+                }
+            ]
+        )
+        visible, source = is_image_visible_to_llm(req, event)
+        self.assertTrue(visible)
+        self.assertEqual(source, "extra_user_content_parts:image_caption")
+
+    def test_visible_when_extra_parts_contain_visual_summary_keyword(self) -> None:
+        event = _ImageEvent([_MockImage(url="event.png")])
+        req = _ProviderRequest(
+            extra_user_content_parts=[_TextPart("图片描述：角色正在点头")]
+        )
+        visible, source = is_image_visible_to_llm(req, event)
+        self.assertTrue(visible)
+        self.assertEqual(
+            source, "extra_user_content_parts:visual_summary:图片描述"
+        )
+
+    def test_captioning_failure_is_not_visible(self) -> None:
+        event = _ImageEvent([_MockImage(url="event.png")])
+        requests = (
+            _ProviderRequest(
+                extra_user_content_parts=[
+                    _TextPart(
+                        "<image_caption>[Image Captioning Failed]</image_caption>"
+                    )
+                ]
+            ),
+            _ProviderRequest(
+                extra_user_content_parts=[_TextPart("[Image Captioning Failed]")]
+            ),
+            _ProviderRequest(
+                extra_user_content_parts=[
+                    _TextPart("图片描述：[Image Captioning Failed]")
+                ]
+            ),
+        )
+        for req in requests:
+            with self.subTest(parts=req.extra_user_content_parts):
+                visible, source = is_image_visible_to_llm(req, event)
+                self.assertFalse(visible)
+                self.assertEqual(source, "image_in_chain_but_not_visible")
+
+    def test_attachment_path_is_not_visible(self) -> None:
+        event = _ImageEvent([_MockImage(url="event.png")])
+        requests = (
+            _ProviderRequest(
+                extra_user_content_parts=[
+                    _TextPart("[Image Attachment: path C:\\temp\\image.png]")
+                ]
+            ),
+            _ProviderRequest(
+                extra_user_content_parts=[
+                    _TextPart(
+                        "<image_caption>C:\\temp\\image.png</image_caption>"
+                    )
+                ]
+            ),
+            _ProviderRequest(
+                extra_user_content_parts=[
+                    _TextPart("图片描述：C:\\temp\\image.png")
+                ]
+            ),
+            _ProviderRequest(
+                extra_user_content_parts=[{"type": "text", "text": "[图片]"}]
+            ),
+        )
+        for req in requests:
+            with self.subTest(parts=req.extra_user_content_parts):
+                visible, source = is_image_visible_to_llm(req, event)
+                self.assertFalse(visible)
+                self.assertEqual(source, "image_in_chain_but_not_visible")
+
+    def test_image_intent_injects_from_caption_without_separate_judge(self) -> None:
+        from astrbot_plugin_conversation_flow.main import ConversationalFlowPlugin
+
+        plugin = object.__new__(ConversationalFlowPlugin)
+        plugin.config = build_plugin_config({})
+        plugin.logger = _CollectingLogger()
+        event = _ImageEvent([_MockImage(url="event.png")])
+        req = _ProviderRequest(
+            extra_user_content_parts=[
+                _TextPart("<image_caption>角色得意地叉腰</image_caption>")
+            ]
+        )
+
+        plugin._inject_image_intent_instruction(event, req, seq=1)
+
+        self.assertEqual(len(req.extra_user_content_parts), 2)
+        injected = req.extra_user_content_parts[-1]
+        text = injected.get("text", "") if isinstance(injected, dict) else injected.text
+        self.assertIn("第一维：媒体形态", text)
+        self.assertIn("第二维：对话作用", text)
+        logs = "\n".join(plugin.logger.entries)
+        self.assertIn("extra_user_content_parts:image_caption", logs)
+        self.assertNotIn("角色得意地叉腰", logs)
 
     def test_not_visible_when_image_in_chain_but_no_summary(self) -> None:
         event = _ImageEvent([_MockImage(url="http://example.com/a.png")])

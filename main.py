@@ -86,7 +86,7 @@ from .core.request_context import (
 )
 from .core.silence_judge import SilenceJudge
 
-__version__ = "0.7.2"
+__version__ = "0.7.3"
 RELATIONSHIP_PLUGIN_NAME = "astrbot_plugin_relationship"
 RELATIONSHIP_SNAPSHOT_CONTRACT_NAME = "relationship.snapshot"
 RELATIONSHIP_SNAPSHOT_CONTRACT_MAJOR = "1"
@@ -1689,8 +1689,9 @@ class ConversationalFlowPlugin(Star):
     ) -> None:
         """检测用户消息是否包含图片，包含则注入图片意图判断指令。
 
-        只有 LLM 实际能看到图片（req.image_urls 非空或视觉摘要已注入）
-        时才注入意图指令，避免 LLM 看不到图片却收到图片意图指令而回复"图片没加载出来"。
+        只有 LLM 实际能看到图片（req.image_urls 非空，或 prompt、contexts、
+        extra_user_content_parts 中已有有效视觉摘要）时才注入意图指令，避免
+        LLM 看不到图片却收到图片意图指令而回复"图片没加载出来"。
         """
         try:
             from .core.image_intent import is_image_visible_to_llm
@@ -1704,7 +1705,8 @@ class ConversationalFlowPlugin(Star):
             if source == "image_in_chain_but_not_visible":
                 self.logger.warning(
                     "[conv-flow] seq=%s image in message chain but not visible to LLM "
-                    "(image_urls empty and no visual summary), skip intent injection",
+                    "(image_urls empty and no usable visual content), "
+                    "skip intent injection",
                     seq,
                 )
             return
