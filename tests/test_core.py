@@ -151,6 +151,9 @@ from astrbot_plugin_conversation_flow.core.delay import (  # noqa: E402
 from astrbot_plugin_conversation_flow.core.interrupt_tracker import (  # noqa: E402
     ConversationTracker,
 )
+from astrbot_plugin_conversation_flow.core.recent_activity import (  # noqa: E402
+    RecentActivityStore,
+)
 from astrbot_plugin_conversation_flow.core.group_context import (  # noqa: E402
     GroupContextManager,
 )
@@ -1407,6 +1410,304 @@ class ConversationTrackerTests(unittest.TestCase):
         tracker.finish_response(first, bot_text="只属于会话一的回复")
 
         self.assertEqual(tracker.get_recent_turns(second), [])
+
+
+class _RecentContextEvent(_Event):
+    def __init__(
+        self,
+        umo: str,
+        text: str,
+        *,
+        group_id: str | None = None,
+        message_id: str = "message-1",
+    ) -> None:
+        super().__init__(umo, text)
+        self._group_id = group_id
+        self._message_id = message_id
+        self.message_obj = types.SimpleNamespace(
+            message=[_MockPlain(text)],
+            message_id=message_id,
+            group_id=group_id,
+        )
+
+    def get_group_id(self):
+        return self._group_id
+
+    def get_message_id(self):
+        return self._message_id
+
+
+class RecentActivityIntegrationTests(unittest.IsolatedAsyncioTestCase):
+    @staticmethod
+    def _plugin():
+        from astrbot_plugin_conversation_flow.main import ConversationalFlowPlugin
+
+        class RelationshipProvider:
+            @staticmethod
+            def continuity_identity_contract():
+                return {
+                    "name": "relationship.continuity_identity",
+                    "version": "1.0",
+                }
+
+            @staticmethod
+            async def resolve_continuity_identity(event, req=None):
+                del event, req
+                return {
+                    "version": "1.0",
+                    "verified": True,
+                    "continuity_key": "relci1_" + "a" * 64,
+                    "grants_permission": False,
+                }
+
+        class IdentityProvider:
+            @staticmethod
+            def context_bridge_authorization_contract():
+                return {
+                    "name": "identity.context_bridge_authorization",
+                    "version": "1.0",
+                }
+
+            @staticmethod
+            def authorize_context_bridge(event, source_scope, target_scope):
+                mode = "none"
+                authorized = False
+                explicit = False
+                max_chars = 0
+                reason = "denied"
+                if source_scope == "private" and target_scope == "private":
+                    authorized = True
+                    mode = "private_read_only"
+                    max_chars = 1200
+                    reason = "private_to_private_read_only"
+                elif source_scope == "group" and target_scope == "private":
+                    authorized = True
+                    mode = "group_self_read_only"
+                    max_chars = 600
+                    reason = "group_to_private_self_only"
+                elif source_scope == "private" and target_scope == "group":
+                    text = event.get_message_str()
+                    if "具体内容" in text:
+                        authorized = True
+                        explicit = True
+                        mode = "details"
+                        max_chars = 600
+                        reason = "explicit_private_details_consent"
+                    elif "私聊的话题" in text:
+                        authorized = True
+                        explicit = True
+                        mode = "topic_only"
+                        reason = "explicit_private_topic_consent"
+                return {
+                    "version": "1.0",
+                    "authorized": authorized,
+                    "reason": reason,
+                    "mode": mode,
+                    "explicit": explicit,
+                    "max_chars": max_chars,
+                }
+
+        providers = {
+            "astrbot_plugin_relationship": RelationshipProvider(),
+            "astrbot_plugin_identity_guardian": IdentityProvider(),
+        }
+
+        class Context:
+            @staticmethod
+            def get_star_instance(name):
+                return providers.get(name)
+
+        plugin = object.__new__(ConversationalFlowPlugin)
+        plugin.config = build_plugin_config(
+            {
+                "recent_activity_context_enabled": True,
+                "recent_activity_retention_minutes": 120,
+            }
+        )
+        plugin.context = Context()
+        plugin.logger = _Logger()
+        plugin._contract_warnings = set()
+        plugin.tracker = ConversationTracker(max_history_turns=3)
+        plugin.recent_activity = RecentActivityStore(retention_seconds=7200)
+        plugin._recent_activity_source_secret = b"s" * 32
+        plugin._stats = {
+            "recent_activity_recorded": 0,
+            "recent_activity_selected": 0,
+        }
+        return plugin
+
+    async def test_private_sessions_bridge_and_publish_dedup_flag(self) -> None:
+        plugin = self._plugin()
+        first = _RecentContextEvent(
+            "qq:FriendMessage:user", "杭州展览周末怎么走", message_id="m1"
+        )
+        first_req = _ProviderRequest(extra_user_content_parts=[])
+        await plugin._inject_recent_activity_context(
+            first, first_req, seq=1, user_text=first.get_message_str()
+        )
+        plugin._record_recent_activity_bot(first, "先坐地铁，再步行过去。")
+
+        second = _RecentContextEvent(
+            "telegram:FriendMessage:user", "杭州展览路线接着说", message_id="m2"
+        )
+        second_req = _ProviderRequest(extra_user_content_parts=[])
+        await plugin._inject_recent_activity_context(
+            second, second_req, seq=2, user_text=second.get_message_str()
+        )
+
+        self.assertEqual(len(second_req.extra_user_content_parts), 1)
+        injected = second_req.extra_user_content_parts[0]
+        text = getattr(injected, "text", None) or injected["text"]
+        self.assertIn("杭州展览", text)
+        context = request_context.ensure_context(second)
+        self.assertTrue(
+            context["flags"]["conversation_flow"]["recent_context_selected"]
+        )
+        artifact = context["artifacts"]["conversation_flow"][
+            "recent_activity_context"
+        ]
+        self.assertEqual(artifact["source_scopes"], ["private"])
+        self.assertNotIn("continuity_key", artifact)
+        self.assertEqual(plugin._stats["recent_activity_selected"], 1)
+
+    async def test_failed_injection_does_not_publish_dedup_flag(self) -> None:
+        plugin = self._plugin()
+        first = _RecentContextEvent(
+            "qq:FriendMessage:user", "杭州展览周末怎么走", message_id="m1"
+        )
+        await plugin._inject_recent_activity_context(
+            first,
+            _ProviderRequest(extra_user_content_parts=[]),
+            seq=1,
+            user_text=first.get_message_str(),
+        )
+        plugin._record_recent_activity_bot(first, "先坐地铁，再步行过去。")
+
+        plugin._inject_instruction = lambda *args, **kwargs: False
+        second = _RecentContextEvent(
+            "telegram:FriendMessage:user", "杭州展览路线接着说", message_id="m2"
+        )
+        await plugin._inject_recent_activity_context(
+            second,
+            _ProviderRequest(extra_user_content_parts=[]),
+            seq=2,
+            user_text=second.get_message_str(),
+        )
+
+        context = request_context.ensure_context(second)
+        self.assertFalse(
+            context.get("flags", {})
+            .get("conversation_flow", {})
+            .get("recent_context_selected", False)
+        )
+        self.assertNotIn(
+            "recent_activity_context",
+            context.get("artifacts", {}).get("conversation_flow", {}),
+        )
+        self.assertIn(
+            "RECENT_ACTIVITY_INJECTION_FAILED",
+            request_context.get_reasons(context, "conversation_flow"),
+        )
+        self.assertEqual(plugin._stats["recent_activity_selected"], 0)
+
+    async def test_private_context_never_enters_group_without_current_consent(self) -> None:
+        plugin = self._plugin()
+        private = _RecentContextEvent(
+            "qq:FriendMessage:user",
+            "杭州展览，内部代号月桂，token: abcdefghijklmnop",
+            message_id="p1",
+        )
+        await plugin._inject_recent_activity_context(
+            private,
+            _ProviderRequest(extra_user_content_parts=[]),
+            seq=1,
+            user_text=private.get_message_str(),
+        )
+
+        group = _RecentContextEvent(
+            "qq:GroupMessage:group",
+            "杭州展览怎么走",
+            group_id="group",
+            message_id="g1",
+        )
+        denied_req = _ProviderRequest(extra_user_content_parts=[])
+        await plugin._inject_recent_activity_context(
+            group, denied_req, seq=2, user_text=group.get_message_str()
+        )
+        self.assertEqual(denied_req.extra_user_content_parts, [])
+
+        topic = _RecentContextEvent(
+            "qq:GroupMessage:group",
+            "可以在群里接着聊之前私聊的话题，杭州展览",
+            group_id="group",
+            message_id="g2",
+        )
+        topic_req = _ProviderRequest(extra_user_content_parts=[])
+        await plugin._inject_recent_activity_context(
+            topic, topic_req, seq=3, user_text=topic.get_message_str()
+        )
+        topic_part = topic_req.extra_user_content_parts[0]
+        topic_text = getattr(topic_part, "text", None) or topic_part["text"]
+        self.assertIn("不提供私聊原文", topic_text)
+        self.assertNotIn("月桂", topic_text)
+        self.assertNotIn("abcdefghijklmnop", topic_text)
+
+        details = _RecentContextEvent(
+            "qq:GroupMessage:group",
+            "我明确同意你把刚才私聊具体内容发到这个群里，杭州展览",
+            group_id="group",
+            message_id="g3",
+        )
+        details_req = _ProviderRequest(extra_user_content_parts=[])
+        await plugin._inject_recent_activity_context(
+            details, details_req, seq=4, user_text=details.get_message_str()
+        )
+        details_part = details_req.extra_user_content_parts[0]
+        details_text = getattr(details_part, "text", None) or details_part["text"]
+        self.assertIn("内部代号月桂", details_text)
+        self.assertIn("[已隐藏]", details_text)
+        self.assertNotIn("abcdefghijklmnop", details_text)
+
+    async def test_own_group_activity_can_return_to_private(self) -> None:
+        plugin = self._plugin()
+        group = _RecentContextEvent(
+            "qq:GroupMessage:group",
+            "我刚才在群里说通勤路线要换乘",
+            group_id="group",
+            message_id="g1",
+        )
+        await plugin._record_recent_activity_user(group, group.get_message_str())
+        plugin._record_recent_activity_bot(group, "可以在中间站少走一点。")
+
+        private = _RecentContextEvent(
+            "qq:FriendMessage:user",
+            "接着刚才群里的通勤路线说",
+            message_id="p1",
+        )
+        req = _ProviderRequest(extra_user_content_parts=[])
+        await plugin._inject_recent_activity_context(
+            private, req, seq=2, user_text=private.get_message_str()
+        )
+
+        part = req.extra_user_content_parts[0]
+        text = getattr(part, "text", None) or part["text"]
+        self.assertIn("通勤路线", text)
+        self.assertIn("此前群聊", text)
+
+
+class RecentActivityConfigTests(unittest.TestCase):
+    def test_feature_is_opt_in_and_retention_is_clamped(self) -> None:
+        self.assertFalse(build_plugin_config({}).recent_activity_context_enabled)
+        self.assertEqual(
+            build_plugin_config({"recent_activity_retention_minutes": 1})
+            .recent_activity_retention_minutes,
+            30,
+        )
+        self.assertEqual(
+            build_plugin_config({"recent_activity_retention_minutes": 999})
+            .recent_activity_retention_minutes,
+            360,
+        )
 
 
 class PrivateContextBridgeTests(unittest.TestCase):

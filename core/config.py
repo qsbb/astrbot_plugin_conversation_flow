@@ -38,6 +38,11 @@ DEFAULTS: dict[str, Any] = {
     "private_context_bridge_enabled": True,
     "private_context_bridge_max_turns": 3,
     "private_context_bridge_short_max_chars": 40,
+    "recent_activity_context_enabled": False,
+    "recent_activity_retention_minutes": 120,
+    "recent_activity_private_to_private_enabled": True,
+    "recent_activity_group_to_private_enabled": True,
+    "recent_activity_private_to_group_enabled": True,
     "group_context_enabled": True,
     "group_context_max_messages": 10,
     "group_context_only_when_woken": True,
@@ -286,6 +291,33 @@ def normalize_config(raw: dict[str, Any] | None) -> dict[str, Any]:
         ),
     )
 
+    out["recent_activity_context_enabled"] = _coerce_bool(
+        raw.get("recent_activity_context_enabled"),
+        DEFAULTS["recent_activity_context_enabled"],
+    )
+    out["recent_activity_retention_minutes"] = min(
+        360,
+        max(
+            30,
+            _coerce_int(
+                raw.get("recent_activity_retention_minutes"),
+                DEFAULTS["recent_activity_retention_minutes"],
+            ),
+        ),
+    )
+    out["recent_activity_private_to_private_enabled"] = _coerce_bool(
+        raw.get("recent_activity_private_to_private_enabled"),
+        DEFAULTS["recent_activity_private_to_private_enabled"],
+    )
+    out["recent_activity_group_to_private_enabled"] = _coerce_bool(
+        raw.get("recent_activity_group_to_private_enabled"),
+        DEFAULTS["recent_activity_group_to_private_enabled"],
+    )
+    out["recent_activity_private_to_group_enabled"] = _coerce_bool(
+        raw.get("recent_activity_private_to_group_enabled"),
+        DEFAULTS["recent_activity_private_to_group_enabled"],
+    )
+
     out["group_context_enabled"] = _coerce_bool(
         raw.get("group_context_enabled"), DEFAULTS["group_context_enabled"]
     )
@@ -522,6 +554,11 @@ class PluginConfig:
     private_context_bridge_enabled: bool = True
     private_context_bridge_max_turns: int = 3
     private_context_bridge_short_max_chars: int = 40
+    recent_activity_context_enabled: bool = False
+    recent_activity_retention_minutes: int = 120
+    recent_activity_private_to_private_enabled: bool = True
+    recent_activity_group_to_private_enabled: bool = True
+    recent_activity_private_to_group_enabled: bool = True
     group_context_enabled: bool = True
     group_context_max_messages: int = 10
     group_context_only_when_woken: bool = True

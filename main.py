@@ -9,10 +9,13 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import hmac
 import inspect
 import json
 import math
 import pathlib
+import secrets
 from sys import maxsize
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -43,6 +46,17 @@ from .core.message_meta import (
     truncate_preview,
 )
 from .core.plain_text import strip_markdown_format
+from .core.recent_activity import (
+    ACTOR_BOT,
+    ACTOR_USER,
+    PRIVATE_TO_GROUP_DENY,
+    RecentActivityQuery,
+    RecentActivityStore,
+    SCOPE_GROUP,
+    SCOPE_PRIVATE,
+    is_low_information,
+    texts_are_related,
+)
 from .core.prompts import (
     GROUP_CONTEXT_INSTRUCTION_TEMPLATE,
     REPLY_SPEAKER_SELF,
@@ -86,15 +100,19 @@ from .core.request_context import (
 )
 from .core.silence_judge import SilenceJudge
 
-__version__ = "0.7.3"
+__version__ = "0.7.4"
 RELATIONSHIP_PLUGIN_NAME = "astrbot_plugin_relationship"
 RELATIONSHIP_SNAPSHOT_CONTRACT_NAME = "relationship.snapshot"
 RELATIONSHIP_SNAPSHOT_CONTRACT_MAJOR = "1"
 RELATIONSHIP_DELIVERY_IDENTITY_CONTRACT_NAME = "relationship.delivery_identity"
 RELATIONSHIP_DELIVERY_IDENTITY_CONTRACT_MAJOR = "1"
+RELATIONSHIP_CONTINUITY_IDENTITY_CONTRACT_NAME = "relationship.continuity_identity"
+RELATIONSHIP_CONTINUITY_IDENTITY_CONTRACT_MAJOR = "1"
 IDENTITY_PLUGIN_NAME = "astrbot_plugin_identity_guardian"
 IDENTITY_PROACTIVE_AUTH_CONTRACT_NAME = "identity.proactive_authorization"
 IDENTITY_PROACTIVE_AUTH_CONTRACT_MAJOR = "1"
+IDENTITY_CONTEXT_BRIDGE_AUTH_CONTRACT_NAME = "identity.context_bridge_authorization"
+IDENTITY_CONTEXT_BRIDGE_AUTH_CONTRACT_MAJOR = "1"
 PROACTIVE_DELIVERY_CONTRACT_NAME = "conversation.proactive_delivery"
 PROACTIVE_DELIVERY_CONTRACT_VERSION = "1.0"
 _ENVIRONMENT_FACT_FIELDS = {
@@ -165,6 +183,10 @@ class ConversationalFlowPlugin(Star):
     REVERSE_WAKE_SOURCE_MESSAGE_ID_KEY = "conv_flow_reverse_wake_source_message_id"
     # event extra 上用于标记"私聊短消息承接上下文已注入"的 key
     PRIVATE_CONTEXT_INJECTED_KEY = "conv_flow_private_context_injected"
+    RECENT_ACTIVITY_IDENTITY_KEY = "conv_flow_recent_activity_identity"
+    RECENT_ACTIVITY_SOURCE_KEY = "conv_flow_recent_activity_source"
+    RECENT_ACTIVITY_SCOPE_KEY = "conv_flow_recent_activity_scope"
+    RECENT_ACTIVITY_PROOF_KEY = "conv_flow_recent_activity_proof"
     # event extra 上用于标记"场景感知指令本轮已注入"的 key。
     # 场景/情绪指令允许模型输出 silence_marker，响应阶段需据此检测 marker。
     SCENE_INJECTED_KEY = "conv_flow_scene_injected"
@@ -207,6 +229,10 @@ class ConversationalFlowPlugin(Star):
         self.tracker.update_interrupt_config(
             self.config.interrupt_window_ms, self.config.interrupt_scope
         )
+        self.recent_activity = RecentActivityStore(
+            retention_seconds=self.config.recent_activity_retention_minutes * 60
+        )
+        self._recent_activity_source_secret = secrets.token_bytes(32)
         self.intercept_judge = InterceptJudge(cfg=self.config, llm=self.llm)
         self.group_context = GroupContextManager(
             max_messages=self.config.group_context_max_messages
@@ -250,6 +276,8 @@ class ConversationalFlowPlugin(Star):
             "mood_silenced": 0,
             "mood_hinted": 0,
             "private_context_bridged": 0,
+            "recent_activity_recorded": 0,
+            "recent_activity_selected": 0,
             "total_requests": 0,
         }
 
@@ -275,6 +303,7 @@ class ConversationalFlowPlugin(Star):
             "config_ready": getattr(self, "config", None) is not None,
             "tracker_ready": getattr(self, "tracker", None) is not None,
             "chunker_ready": getattr(self, "chunker", None) is not None,
+            "recent_activity_ready": getattr(self, "recent_activity", None) is not None,
         }
         reasons = [name.upper() for name, passed in checks.items() if not passed]
         return {
@@ -606,6 +635,9 @@ class ConversationalFlowPlugin(Star):
             self.config.interrupt_window_ms, self.config.interrupt_scope
         )
         self.tracker.update_history_limit(self.config.private_context_bridge_max_turns)
+        self.recent_activity.update_limits(
+            retention_seconds=self.config.recent_activity_retention_minutes * 60
+        )
         self.group_context.update_max(self.config.group_context_max_messages)
         self.air_guard.update_config(
             self.config.group_air_guard_window_seconds,
@@ -727,6 +759,17 @@ class ConversationalFlowPlugin(Star):
         self._inject_group_context(event, req, seq, is_wake)
         # 话题上下文注入：帮助 LLM 理解当前话题（群聊上下文已注入时自动跳过）
         self._inject_topic_context(event, req, seq)
+        # 同一自然人的近期跨会话弱背景：本地选择，不联网、不额外调用模型。
+        # 当前会话优先；私聊进入群聊还必须通过序对当前消息的逐轮授权。
+        try:
+            await self._inject_recent_activity_context(
+                event, req, seq, extract_plain_text(event) or user_text
+            )
+        except Exception as exc:
+            self.logger.debug(
+                "[conv-flow] recent activity context failed: %s",
+                type(exc).__name__,
+            )
         # 私聊短消息承接：补回分段/主动发送后可能未进入框架历史的最近轮次
         self._inject_private_context_bridge(event, req, seq, user_text)
         # 引用消息指向说明：消除"被引用内容是谁说的"歧义
@@ -1136,18 +1179,19 @@ class ConversationalFlowPlugin(Star):
         ensure_context(event, PHASE_MESSAGE)
         if self._get_extra(event, self.REVERSE_WAKE_RESTORED_KEY) is True:
             return
-        if not self.config.group_context_enabled:
-            return
         group_id = self._get_group_id(event)
         if not group_id:
             return
-        sender_id = self.tracker._get_sender_id(event)
-        sender_name = self._get_sender_name(event)
         # 只取 Plain 段，避免把被引用消息的内容当成用户本人说的话
         text = extract_plain_text(event)
         # 过滤命令消息，避免污染群聊上下文
         if not text or text.startswith("/"):
             return
+        await self._record_recent_activity_user(event, text)
+        if not self.config.group_context_enabled:
+            return
+        sender_id = self.tracker._get_sender_id(event)
+        sender_name = self._get_sender_name(event)
         reply_ref = extract_reply_ref(event)
         chain = getattr(getattr(event, "message_obj", None), "message", None)
         plain_text_only = (
@@ -1230,6 +1274,14 @@ class ConversationalFlowPlugin(Star):
             f"{'on' if self.config.private_context_bridge_enabled else 'off'} "
             f"(turns={self.config.private_context_bridge_max_turns}, "
             f"short<={self.config.private_context_bridge_short_max_chars})\n"
+            f"- 跨会话近期感知: "
+            f"{'on' if self.config.recent_activity_context_enabled else 'off'} "
+            f"(retention={self.config.recent_activity_retention_minutes}m, "
+            f"private={self.config.recent_activity_private_to_private_enabled}, "
+            f"group_to_private={self.config.recent_activity_group_to_private_enabled}, "
+            f"private_to_group={self.config.recent_activity_private_to_group_enabled}, "
+            f"subjects={self.recent_activity.subject_count}, "
+            f"events={self.recent_activity.event_count})\n"
             f"- 引用消息: {'on' if self.config.reply_context_enabled else 'off'} "
             f"(api_fallback={self.config.reply_context_api_fallback})\n"
             f"- 话题上下文: {'on' if self.config.topic_context_enabled else 'off'} "
@@ -1263,6 +1315,8 @@ class ConversationalFlowPlugin(Star):
             f"- 分段次数: {self._stats['chunked']}\n"
             f"- 插话合并: {self._stats['interrupted']}\n"
             f"- 私聊上下文承接: {self._stats['private_context_bridged']}\n"
+            f"- 跨会话片段: 选中 {self._stats['recent_activity_selected']} 次, "
+            f"记录 {self._stats['recent_activity_recorded']} 条\n"
             f"- 拦截命中: {self._stats['intercepted']}\n"
             f"- 读空气拦截: {self._stats['air_guarded']}\n"
             f"- 场景拦截: {self._stats['scene_guarded']} "
@@ -1348,6 +1402,9 @@ class ConversationalFlowPlugin(Star):
             "scene_hinted": 0,
             "mood_silenced": 0,
             "mood_hinted": 0,
+            "private_context_bridged": 0,
+            "recent_activity_recorded": 0,
+            "recent_activity_selected": 0,
             "total_requests": 0,
         }
         yield event.plain_result("统计已重置。")
@@ -1409,6 +1466,8 @@ class ConversationalFlowPlugin(Star):
         try:
             # 释放所有 pending 状态
             self.tracker.clear()
+            self.recent_activity.clear()
+            self._recent_activity_source_secret = secrets.token_bytes(32)
         except Exception:
             pass
         self.logger.info("[conv-flow] plugin terminated")
@@ -1916,6 +1975,406 @@ class ConversationalFlowPlugin(Star):
             if source_message_id:
                 return str(source_message_id)
         return get_message_id(event)
+
+    async def _inject_recent_activity_context(
+        self,
+        event: AstrMessageEvent,
+        req: Any,
+        seq: Any,
+        user_text: str,
+    ) -> None:
+        """选择同一自然人的近期弱背景，并在选择后记录当前用户消息。"""
+        if not self.config.recent_activity_context_enabled:
+            return
+        current = str(user_text or "").strip()
+        if not current or current.startswith("/"):
+            return
+
+        identity = await self._ensure_recent_activity_identity(event, req)
+        if identity is None:
+            return
+        continuity_key, source_key, current_scope = identity
+
+        private_to_private = False
+        group_to_private = False
+        private_to_group_mode = PRIVATE_TO_GROUP_DENY
+        explicit_bridge = False
+        authorization_limits: list[int] = []
+
+        if current_scope == SCOPE_PRIVATE:
+            if self.config.recent_activity_private_to_private_enabled:
+                authorization = await self._authorize_recent_context(
+                    event, SCOPE_PRIVATE, SCOPE_PRIVATE
+                )
+                private_to_private = bool(
+                    authorization
+                    and authorization.get("authorized") is True
+                    and authorization.get("mode") == "private_read_only"
+                )
+                self._append_authorization_limit(authorization_limits, authorization)
+            if self.config.recent_activity_group_to_private_enabled:
+                authorization = await self._authorize_recent_context(
+                    event, SCOPE_GROUP, SCOPE_PRIVATE
+                )
+                group_to_private = bool(
+                    authorization
+                    and authorization.get("authorized") is True
+                    and authorization.get("mode") == "group_self_read_only"
+                )
+                self._append_authorization_limit(authorization_limits, authorization)
+        elif self.config.recent_activity_private_to_group_enabled:
+            authorization = await self._authorize_recent_context(
+                event, SCOPE_PRIVATE, SCOPE_GROUP
+            )
+            if authorization and authorization.get("authorized") is True:
+                mode = str(authorization.get("mode") or "")
+                if mode in {"topic_only", "details"}:
+                    private_to_group_mode = mode
+                    explicit_bridge = authorization.get("explicit") is True
+                    self._append_authorization_limit(
+                        authorization_limits, authorization
+                    )
+
+        selection = self.recent_activity.select(
+            RecentActivityQuery(
+                continuity_key=continuity_key,
+                current_umo_key=source_key,
+                current_scope=current_scope,
+                text=current,
+                current_session_has_focus=self._recent_current_session_has_focus(
+                    event, current
+                ),
+                private_to_private_enabled=private_to_private,
+                group_to_private_enabled=group_to_private,
+                private_to_group_mode=private_to_group_mode,
+                explicit_bridge=explicit_bridge,
+                authorization_max_chars=(
+                    min(authorization_limits) if authorization_limits else 0
+                ),
+            )
+        )
+
+        # 当前消息不能参与自己的候选选择，故在 select 之后写入；群监听器已写入
+        # 的同一 message_id 会被事件键幂等去重。
+        self._record_recent_activity_event(
+            event,
+            continuity_key=continuity_key,
+            source_key=source_key,
+            source_scope=current_scope,
+            actor=ACTOR_USER,
+            text=current,
+        )
+
+        request_context = ensure_context(event, PHASE_LLM_REQUEST)
+        add_reason(
+            request_context,
+            OWNER_CONVERSATION_FLOW,
+            selection.reason,
+        )
+        if not selection.selected:
+            return
+
+        if not self._inject_instruction(req, selection.text, "recent activity context"):
+            add_reason(
+                request_context,
+                OWNER_CONVERSATION_FLOW,
+                "RECENT_ACTIVITY_INJECTION_FAILED",
+            )
+            return
+        set_flag(
+            request_context,
+            OWNER_CONVERSATION_FLOW,
+            "recent_context_selected",
+            True,
+        )
+        set_artifact(
+            request_context,
+            OWNER_CONVERSATION_FLOW,
+            "recent_activity_context",
+            {
+                "capsule_count": len(selection.capsules),
+                "source_scopes": [item.source_scope for item in selection.capsules],
+                "privacy_modes": [item.privacy_mode for item in selection.capsules],
+                "explicit": selection.explicit,
+                "injected_chars": len(selection.text),
+                "reason": selection.reason,
+            },
+        )
+        self._stats["recent_activity_selected"] += 1
+        self.logger.info(
+            "[conv-flow] seq=%s recent activity selected "
+            "(capsules=%s, scopes=%s, modes=%s, explicit=%s)",
+            seq,
+            len(selection.capsules),
+            [item.source_scope for item in selection.capsules],
+            [item.privacy_mode for item in selection.capsules],
+            selection.explicit,
+        )
+
+    @staticmethod
+    def _append_authorization_limit(
+        limits: list[int], authorization: dict[str, object] | None
+    ) -> None:
+        if not authorization or authorization.get("authorized") is not True:
+            return
+        try:
+            value = int(authorization.get("max_chars") or 0)
+        except (TypeError, ValueError):
+            return
+        if value > 0:
+            limits.append(value)
+
+    async def _ensure_recent_activity_identity(
+        self, event: AstrMessageEvent, req: Any = None
+    ) -> tuple[str, str, str] | None:
+        continuity_key = self._get_extra(event, self.RECENT_ACTIVITY_IDENTITY_KEY)
+        source_key = self._get_extra(event, self.RECENT_ACTIVITY_SOURCE_KEY)
+        source_scope = self._get_extra(event, self.RECENT_ACTIVITY_SCOPE_KEY)
+        if self._valid_recent_activity_cache(
+            event, continuity_key, source_key, source_scope
+        ):
+            return str(continuity_key), str(source_key), str(source_scope)
+
+        provider = self._get_plugin_instance(RELATIONSHIP_PLUGIN_NAME)
+        if provider is None or not self._contract_compatible(
+            provider,
+            "continuity_identity_contract",
+            RELATIONSHIP_CONTINUITY_IDENTITY_CONTRACT_NAME,
+            RELATIONSHIP_CONTINUITY_IDENTITY_CONTRACT_MAJOR,
+        ):
+            return None
+        resolver = getattr(provider, "resolve_continuity_identity", None)
+        if not callable(resolver):
+            return None
+        try:
+            result = resolver(event, req)
+            if inspect.isawaitable(result):
+                result = await result
+        except Exception as exc:
+            self.logger.debug(
+                "[conv-flow] continuity identity resolution failed: %s",
+                type(exc).__name__,
+            )
+            return None
+        if not isinstance(result, dict):
+            return None
+        version = str(result.get("version") or "")
+        key = result.get("continuity_key")
+        if not (
+            result.get("verified") is True
+            and result.get("grants_permission") is False
+            and version.split(".", 1)[0]
+            == RELATIONSHIP_CONTINUITY_IDENTITY_CONTRACT_MAJOR
+            and self._valid_opaque_key(key)
+        ):
+            return None
+
+        source_key = self._recent_activity_source_key(event)
+        source_scope = SCOPE_GROUP if self._get_group_id(event) else SCOPE_PRIVATE
+        if not source_key:
+            return None
+        self._set_extra(event, self.RECENT_ACTIVITY_IDENTITY_KEY, str(key))
+        self._set_extra(event, self.RECENT_ACTIVITY_SOURCE_KEY, source_key)
+        self._set_extra(event, self.RECENT_ACTIVITY_SCOPE_KEY, source_scope)
+        self._set_extra(
+            event,
+            self.RECENT_ACTIVITY_PROOF_KEY,
+            self._recent_activity_identity_proof(str(key), source_key, source_scope),
+        )
+        return str(key), source_key, source_scope
+
+    async def _authorize_recent_context(
+        self,
+        event: AstrMessageEvent,
+        source_scope: str,
+        target_scope: str,
+    ) -> dict[str, object] | None:
+        provider = self._get_plugin_instance(IDENTITY_PLUGIN_NAME)
+        if provider is None or not self._contract_compatible(
+            provider,
+            "context_bridge_authorization_contract",
+            IDENTITY_CONTEXT_BRIDGE_AUTH_CONTRACT_NAME,
+            IDENTITY_CONTEXT_BRIDGE_AUTH_CONTRACT_MAJOR,
+        ):
+            return None
+        authorize = getattr(provider, "authorize_context_bridge", None)
+        if not callable(authorize):
+            return None
+        try:
+            result = authorize(event, source_scope, target_scope)
+            if inspect.isawaitable(result):
+                result = await result
+        except Exception as exc:
+            self.logger.debug(
+                "[conv-flow] context bridge authorization failed: %s",
+                type(exc).__name__,
+            )
+            return None
+        if not isinstance(result, dict):
+            return None
+        version = str(result.get("version") or "")
+        if version.split(".", 1)[0] != IDENTITY_CONTEXT_BRIDGE_AUTH_CONTRACT_MAJOR:
+            return None
+        if set(result) != {
+            "version",
+            "authorized",
+            "reason",
+            "mode",
+            "explicit",
+            "max_chars",
+        }:
+            return None
+        if not isinstance(result.get("authorized"), bool) or not isinstance(
+            result.get("explicit"), bool
+        ):
+            return None
+        try:
+            max_chars = int(result.get("max_chars"))
+        except (TypeError, ValueError):
+            return None
+        if max_chars < 0 or max_chars > 1200:
+            return None
+        return result
+
+    async def _record_recent_activity_user(
+        self, event: AstrMessageEvent, text: str
+    ) -> None:
+        if not self.config.recent_activity_context_enabled:
+            return
+        identity = await self._ensure_recent_activity_identity(event)
+        if identity is None:
+            return
+        continuity_key, source_key, source_scope = identity
+        self._record_recent_activity_event(
+            event,
+            continuity_key=continuity_key,
+            source_key=source_key,
+            source_scope=source_scope,
+            actor=ACTOR_USER,
+            text=text,
+        )
+
+    def _record_recent_activity_event(
+        self,
+        event: AstrMessageEvent,
+        *,
+        continuity_key: str,
+        source_key: str,
+        source_scope: str,
+        actor: str,
+        text: str,
+    ) -> None:
+        recorded = self.recent_activity.record(
+            continuity_key=continuity_key,
+            source_umo_key=source_key,
+            source_scope=source_scope,
+            actor=actor,
+            text=text,
+            subject_owned=True,
+            event_key=self._recent_activity_event_key(event, actor),
+        )
+        if recorded:
+            self._stats["recent_activity_recorded"] += 1
+
+    def _record_recent_activity_bot(
+        self, event: AstrMessageEvent, text: str
+    ) -> None:
+        if not self.config.recent_activity_context_enabled:
+            return
+        continuity_key = self._get_extra(event, self.RECENT_ACTIVITY_IDENTITY_KEY)
+        source_key = self._get_extra(event, self.RECENT_ACTIVITY_SOURCE_KEY)
+        source_scope = self._get_extra(event, self.RECENT_ACTIVITY_SCOPE_KEY)
+        if not self._valid_recent_activity_cache(
+            event, continuity_key, source_key, source_scope
+        ):
+            return
+        self._record_recent_activity_event(
+            event,
+            continuity_key=str(continuity_key),
+            source_key=str(source_key),
+            source_scope=str(source_scope),
+            actor=ACTOR_BOT,
+            text=text,
+        )
+
+    def _recent_current_session_has_focus(
+        self, event: AstrMessageEvent, current_text: str
+    ) -> bool:
+        turns = self.tracker.get_recent_turns(
+            event, self.config.private_context_bridge_max_turns
+        )
+        if not turns:
+            return False
+        if is_low_information(current_text):
+            return True
+        for turn in turns:
+            texts = (*turn.user_texts, turn.bot_text)
+            if any(texts_are_related(current_text, text) for text in texts):
+                return True
+        return False
+
+    def _recent_activity_source_key(self, event: AstrMessageEvent) -> str:
+        source = self.tracker._get_umo(event)
+        if not source:
+            return ""
+        digest = hmac.new(
+            self._recent_activity_source_secret,
+            source.encode("utf-8", errors="ignore"),
+            hashlib.sha256,
+        ).hexdigest()
+        return f"src1_{digest}"
+
+    def _recent_activity_event_key(self, event: AstrMessageEvent, actor: str) -> str:
+        raw = self._context_exclude_message_id(event)
+        if not raw:
+            context = ensure_context(event)
+            raw = str(context.get("request_id") or "")
+        if not raw:
+            return ""
+        payload = f"{actor}\x1f{raw}".encode("utf-8", errors="ignore")
+        digest = hmac.new(
+            self._recent_activity_source_secret, payload, hashlib.sha256
+        ).hexdigest()
+        return f"evt1_{digest}"
+
+    def _recent_activity_identity_proof(
+        self, continuity_key: str, source_key: str, source_scope: str
+    ) -> str:
+        payload = f"{continuity_key}\x1f{source_key}\x1f{source_scope}".encode(
+            "utf-8", errors="ignore"
+        )
+        return hmac.new(
+            self._recent_activity_source_secret, payload, hashlib.sha256
+        ).hexdigest()
+
+    def _valid_recent_activity_cache(
+        self,
+        event: AstrMessageEvent,
+        continuity_key: Any,
+        source_key: Any,
+        source_scope: Any,
+    ) -> bool:
+        if not (
+            self._valid_opaque_key(continuity_key)
+            and self._valid_opaque_key(source_key)
+            and source_scope in {SCOPE_PRIVATE, SCOPE_GROUP}
+            and str(source_key) == self._recent_activity_source_key(event)
+        ):
+            return False
+        proof = str(self._get_extra(event, self.RECENT_ACTIVITY_PROOF_KEY) or "")
+        expected = self._recent_activity_identity_proof(
+            str(continuity_key), str(source_key), str(source_scope)
+        )
+        return bool(proof) and hmac.compare_digest(proof, expected)
+
+    @staticmethod
+    def _valid_opaque_key(value: Any) -> bool:
+        text = str(value or "")
+        return (
+            16 <= len(text) <= 160
+            and text.isascii()
+            and all(char.isalnum() or char in "_-" for char in text)
+        )
 
     def _inject_private_context_bridge(
         self,
@@ -2517,6 +2976,7 @@ class ConversationalFlowPlugin(Star):
         """
         if not text or not text.strip():
             return
+        self._record_recent_activity_bot(event, text)
         self.tracker.record_response(event, text)
         if not self.config.group_context_enabled:
             return

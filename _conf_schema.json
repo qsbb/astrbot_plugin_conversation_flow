@@ -184,6 +184,38 @@
     "hint": "不超过该字符数的私聊消息会主动获得最近轮次提示，用于名称、简称、省略式追问和纠正。范围 4-200，默认 40。",
     "default": 40
   },
+  "recent_activity_context_enabled": {
+    "type": "bool",
+    "description": "[跨会话近期感知] 启用同一人的近期弱上下文",
+    "hint": "开启后，只对在“情”的账号归属页由管理员绑定为同一自然人的账号生效。言会在内存里保留少量近期对话片段，让你换软件或从群聊回私聊时能自然接上。默认关闭；不会联网，也不会额外调用模型。",
+    "default": false
+  },
+  "recent_activity_retention_minutes": {
+    "type": "int",
+    "description": "[跨会话近期感知] 近期片段最多保留多久（分钟）",
+    "hint": "范围 30-360，默认 120。5 分钟内的唯一私聊可承接“继续”这类短话；半小时内可按相同话题自动关联；更久的片段只有你明确说“接着另一个会话”时才会用。重载或重启后立即清空。",
+    "default": 120,
+    "minimum": 30,
+    "maximum": 360
+  },
+  "recent_activity_private_to_private_enabled": {
+    "type": "bool",
+    "description": "[跨会话近期感知] 私聊之间可以承接",
+    "hint": "例如从 QQ 换到 Telegram 后继续刚才的话题。只在情确认两个账号属于同一自然人、序允许本轮只读、且当前会话没有更合适上下文时使用。",
+    "default": true
+  },
+  "recent_activity_group_to_private_enabled": {
+    "type": "bool",
+    "description": "[跨会话近期感知] 私聊可以承接本人刚才在群里的话",
+    "hint": "只记录这个已绑定自然人自己在群里的消息，以及由这条消息触发的 bot 实际回复；不会把其他群友的消息带进私聊，也不会在不同群之间搬运。",
+    "default": true
+  },
+  "recent_activity_private_to_group_enabled": {
+    "type": "bool",
+    "description": "[跨会话近期感知] 允许本人明确同意后在群里承接私聊",
+    "hint": "只是允许序处理你这一条群消息里的明确同意，不代表自动公开。普通群消息永远看不到私聊；“继续私聊的话题”只确认有相关对话，不给原文；只有明确说“把私聊具体内容发到群里”才会带必要短片段。每条消息重新判断。",
+    "default": true
+  },
   "group_context_enabled": {
     "type": "bool",
     "description": "[群聊上下文] 启用群聊上下文注入",
