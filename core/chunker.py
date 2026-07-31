@@ -5,7 +5,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 
-from astrbot.api import logger
+from ..series_diagnostics import logger
 
 from .config import PluginConfig
 from .llm_service import LLMService

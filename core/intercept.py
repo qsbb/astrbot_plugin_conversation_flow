@@ -14,7 +14,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from astrbot.api import logger
+from ..series_diagnostics import logger
 
 from .config import PluginConfig
 from .llm_service import LLMService

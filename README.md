@@ -2,7 +2,7 @@
 
 > 凝心溯溪系列对话模块：让 AstrBot 像真人一样判断何时沉默、何时分段、被插话时如何自然衔接。
 
-> **凝心溯溪系列** 当前完整插件清单为知、言、序、情、声、核：各插件职责独立、互不冲突，可按需组合使用，覆盖知识学习、对话调节、身份管理、关系状态、语音与更新管理。
+> **凝心溯溪系列** 当前完整插件清单为知、言、序、情、境、声、核：各插件职责独立、互不冲突，可按需组合使用，覆盖知识学习、对话调节、身份管理、关系状态、环境感知、语音与更新管理。
 
 | 字 | 模块 | 说明 |
 |----|------|------|
@@ -10,6 +10,7 @@
 | [言](https://github.com/qsbb/astrbot_plugin_conversation_flow) | 对话调节 | 沉默判断、智能分段、上下文承接（本插件） |
 | [序](https://github.com/qsbb/astrbot_plugin_identity_guardian) | 身份管理 | 关系感知、权限边界、群组行动 |
 | [情](https://github.com/qsbb/astrbot_plugin_relationship) | 关系状态 | 情绪、好感、信任、熟悉度状态记录与只读建议 |
+| [境](https://github.com/qsbb/astrbot_plugin_environment_awareness) | 环境感知 | 时间、天气、空气质量、预警与环境关心候选 |
 | [声](https://github.com/qsbb/astrbot_plugin_voice_hub) | 语音合成 | 双 TTS 后端、多音色管理、AI 导演 |
 | [核](https://github.com/qsbb/astrbot_plugin_update_manager) | 更新管理 | 安全检查、计划、串行更新与回滚 |
 
@@ -18,6 +19,14 @@
 - 版本号以 `metadata.yaml` 的 `version` 为唯一事实源，代码侧引用 `main.__version__`；本文档不登记具体版本号。AstrBot 兼容范围：`>=4.16,<5`。
 - 命令入口：`/convflow` 命令组，支持 `status`、`config`、`reload`、`set`、`silence_test`、`air_reset`、`followup_reset`、`mood_reset`、`reset_stats`、`help`。
 - 页面入口：当前实现未提供固定 Plugin Page 管理页；配置可在 AstrBot Dashboard 编辑，运行时也可使用 `/convflow` 命令。
+
+### 系列诊断日志
+
+- 插件把必要的生命周期事件、警告和错误写入内存环形缓冲，并通过 `series.diagnostics@1.0` 只读契约供“核”的日志页汇总查看。
+- 这条诊断通道与 AstrBot 主日志隔离，不会把诊断记录转发到 AstrBot 日志；普通聊天正文也不会作为诊断日志保存。
+- 写入前会隐藏令牌、账号标识等敏感字段，并截断过长内容。缓冲仅存在于当前进程，重启或热重载后自动清空。
+- 自动捕获的告警只保留模块、函数、行号和异常类型，不保存格式化后的日志正文；清空或热重载会更换流标识，供“核”可靠丢弃旧游标。
+- “核”不是运行依赖：没有安装或没有启用“核”时，言仍照常完成对话调节，只是缺少统一日志查看入口。
 
 ## 这是什么
 
@@ -520,7 +529,7 @@ astrbot_plugin_conversation_flow/
 
 ## 开发设计文档
 
-[docs/recent-activity-context-design.md](docs/recent-activity-context-design.md) 是“同一自然人跨会话近期弱感知”的现行设计，记录匿名身份、逐轮授权、群聊隐私、动态相关性、Memory Companion 迁移和发布前验收场景。当前代码已在 `0.7.4` 实现，功能默认关闭。
+[docs/recent-activity-context-design.md](docs/recent-activity-context-design.md) 是“同一自然人跨会话近期弱感知”的现行设计，记录匿名身份、逐轮授权、群聊隐私、动态相关性、Memory Companion 迁移和发布前验收场景。当前代码已在 `0.8.0` 实现，功能默认关闭。
 
 ## 历史设计文档
 

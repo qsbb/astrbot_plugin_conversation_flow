@@ -20,7 +20,6 @@ from sys import maxsize
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent, filter
 from astrbot.api.message_components import Plain
 from astrbot.api.star import Context, Star, StarTools, register
@@ -99,8 +98,14 @@ from .core.request_context import (
     set_flag,
 )
 from .core.silence_judge import SilenceJudge
+from .series_diagnostics import (
+    diagnostic_clear as clear_diagnostic_events,
+    diagnostic_event,
+    diagnostic_events as read_diagnostic_events,
+    logger,
+)
 
-__version__ = "0.7.4"
+__version__ = "0.8.0"
 RELATIONSHIP_PLUGIN_NAME = "astrbot_plugin_relationship"
 RELATIONSHIP_SNAPSHOT_CONTRACT_NAME = "relationship.snapshot"
 RELATIONSHIP_SNAPSHOT_CONTRACT_MAJOR = "1"
@@ -163,7 +168,7 @@ SERIES_PROMPT_OWNERS = (
 
 @register(
     "astrbot_plugin_conversation_flow",
-    "Justice-ocr",
+    "凌溪",
     "凝心溯溪-言，沉默判断、智能分段、插话衔接与群聊上下文",
     __version__,
 )
@@ -196,6 +201,7 @@ class ConversationalFlowPlugin(Star):
         super().__init__(context)
         self.context = context
         self.logger = logger
+        diagnostic_event("plugin.init", "对话流插件开始初始化")
 
         # 配置：兼容 dict / AstrBot config 对象 / 旧版无 config 注入
         self._raw_config = self._coerce_config(config)
@@ -297,6 +303,17 @@ class ConversationalFlowPlugin(Star):
             self.config.group_context_enabled,
             self.config.intercept_enabled,
         )
+        diagnostic_event(
+            "plugin.ready",
+            "对话流插件已就绪",
+            details={
+                "silence_enabled": bool(self.config.silence_enabled),
+                "chunking_enabled": bool(self.config.chunking_enabled),
+                "image_intent_enabled": bool(self.config.image_intent_mode),
+                "interrupt_enabled": bool(self.config.interrupt_enabled),
+                "group_context_enabled": bool(self.config.group_context_enabled),
+            },
+        )
 
     def plugin_health(self) -> dict[str, object]:
         checks = {
@@ -312,6 +329,22 @@ class ConversationalFlowPlugin(Star):
             "reasons": reasons,
             "version": __version__,
         }
+
+    def diagnostic_log_contract(self) -> dict[str, object]:
+        return {
+            "name": "series.diagnostics",
+            "version": "1.0",
+            "plugin": "astrbot_plugin_conversation_flow",
+            "capabilities": ("read", "clear"),
+            "storage": "memory_only",
+            "astrbot_log_propagation": False,
+        }
+
+    def diagnostic_events(self, after_seq: int = 0, limit: int = 200) -> dict[str, Any]:
+        return read_diagnostic_events(after_seq=after_seq, limit=limit)
+
+    def diagnostic_clear(self) -> None:
+        clear_diagnostic_events()
 
     def proactive_delivery_contract(self) -> dict[str, object]:
         """Declare fail-closed proactive delivery orchestration."""
@@ -613,8 +646,11 @@ class ConversationalFlowPlugin(Star):
             if isinstance(level, int):
                 # astrbot.api.logger 是 loguru 风格，但也可能挂着 logging logger
                 # 尝试 setLevel，失败就忽略
-                underlying = getattr(self.logger, "_logger", None) or getattr(
-                    self.logger, "logger", None
+                underlying = (
+                    self.logger
+                    if callable(getattr(self.logger, "setLevel", None))
+                    else getattr(self.logger, "_logger", None)
+                    or getattr(self.logger, "logger", None)
                 )
                 if underlying is not None and hasattr(underlying, "setLevel"):
                     underlying.setLevel(level)
@@ -1470,6 +1506,7 @@ class ConversationalFlowPlugin(Star):
             self._recent_activity_source_secret = secrets.token_bytes(32)
         except Exception:
             pass
+        diagnostic_event("plugin.terminated", "对话流插件已卸载")
         self.logger.info("[conv-flow] plugin terminated")
 
     # ------------------------------------------------------------------

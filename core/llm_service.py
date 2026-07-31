@@ -12,7 +12,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from astrbot.api import logger
+from ..series_diagnostics import logger
 
 
 class LLMService:

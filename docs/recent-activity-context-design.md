@@ -1,12 +1,12 @@
 # 跨会话近期感知设计
 
-> 状态：已按本文实现，并随 `0.7.4` 于 2026-07-31 发布。
+> 状态：已按本文实现，并随 `0.8.0` 于 2026-07-31 发布。
 >
 > 目标插件：`astrbot_plugin_conversation_flow`（凝心溯溪-言）
 >
 > 协作插件：`astrbot_plugin_relationship`（凝心溯溪-情）提供人工验证的匿名自然人等价身份；`astrbot_plugin_identity_guardian`（凝心溯溪-序）逐轮裁定跨作用域读取。
 >
-> 本文描述 `0.7.4` 的实现；功能默认关闭。
+> 本文描述 `0.8.0` 的实现；功能默认关闭。
 
 ## 1. 结论
 
@@ -400,6 +400,6 @@ flags.conversation_flow.recent_context_selected = true
 
 ## 18. 发布边界
 
-- `0.7.4` 已同步 README、CHANGELOG、配置 schema、契约规范和测试；
+- `0.8.0` 已同步 README、CHANGELOG、配置 schema、契约规范和测试；
 - 发布前必须通过双方契约测试、言插件测试、系列请求上下文测试和上述自动化场景；
 - 真实双平台及群私聊联调仍按第 16 节阶段 D 执行，异常时关闭总开关即可回退。
