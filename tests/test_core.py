@@ -756,12 +756,23 @@ class ThinkingMergeContextPromptTests(unittest.TestCase):
 class PrivateContextBridgePromptTests(unittest.TestCase):
     def test_template_keeps_referents_and_corrections(self) -> None:
         self.assertIn("{context}", PRIVATE_CONTEXT_BRIDGE_TEMPLATE)
+        self.assertIn("{current_message}", PRIVATE_CONTEXT_BRIDGE_TEMPLATE)
         self.assertIn("试试", PRIVATE_CONTEXT_BRIDGE_TEMPLATE)
         self.assertIn("名称、术语", PRIVATE_CONTEXT_BRIDGE_TEMPLATE)
         self.assertIn("纠正", PRIVATE_CONTEXT_BRIDGE_TEMPLATE)
 
     def test_template_allows_independent_new_topic(self) -> None:
         self.assertIn("独立的新话题", PRIVATE_CONTEXT_BRIDGE_TEMPLATE)
+
+    def test_template_preserves_short_negation_over_background(self) -> None:
+        result = PRIVATE_CONTEXT_BRIDGE_TEMPLATE.format(
+            context="你: 你现在手头还有正事在忙吗？",
+            current_message="没呢",
+        )
+        self.assertIn("当前用户消息（最高优先级）：没呢", result)
+        self.assertIn("不得改写成肯定", result)
+        self.assertIn("长期记忆", result)
+        self.assertIn("不能覆盖当前消息", result)
 
 
 class DelayTests(unittest.TestCase):
@@ -3257,6 +3268,57 @@ class PromptCompositionTests(unittest.TestCase):
 
         self.assertTrue(plugin._compose_series_prompt_fragments(context, req))
         self.assertEqual(len(req.extra_user_content_parts), 1)
+
+
+class PrivateContextBridgeFinalizerTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        from astrbot_plugin_conversation_flow.main import ConversationalFlowPlugin
+
+        cls.plugin_cls = ConversationalFlowPlugin
+
+    def test_moves_bridge_to_tail_and_removes_duplicate_parts(self) -> None:
+        marker = "[对话流控制指令 - 最近私聊承接]"
+
+        class Part:
+            def __init__(self, text):
+                self.text = text
+
+        old_bridge = Part(f"{marker}\n旧承接")
+        selected_bridge = {"type": "text", "text": f"{marker}\n当前承接"}
+        memory = Part(f"长期记忆正文提到 {marker}，但它不是承接块")
+        req = types.SimpleNamespace(
+            extra_user_content_parts=[
+                old_bridge,
+                memory,
+                selected_bridge,
+                Part("关系状态"),
+            ]
+        )
+
+        changed = self.plugin_cls._move_private_context_bridge_to_tail(req)
+
+        self.assertTrue(changed)
+        self.assertIs(req.extra_user_content_parts[-1], selected_bridge)
+        bridge_parts = [
+            part
+            for part in req.extra_user_content_parts
+            if str(
+                part.get("text", "") if isinstance(part, dict) else part.text
+            ).lstrip().startswith(marker)
+        ]
+        self.assertEqual(bridge_parts, [selected_bridge])
+        self.assertIn(memory, req.extra_user_content_parts)
+
+    def test_bridge_already_at_tail_is_not_duplicated(self) -> None:
+        bridge = {
+            "type": "text",
+            "text": "[对话流控制指令 - 最近私聊承接]\n当前承接",
+        }
+        req = types.SimpleNamespace(extra_user_content_parts=[{"text": "记忆"}, bridge])
+
+        self.assertFalse(self.plugin_cls._move_private_context_bridge_to_tail(req))
+        self.assertEqual(req.extra_user_content_parts, [{"text": "记忆"}, bridge])
 
 
 class _ChainResult:

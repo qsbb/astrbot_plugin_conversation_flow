@@ -105,7 +105,7 @@ from .series_diagnostics import (
     logger,
 )
 
-__version__ = "0.8.0"
+__version__ = "0.8.1"
 RELATIONSHIP_PLUGIN_NAME = "astrbot_plugin_relationship"
 RELATIONSHIP_SNAPSHOT_CONTRACT_NAME = "relationship.snapshot"
 RELATIONSHIP_SNAPSHOT_CONTRACT_MAJOR = "1"
@@ -159,6 +159,7 @@ VOICE_DELIVERY_CONTRACT_MAJOR = "1"
 DELIVERY_PLAN_EXTRA_KEY = "conversation_flow.delivery_plan"
 DELIVERY_PLAN_VERSION = "1.0"
 SERIES_PROMPT_MARKER = "[凝心溯溪协同上下文]"
+PRIVATE_CONTEXT_BRIDGE_MARKER = "[对话流控制指令 - 最近私聊承接]"
 SERIES_PROMPT_OWNERS = (
     OWNER_IDENTITY_GUARDIAN,
     OWNER_ACTIVE_LEARNER,
@@ -874,6 +875,24 @@ class ConversationalFlowPlugin(Star):
         # 自然工具调用：约束 bot 描述自身动作的措辞，不暴露工具名与报错原文
         if self.config.natural_tool_call_enabled:
             self._inject_natural_tool_call_instruction(req)
+
+    # Memory Companion 在 -20 注入长期记忆，情在 -30 补跨平台只读记忆。
+    # 本钩子不新增任何提示内容或 LLM 调用，只把已经生成的当前轮承接块移到末尾，
+    # 保证当前短答与紧邻上一问的明确语义不会被较长的背景片段覆盖。
+    @filter.on_llm_request(priority=-40)
+    async def finalize_private_context_bridge(
+        self, event: AstrMessageEvent, req: Any, *args: Any, **kwargs: Any
+    ) -> None:
+        if not self._get_extra(event, self.PRIVATE_CONTEXT_INJECTED_KEY):
+            return
+        if self._move_private_context_bridge_to_tail(req):
+            request_context = ensure_context(event, PHASE_LLM_REQUEST)
+            add_reason(
+                request_context,
+                OWNER_CONVERSATION_FLOW,
+                "PRIVATE_CONTEXT_BRIDGE_FINALIZED",
+            )
+            self.logger.debug("[conv-flow] private context bridge finalized")
 
     # ------------------------------------------------------------------
     # 主钩子：on_llm_response
@@ -2464,7 +2483,10 @@ class ConversationalFlowPlugin(Star):
         if not lines:
             return
 
-        instruction = PRIVATE_CONTEXT_BRIDGE_TEMPLATE.format(context="\n".join(lines))
+        instruction = PRIVATE_CONTEXT_BRIDGE_TEMPLATE.format(
+            context="\n".join(lines),
+            current_message=self._context_bridge_preview(current, 200),
+        )
         self._inject_instruction(req, instruction, "private context bridge")
         self._set_extra(event, self.PRIVATE_CONTEXT_INJECTED_KEY, True)
         self._stats["private_context_bridged"] += 1
@@ -2702,6 +2724,38 @@ class ConversationalFlowPlugin(Star):
             OWNER_CONVERSATION_FLOW,
             "DELIVERY_PLAN_READY",
         )
+
+    @staticmethod
+    def _move_private_context_bridge_to_tail(req: Any) -> bool:
+        """把唯一的私聊承接块移到附加内容末尾，并顺手去除同块重复项。"""
+        try:
+            parts = getattr(req, "extra_user_content_parts", None)
+        except Exception:
+            return False
+        if not isinstance(parts, list) or not parts:
+            return False
+
+        matches: list[tuple[int, Any]] = []
+        for index, part in enumerate(parts):
+            if isinstance(part, dict):
+                text = part.get("text", "")
+            else:
+                text = getattr(part, "text", "")
+            if str(text or "").lstrip().startswith(PRIVATE_CONTEXT_BRIDGE_MARKER):
+                matches.append((index, part))
+        if not matches:
+            return False
+
+        selected = matches[-1][1]
+        matched_indexes = {index for index, _part in matches}
+        reordered = [
+            part for index, part in enumerate(parts) if index not in matched_indexes
+        ]
+        reordered.append(selected)
+        changed = len(matches) > 1 or parts[-1] is not selected
+        if changed:
+            parts[:] = reordered
+        return changed
 
     async def _relationship_mood_decision(
         self, event: Any, user_text: str
