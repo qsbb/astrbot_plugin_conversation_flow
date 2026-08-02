@@ -21,6 +21,26 @@ class PendingRequest:
     interrupt_token: dict[str, Any] = field(
         default_factory=lambda: {"cancelled": False, "completed": False}
     )
+    media: "PendingMedia" = field(default_factory=lambda: PendingMedia())
+
+
+@dataclass
+class PendingMedia:
+    """请求中可随插话一起转交的多模态内容。"""
+
+    image_urls: list[str] = field(default_factory=list)
+    audio_urls: list[str] = field(default_factory=list)
+    captions: list[str] = field(default_factory=list)
+
+    def has_content(self) -> bool:
+        return bool(self.image_urls or self.audio_urls or self.captions)
+
+    def extend(self, other: "PendingMedia") -> None:
+        for field_name in ("image_urls", "audio_urls", "captions"):
+            current = getattr(self, field_name)
+            for value in getattr(other, field_name):
+                if value and value not in current:
+                    current.append(value)
 
 
 @dataclass(frozen=True)
@@ -98,6 +118,19 @@ class ConversationTracker:
             self._states[umo] = state
         return state
 
+    def has_interrupt_candidate(self, event: Any, is_wake: bool = False) -> bool:
+        """判断是否存在仍在时间窗内、可交给言处理的旧请求。"""
+        state = self.get_state(self._compute_scoped_umo(event, is_wake=is_wake))
+        state.cleanup_finished()
+        now = time.time()
+        window_s = self._interrupt_window_ms / 1000.0
+        return any(
+            not pending.finished
+            and pending.seq not in state.discarded
+            and (window_s <= 0 or (now - pending.started_at) <= window_s)
+            for pending in state.pending.values()
+        )
+
     def cleanup_stale(self) -> int:
         """清理过期会话状态，返回清理数量。"""
         now = time.time()
@@ -141,6 +174,7 @@ class ConversationTracker:
         seq = state.next_seq
         state.next_seq += 1
         user_text = self._get_user_text(event) or ""
+        meaningful_user_text = "" if self._is_placeholder_text(user_text) else user_text
         merge_hint: dict[str, Any] | None = None
         old_texts: list[str] = []
         now = time.time()
@@ -178,19 +212,42 @@ class ConversationTracker:
             merge_candidates = [
                 pending
                 for pending in active_pending
-                if pending.user_texts
-                and (pending.response_started or experimental_thinking_merge)
+                if pending.user_texts or pending.media.has_content()
             ]
             old_texts = [
                 text
                 for pending in merge_candidates
                 for text in pending.user_texts
-                if text.strip()
+                if text.strip() and not self._is_placeholder_text(text)
             ]
-            if old_texts and user_text.strip():
+            old_image_urls = [
+                url
+                for pending in merge_candidates
+                for url in pending.media.image_urls
+                if url
+            ]
+            old_audio_urls = [
+                url
+                for pending in merge_candidates
+                for url in pending.media.audio_urls
+                if url
+            ]
+            old_captions = [
+                caption
+                for pending in merge_candidates
+                for caption in pending.media.captions
+                if caption
+            ]
+            has_current_content = bool(
+                meaningful_user_text.strip() or self._event_has_message_chain(event)
+            )
+            if (
+                (old_texts or old_image_urls or old_audio_urls or old_captions)
+                and has_current_content
+            ):
                 merge_hint = self._build_merge_hint(
                     old_texts,
-                    user_text,
+                    meaningful_user_text,
                     previous_state=(
                         "thinking"
                         if any(
@@ -198,14 +255,27 @@ class ConversationTracker:
                         )
                         else "response_started"
                     ),
+                    old_image_urls=old_image_urls,
+                    old_audio_urls=old_audio_urls,
+                    old_captions=old_captions,
                 )
 
         inherited_texts = old_texts if merge_hint else []
+        inherited_media = PendingMedia()
+        if merge_hint:
+            inherited_media.image_urls = list(merge_hint.get("old_image_urls", []))
+            inherited_media.audio_urls = list(merge_hint.get("old_audio_urls", []))
+            inherited_media.captions = list(merge_hint.get("old_captions", []))
         state.pending[seq] = PendingRequest(
             seq=seq,
             user_text=user_text,
             started_at=time.time(),
-            user_texts=[*inherited_texts, user_text] if user_text else inherited_texts,
+            user_texts=(
+                [*inherited_texts, meaningful_user_text]
+                if meaningful_user_text
+                else inherited_texts
+            ),
+            media=inherited_media,
         )
         state.last_user_text = user_text
         state.last_active_ts = time.time()
@@ -280,6 +350,62 @@ class ConversationTracker:
     def clear_merge_hint(self, event: Any) -> None:
         self._set_extra(event, self.MERGE_HINT_EXTRA_KEY, "")
 
+    def capture_request_content(self, event: Any, req: Any) -> None:
+        """保存当前请求的真实媒体引用，避免合并时退化成“[图片]”。"""
+        seq = self._get_extra(event, self.SEQ_EXTRA_KEY)
+        if seq is None:
+            return
+        state = self._states.get(self._get_umo(event))
+        pending = state.pending.get(seq) if state else None
+        if pending is None:
+            return
+
+        current = PendingMedia(
+            image_urls=self._normalize_refs(getattr(req, "image_urls", None)),
+            audio_urls=self._normalize_refs(getattr(req, "audio_urls", None)),
+            captions=self._extract_caption_parts(
+                getattr(req, "extra_user_content_parts", None)
+            ),
+        )
+        pending.media.extend(current)
+
+    @staticmethod
+    def _normalize_refs(value: Any) -> list[str]:
+        if not isinstance(value, (list, tuple)):
+            return []
+        result: list[str] = []
+        for item in value:
+            ref = str(item or "").strip()
+            if ref and ref not in result:
+                result.append(ref)
+        return result
+
+    @staticmethod
+    def _extract_caption_parts(parts: Any) -> list[str]:
+        if not isinstance(parts, (list, tuple)):
+            return []
+        captions: list[str] = []
+        try:
+            from .image_intent import _IMAGE_CAPTION_PATTERN, _is_meaningful_image_caption
+        except Exception:
+            return captions
+        for part in parts:
+            if isinstance(part, dict):
+                value = part.get("text", "")
+            else:
+                try:
+                    value = getattr(part, "text", "")
+                except Exception:
+                    continue
+            text = str(value or "").strip()
+            if not text:
+                continue
+            matches = _IMAGE_CAPTION_PATTERN.findall(text)
+            if matches and all(_is_meaningful_image_caption(match) for match in matches):
+                if text not in captions:
+                    captions.append(text)
+        return captions
+
     def finish_response(self, event: Any, bot_text: str = "") -> None:
         """在 on_decorating_result 末尾调用。"""
         seq = self._get_extra(event, self.SEQ_EXTRA_KEY)
@@ -349,11 +475,17 @@ class ConversationTracker:
         old_texts: list[str],
         new_text: str,
         previous_state: str = "response_started",
+        old_image_urls: list[str] | None = None,
+        old_audio_urls: list[str] | None = None,
+        old_captions: list[str] | None = None,
     ) -> dict[str, Any]:
         return {
             "old_texts": old_texts,
             "new_text": new_text,
             "previous_state": previous_state,
+            "old_image_urls": list(old_image_urls or []),
+            "old_audio_urls": list(old_audio_urls or []),
+            "old_captions": list(old_captions or []),
         }
 
     def _get_umo(self, event: Any) -> str:
@@ -437,6 +569,19 @@ class ConversationTracker:
         except Exception:
             pass
         return ""
+
+    @staticmethod
+    def _is_placeholder_text(value: Any) -> bool:
+        text = str(value or "").strip().lower()
+        return text in {"[图片]", "[image]", "[audio]", "[语音]"}
+
+    @staticmethod
+    def _event_has_message_chain(event: Any) -> bool:
+        try:
+            chain = getattr(getattr(event, "message_obj", None), "message", None)
+            return isinstance(chain, (list, tuple)) and bool(chain)
+        except Exception:
+            return False
 
     def _set_extra(self, event: Any, key: str, value: Any) -> None:
         setter = getattr(event, "set_extra", None)

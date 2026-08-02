@@ -105,7 +105,7 @@ from .series_diagnostics import (
     logger,
 )
 
-__version__ = "0.8.1"
+__version__ = "0.8.2"
 RELATIONSHIP_PLUGIN_NAME = "astrbot_plugin_relationship"
 RELATIONSHIP_SNAPSHOT_CONTRACT_NAME = "relationship.snapshot"
 RELATIONSHIP_SNAPSHOT_CONTRACT_MAJOR = "1"
@@ -189,6 +189,8 @@ class ConversationalFlowPlugin(Star):
     REVERSE_WAKE_SOURCE_MESSAGE_ID_KEY = "conv_flow_reverse_wake_source_message_id"
     # event extra 上用于标记"私聊短消息承接上下文已注入"的 key
     PRIVATE_CONTEXT_INJECTED_KEY = "conv_flow_private_context_injected"
+    # event extra 上用于记录本轮已绕过 AstrBot 原生 follow-up 捕获
+    NATIVE_FOLLOWUP_BYPASSED_KEY = "conv_flow_native_followup_bypassed"
     RECENT_ACTIVITY_IDENTITY_KEY = "conv_flow_recent_activity_identity"
     RECENT_ACTIVITY_SOURCE_KEY = "conv_flow_recent_activity_source"
     RECENT_ACTIVITY_SCOPE_KEY = "conv_flow_recent_activity_scope"
@@ -702,6 +704,32 @@ class ConversationalFlowPlugin(Star):
     # 主钩子：等待会话锁 / on_llm_request
     # ------------------------------------------------------------------
 
+    @filter.event_message_type(filter.EventMessageType.ALL, priority=maxsize)
+    async def preempt_native_follow_up(
+        self, event: AstrMessageEvent, *args: Any, **kwargs: Any
+    ) -> None:
+        """在核心 try_capture_follow_up 前把符合时间窗的插话交回言处理。"""
+        if not self.config.interrupt_enabled:
+            return
+        is_wake = self._is_wake(event)
+        if not is_wake and not self._is_private_chat(event):
+            return
+        if not self.tracker.has_interrupt_candidate(event, is_wake=is_wake):
+            return
+        if not self._request_native_followup_stop(event):
+            return
+
+        self._set_extra(event, self.NATIVE_FOLLOWUP_BYPASSED_KEY, True)
+        request_context = ensure_context(event, PHASE_MESSAGE)
+        add_reason(
+            request_context,
+            OWNER_CONVERSATION_FLOW,
+            "NATIVE_FOLLOWUP_BYPASSED",
+        )
+        self.logger.info(
+            "[conv-flow] native follow-up bypassed; handing interruption to conv-flow"
+        )
+
     @filter.on_waiting_llm_request()
     async def on_waiting_llm_request(
         self, event: AstrMessageEvent, *args: Any, **kwargs: Any
@@ -754,6 +782,9 @@ class ConversationalFlowPlugin(Star):
             experimental_thinking_merge=self.config.experimental_thinking_merge_enabled,
             is_wake=is_wake,
         )
+        # 保存 ProviderRequest 中的真实图片、音频和图片描述。下一条消息到达时，
+        # 这些内容会与旧文本一起转交，避免原生 outline 退化成“[图片]”。
+        self.tracker.capture_request_content(event, req)
 
         # 2) 如果检测到插话合并提示，先处理合并（注入到 req）
         if self.config.interrupt_enabled and self.tracker.has_merge_hint(event):
@@ -1533,53 +1564,56 @@ class ConversationalFlowPlugin(Star):
     # ------------------------------------------------------------------
 
     async def _apply_merge(self, event: AstrMessageEvent, req: Any, umo: str) -> None:
-        """根据 merge_strategy 把插话合并提示注入到 req。"""
+        """根据 merge_strategy 把插话合并提示和旧媒体注入到 req。"""
         raw_hint = self.tracker.get_merge_hint(event)
         self.tracker.clear_merge_hint(event)
         if not raw_hint:
             return
 
-        old_texts = raw_hint.get("old_texts", [])
-        new_text = str(raw_hint.get("new_text", "")).strip()
-        previous_state = str(raw_hint.get("previous_state", "response_started"))
-        if not isinstance(old_texts, list) or not old_texts or not new_text:
-            return
-        old_text = " / ".join(
-            str(item).strip() for item in old_texts if str(item).strip()
+        raw_old_texts = raw_hint.get("old_texts", [])
+        old_texts = (
+            [str(item).strip() for item in raw_old_texts if str(item).strip()]
+            if isinstance(raw_old_texts, list)
+            else []
         )
-        if not old_text:
+        old_media_present = any(
+            isinstance(raw_hint.get(key), (list, tuple)) and raw_hint.get(key)
+            for key in ("old_image_urls", "old_audio_urls", "old_captions")
+        )
+        new_text = str(raw_hint.get("new_text", "")).strip()
+        if not (old_texts or old_media_present):
             return
-        if (
-            previous_state == "thinking"
-            and not self.config.experimental_thinking_merge_enabled
-        ):
+        if not new_text and not self.tracker._event_has_message_chain(event):
             return
 
+        old_text = " / ".join(old_texts)
+        display_old_text = old_text or "（较早消息包含图片、音频或图片描述）"
+        display_new_text = new_text or "（当前消息包含图片或其他媒体）"
+        previous_state = str(raw_hint.get("previous_state", "response_started"))
         strategy = self.config.interrupt_merge_strategy
         history_contains_old = self._request_context_contains(req, old_texts)
         context_count = self.config.interrupt_thinking_merge_context_count
         injection = ""
-        # 实验性思考中断合并：主动注入未回复历史，弥补 LLM 公开历史过短
+
+        # 基础合并现在始终生效；旧实验开关只保留更显式的未回复历史模板，
+        # 用于公开历史较短的 Provider。
         thinking_handled = False
         if (
             previous_state == "thinking"
             and self.config.experimental_thinking_merge_enabled
         ):
             if context_count > 0:
-                # 从未回复消息中取最近 N 条作为上下文主动注入
-                recent = [str(t).strip() for t in old_texts if str(t).strip()][
-                    -context_count:
-                ]
+                recent = old_texts[-context_count:]
                 if recent:
-                    context_text = "\n".join(f"- {t}" for t in recent)
+                    context_text = "\n".join(f"- {text}" for text in recent)
                     injection = INTERRUPT_THINKING_HISTORY_WITH_CONTEXT_TEMPLATE.format(
-                        context=context_text, new_text=new_text
+                        context=context_text,
+                        new_text=display_new_text,
                     )
                     thinking_handled = True
-                # recent 为空时 fall through 到 strategy 分支
             elif history_contains_old:
                 injection = INTERRUPT_THINKING_HISTORY_TEMPLATE.format(
-                    new_text=new_text
+                    new_text=display_new_text
                 )
                 thinking_handled = True
 
@@ -1587,10 +1621,10 @@ class ConversationalFlowPlugin(Star):
             if strategy == "discard_old":
                 injection = INTERRUPT_MERGE_DISCARD_HINT
             elif strategy == "rewrite":
-                # 调用 LLM 重写
                 rewritten = await self.llm.chat(
                     prompt=INTERRUPT_MERGE_REWRITE_USER_TEMPLATE.format(
-                        old_text=old_text, new_text=new_text
+                        old_text=display_old_text,
+                        new_text=display_new_text,
                     ),
                     system_prompt=INTERRUPT_MERGE_REWRITE_SYSTEM,
                     umo=umo,
@@ -1598,25 +1632,26 @@ class ConversationalFlowPlugin(Star):
                 )
                 rewritten = (rewritten or "").strip()
                 if rewritten:
-                    # 把重写后的内容作为 prompt 主体替换
                     try:
                         req.prompt = rewritten
                     except Exception:
                         pass
-                    injection = ""
                 else:
                     injection = INTERRUPT_MERGE_APPEND_TEMPLATE.format(
-                        old_text=old_text, new_text=new_text
+                        old_text=display_old_text,
+                        new_text=display_new_text,
                     )
             else:  # append (默认)
                 injection = INTERRUPT_MERGE_APPEND_TEMPLATE.format(
-                    old_text=old_text, new_text=new_text
+                    old_text=display_old_text,
+                    new_text=display_new_text,
                 )
 
+        if strategy != "discard_old":
+            self._prepend_interrupt_media(req, raw_hint)
         if not injection:
             return
 
-        # 注入到 req
         try:
             parts = getattr(req, "extra_user_content_parts", None)
             if parts is not None:
@@ -1631,7 +1666,6 @@ class ConversationalFlowPlugin(Star):
         except Exception as exc:
             self.logger.debug("[conv-flow] merge inject via parts failed: %s", exc)
 
-        # 降级到 system_prompt
         try:
             current = getattr(req, "system_prompt", None) or ""
             req.system_prompt = current + "\n\n" + injection
@@ -1640,6 +1674,77 @@ class ConversationalFlowPlugin(Star):
                 "[conv-flow] merge inject via system_prompt failed: %s", exc
             )
 
+    def _prepend_interrupt_media(self, req: Any, raw_hint: dict[str, Any]) -> None:
+        """把旧请求媒体放在当前媒体之前，保持连续消息的实际顺序。"""
+        for field_name, hint_key in (
+            ("image_urls", "old_image_urls"),
+            ("audio_urls", "old_audio_urls"),
+        ):
+            raw_values = raw_hint.get(hint_key, [])
+            if not isinstance(raw_values, (list, tuple)):
+                continue
+            refs: list[str] = []
+            for value in raw_values:
+                ref = str(value or "").strip()
+                if ref and ref not in refs:
+                    refs.append(ref)
+            if not refs:
+                continue
+            try:
+                current = getattr(req, field_name, None)
+                if isinstance(current, list):
+                    current[:0] = [ref for ref in refs if ref not in current]
+            except Exception as exc:
+                self.logger.debug(
+                    "[conv-flow] prepend interrupted %s failed: %s",
+                    field_name,
+                    type(exc).__name__,
+                )
+
+        raw_captions = raw_hint.get("old_captions", [])
+        if not isinstance(raw_captions, (list, tuple)):
+            return
+        captions = [
+            str(value).strip()
+            for value in raw_captions
+            if str(value).strip()
+        ]
+        if not captions:
+            return
+        try:
+            parts = getattr(req, "extra_user_content_parts", None)
+            if not isinstance(parts, list):
+                return
+            existing: set[str] = set()
+            for part in parts:
+                try:
+                    value = (
+                        part.get("text", "")
+                        if isinstance(part, dict)
+                        else getattr(part, "text", "")
+                    )
+                except Exception:
+                    continue
+                existing.add(str(value or ""))
+
+            prepend_parts: list[Any] = []
+            for caption in captions:
+                if caption in existing:
+                    continue
+                try:
+                    from astrbot.core.agent.message import TextPart
+
+                    prepend_parts.append(TextPart(text=caption))
+                except Exception:
+                    prepend_parts.append({"type": "text", "text": caption})
+                existing.add(caption)
+            if prepend_parts:
+                parts[:0] = prepend_parts
+        except Exception as exc:
+            self.logger.debug(
+                "[conv-flow] prepend interrupted captions failed: %s",
+                type(exc).__name__,
+            )
     def _request_context_contains(self, req: Any, old_texts: list[Any]) -> bool:
         """检查 ProviderRequest 公开上下文是否已包含所有旧用户消息。"""
         values: list[str] = []
@@ -1882,6 +1987,64 @@ class ConversationalFlowPlugin(Star):
         if isinstance(is_wake, bool):
             return is_wake
         return False
+
+    @staticmethod
+    def _is_private_chat(event: AstrMessageEvent) -> bool:
+        try:
+            checker = getattr(event, "is_private_chat", None)
+            return bool(checker()) if callable(checker) else False
+        except Exception:
+            return False
+
+    def _request_native_followup_stop(self, event: AstrMessageEvent) -> bool:
+        """请求停止旧 Agent，避免 AstrBot 4.26.8 原生 follow-up 消费本事件。
+
+        私聊和 room 作用域使用公开 active_event_registry。群聊 sender /
+        mention_or_sender 需要按发送者隔离，只读取 4.26.8 的活动 runner
+        映射；核心没有该兼容入口时安全降级，不做大范围 monkey patch。
+        """
+        if self._is_private_chat(event) or self.config.interrupt_scope == "room":
+            try:
+                from astrbot.core.utils.active_event_registry import (
+                    active_event_registry,
+                )
+
+                return (
+                    active_event_registry.request_agent_stop_all(
+                        event.unified_msg_origin,
+                        exclude=event,
+                    )
+                    > 0
+                )
+            except Exception as exc:
+                self.logger.debug(
+                    "[conv-flow] public agent-stop registry unavailable: %s",
+                    type(exc).__name__,
+                )
+                return False
+
+        try:
+            from astrbot.core.pipeline.process_stage.follow_up import (
+                _ACTIVE_AGENT_RUNNERS,
+            )
+
+            runner = _ACTIVE_AGENT_RUNNERS.get(event.unified_msg_origin)
+            runner_context = getattr(runner, "run_context", None)
+            runner_event = getattr(getattr(runner_context, "context", None), "event", None)
+            if runner_event is None:
+                return False
+            current_sender = str(self.tracker._get_sender_id(event) or "")
+            active_sender = str(self.tracker._get_sender_id(runner_event) or "")
+            if not current_sender or current_sender != active_sender:
+                return False
+            runner_event.set_extra("agent_stop_requested", True)
+            return True
+        except Exception as exc:
+            self.logger.debug(
+                "[conv-flow] sender-scoped native follow-up compatibility unavailable: %s",
+                type(exc).__name__,
+            )
+            return False
 
     def _get_group_id(self, event: AstrMessageEvent) -> str:
         """安全获取群聊 ID。"""

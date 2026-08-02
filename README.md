@@ -73,11 +73,12 @@
 - `chunking_enabled=true` 时，在 `on_llm_request` 注入 `CHUNKING_INSTRUCTION`，引导 LLM 在回复较长时主动用双空行（`\n\n`）分段；
 - LLM 主动分段时，每段保留不切，尊重模型意图。
 
-**保底：正则切分**
-- 如果 LLM 没有主动分段（无双空行），插件按强句末标点（`。！？!?`）切分；省略号表示停顿或延续，不作为切分边界；
-- 超长段落（> `chunking_long_paragraph_threshold`，默认 20）即使有双空行也按句末标点继续切分；
-- 短段落（≤ threshold）保留不切。
+**保底：启发式切分**
 
+- 如果 LLM 没有主动分段（无双空行），长回复按强句末标点（。！？!?）切分；省略号表示停顿或延续，不作为切分边界；
+- 对于短于 chunking_min_length 的回复，不会简单按标点硬切。只有在没有双空行、存在强语气句界（全角/半角感叹号或问号、连续语气标点）、前后两句都达到自然长度且后一段是完整句子时，才允许放宽一次拆分；
+- 双空行仍表示 LLM 的主动分段意图，优先保留；超长段落才按 chunking_long_paragraph_threshold（默认 20）继续使用句末保底；
+- 逗号、普通短句号和省略号不会因为这条短回复兜底规则被强行拆开。
 这个行为可通过 `chunking_preserve_paragraphs` 和 `chunking_long_paragraph_threshold` 调整。
 
 **混合组件回复链**：文本与图片、音频、文件等组件同时出现时，只切分相邻的纯文本缓冲区；
@@ -111,7 +112,7 @@
 | 字段 | 默认 | 说明 |
 |---|---|---|
 | `chunking_enabled` | `true` | 总开关 |
-| `chunking_min_length` | `60` | 短于此长度不分段 |
+| `chunking_min_length` | `60` | 常规分段触发线；短回复只有满足强语气句界、两侧完整且长度均衡时才例外拆一次 |
 | `chunking_max_segments` | `5` | 单次回复最多分段数，超过则合并末尾段 |
 | `chunking_delay_mode` | `per_char` | `fixed` 固定延迟，或 `per_char` 按字数延迟 |
 | `chunking_segment_interval_ms` | `800` | `fixed` 模式的固定延迟（毫秒） |
@@ -153,8 +154,8 @@
 | 字段 | 默认 | 说明 |
 |---|---|---|
 | `interrupt_enabled` | `true` | 总开关 |
-| `experimental_thinking_merge_enabled` | `false` | **实验性/高 Token 风险**：旧回复仍在思考且未输出时，抑制旧结果并把未回复消息合并到下一轮重新生成 |
-| `interrupt_thinking_merge_context_count` | `5` | 打断后从插件维护的未回复消息中取最近 N 条作为上下文注入新请求，弥补 LLM 公开对话历史过短。`0` 表示不主动注入（仅依赖 LLM 自带历史）。仅在 `experimental_thinking_merge_enabled=true` 时生效 |
+| `experimental_thinking_merge_enabled` | `false` | 兼容开关：思考阶段的基础合并现在始终生效；开启后额外使用未回复历史模板，可能增加重复 Token |
+| `interrupt_thinking_merge_context_count` | `5` | 开启兼容历史模板时，从未回复消息取最近 N 条补充公开上下文；`0` 表示不主动注入 |
 | `interrupt_merge_strategy` | `append` | `append` / `rewrite` / `discard_old` |
 | `interrupt_window_ms` | `30000` | 插话检测时间窗口（毫秒）。仅当上一条消息在此窗口内且尚未完成回复时，新消息才算插话并中断旧回复；超过此时间的旧请求视为已完成，不会被打断 |
 | `interrupt_state_ttl_ms` | `600000` | 会话状态保留时长，超时自动清理 |
@@ -350,7 +351,7 @@ OneBot v11 的消息事件自带 `message_id`，引用消息以 `reply` 段携�
 
 拦截判断融入主对话思维链，**不做独立 LLM 预判断，不增加额外调用**。白名单会话完全跳过检测。
 
-> **实验性功能警告：** `experimental_thinking_merge_enabled` 默认关闭。当前插件只能将旧请求标记为失效并阻止其结果发送，不能取消 Provider 端已经开始的推理。开启后，旧请求可能继续消耗 Token，新请求还会基于合并后的消息再次思考。频繁插话可能造成大量重复 Token 消耗，直至 AstrBot 提供真正的打断思考接口。
+> **思考中断说明：** 新消息到达时，尚未发送的旧结果会作废，旧文本与真实图片、音频和图片描述会合并到下一次请求。AstrBot 仍可能继续 Provider 端推理；开启 experimental_thinking_merge_enabled 的显式历史模板时，重复 Token 风险更高。
 
 #### 通用
 

@@ -27,6 +27,9 @@ class ChunkConfig:
 _SENTENCE_END = re.compile(
     r"(?:[。！？!?]+[”’」』】》）)\]\"']*|\n+)"
 )
+# 短回复兜底只考虑强语气句界；常规句号仍受 min_length 控制。
+_STRONG_SENTENCE_END = re.compile(r"[！？!?]+[”’」』】》）)\]\"']*")
+_COMPLETE_SENTENCE_END = re.compile(r"[。！？!?]+[”’」』】》）)\]\"']*\s*$")
 # 段落分隔（连续换行）
 _PARAGRAPH_SPLIT = re.compile(r"\n\s*\n+")
 # 代码块围栏
@@ -67,9 +70,16 @@ class Chunker:
         text = text.rstrip()
         if not text:
             return []
+        has_code_fence = self._chunk_cfg.protect_code_block and _CODE_FENCE.search(text)
         if len(text) < self._chunk_cfg.min_length:
-            return [text]
-        if self._chunk_cfg.protect_code_block and _CODE_FENCE.search(text):
+            if has_code_fence:
+                return [text]
+            # 双空行是模型主动表达的分段意图，短回复兜底不重新压平它。
+            if _PARAGRAPH_SPLIT.search(text):
+                explicit = [segment.strip() for segment in self._split_plain(text)]
+                return [segment for segment in explicit if segment]
+            return self._split_short_reply(text)
+        if has_code_fence:
             segments = self._split_with_code_protection(text)
         else:
             segments = self._split_plain(text)
@@ -199,6 +209,24 @@ class Chunker:
         if cursor < len(text):
             segments.extend(self._split_plain(text[cursor:]))
         return segments
+
+    def _short_reply_segment_threshold(self) -> int:
+        """返回短回复例外拆分的最低自然句段长度。"""
+        return max(10, self._chunk_cfg.min_length // 4)
+
+    def _split_short_reply(self, text: str) -> list[str]:
+        """只对两句完整、长度均衡的强语气短回复放宽一次分段。"""
+        minimum = self._short_reply_segment_threshold()
+        for match in _STRONG_SENTENCE_END.finditer(text):
+            left = text[: match.end()].strip()
+            right = text[match.end() :].strip()
+            if (
+                len(left) >= minimum
+                and len(right) >= minimum
+                and _COMPLETE_SENTENCE_END.search(right)
+            ):
+                return [left, right]
+        return [text]
 
     def _merge_short(self, segments: list[str]) -> list[str]:
         """合并过短片段到前一段。"""

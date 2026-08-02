@@ -62,6 +62,7 @@ def _identity_decorator(*_args, **_kwargs):
 class _MockFilter:
     class EventMessageType:
         GROUP_MESSAGE = "group_message"
+        ALL = "all"
 
     @staticmethod
     def on_decorating_result(priority=None, **_kwargs):
@@ -533,6 +534,58 @@ class ChunkerTests(unittest.TestCase):
         self.assertTrue(result[1].endswith("！"))
         self.assertTrue(result[2].endswith("？"))
 
+    def test_fullwidth_exclamation_splits_balanced_short_reply(self) -> None:
+        cfg = build_plugin_config({})
+        chunker = Chunker(cfg, _LLM())
+        first = "刚才试了一下你之前说的思路，居然真的把代码跑通了，厉害呀！"
+        second = "本来还担心周末要耗在这上面呢。"
+
+        self.assertEqual(chunker.split(first + "\n" + second), [first, second])
+
+    def test_ascii_exclamation_splits_balanced_short_reply(self) -> None:
+        cfg = build_plugin_config({})
+        chunker = Chunker(cfg, _LLM())
+        first = "The build finally passes all checks!"
+        second = "Weekend is safe!"
+
+        self.assertEqual(chunker.split(first + second), [first, second])
+
+    def test_repeated_exclamation_boundaries_stay_with_previous_sentence(self) -> None:
+        cfg = build_plugin_config({})
+        chunker = Chunker(cfg, _LLM())
+        second = "后面的回归测试也已经全部顺利通过了。"
+        for mark in ("！？", "!!"):
+            with self.subTest(mark=mark):
+                first = f"这个方案现在终于可以稳定运行了{mark}"
+                self.assertEqual(chunker.split(first + second), [first, second])
+
+    def test_short_sentence_after_exclamation_is_not_left_as_fragment(self) -> None:
+        cfg = build_plugin_config({})
+        chunker = Chunker(cfg, _LLM())
+        text = "这次终于把所有自动化测试都顺利跑通了！好耶。"
+
+        result = chunker.split(text)
+
+        self.assertEqual(len(result), 1)
+        self.assertIn("好耶。", result[0])
+
+    def test_comma_period_and_ellipsis_behavior_remains_stable(self) -> None:
+        cfg = build_plugin_config({})
+        chunker = Chunker(cfg, _LLM())
+
+        comma_text = "这个方案先检查配置，再继续运行后面的完整回归测试。"
+        self.assertEqual(chunker.split(comma_text), [comma_text])
+
+        first = "这个方案已经完成了全部配置检查。"
+        second = "后面的完整回归测试也顺利通过了。"
+        self.assertEqual(chunker.split(first + second), [first + second])
+
+        ellipsis_first = "整理房间嘛……确实还是不太行。"
+        ellipsis_second = "不过正式任务已经全部按计划完成了。"
+        result = chunker.split(ellipsis_first + ellipsis_second)
+        self.assertEqual(result, [ellipsis_first + ellipsis_second])
+        self.assertFalse(any(segment.endswith("…") for segment in result))
+
     def test_ellipsis_is_continuation_not_sentence_boundary(self) -> None:
         cfg = build_plugin_config(
             {
@@ -850,12 +903,14 @@ class _ProviderRequest:
     def __init__(
         self,
         image_urls=None,
+        audio_urls=None,
         prompt="",
         system_prompt="",
         contexts=None,
         extra_user_content_parts=None,
     ):
         self.image_urls = image_urls or []
+        self.audio_urls = audio_urls or []
         self.prompt = prompt
         self.system_prompt = system_prompt
         self.contexts = contexts or []
@@ -1263,14 +1318,18 @@ class ConversationTrackerTests(unittest.TestCase):
         self.assertEqual(hint["old_texts"], ["旧消息包含|new=保留字"])
         self.assertEqual(hint["new_text"], "新消息包含|old=保留字")
 
-    def test_thinking_merge_is_disabled_by_default(self) -> None:
+    def test_thinking_merge_is_enabled_by_default(self) -> None:
         tracker = ConversationTracker()
         first = _Event("session", "第一句")
         second = _Event("session", "第二句")
         tracker.begin_request(first)
         tracker.begin_request(second)
         self.assertTrue(tracker.is_discarded(first))
-        self.assertFalse(tracker.has_merge_hint(second))
+        self.assertTrue(tracker.has_merge_hint(second))
+        self.assertEqual(
+            tracker.get_merge_hint(second)["previous_state"],
+            "thinking",
+        )
 
     def test_thinking_merge_marks_previous_state(self) -> None:
         tracker = ConversationTracker()
@@ -1375,6 +1434,92 @@ class ConversationTrackerTests(unittest.TestCase):
         event = _ImageEvent([_MockImage(url="http://example.com/a.png")])
         text = tracker._get_user_text(event)
         self.assertEqual(text, "[图片]")
+
+    def test_image_only_followup_merges_prior_text_without_placeholder(self) -> None:
+        tracker = ConversationTracker()
+        first = _Event("session", "好噢")
+        tracker.begin_request(first)
+
+        second = _ImageEvent([_MockImage(url="new-image.png")], message_text="")
+        second.unified_msg_origin = "session"
+        tracker.begin_request(second)
+
+        hint = tracker.get_merge_hint(second)
+        self.assertEqual(hint["old_texts"], ["好噢"])
+        self.assertEqual(hint["new_text"], "")
+        self.assertTrue(tracker.is_discarded(first))
+
+    def test_request_media_is_carried_into_default_interruption_merge(self) -> None:
+        tracker = ConversationTracker()
+        first = _Event("session", "先看看这张图")
+        tracker.begin_request(first)
+        tracker.capture_request_content(
+            first,
+            _ProviderRequest(
+                image_urls=["old-image.png"],
+                audio_urls=["old-audio.wav"],
+                extra_user_content_parts=[
+                    _TextPart("<image_caption>旧图里的角色在挥手</image_caption>")
+                ],
+            ),
+        )
+
+        second = _ImageEvent([_MockImage(url="new-image.png")], message_text="")
+        second.unified_msg_origin = "session"
+        tracker.begin_request(second)
+
+        hint = tracker.get_merge_hint(second)
+        self.assertEqual(hint["old_image_urls"], ["old-image.png"])
+        self.assertEqual(hint["old_audio_urls"], ["old-audio.wav"])
+        self.assertEqual(
+            hint["old_captions"],
+            ["<image_caption>旧图里的角色在挥手</image_caption>"],
+        )
+
+    def test_media_is_inherited_across_consecutive_interruptions(self) -> None:
+        tracker = ConversationTracker()
+        first = _Event("session", "第一条")
+        tracker.begin_request(first)
+        tracker.capture_request_content(
+            first,
+            _ProviderRequest(image_urls=["first.png"]),
+        )
+
+        second = _ImageEvent([_MockImage(url="second.png")], message_text="")
+        second.unified_msg_origin = "session"
+        tracker.begin_request(second)
+        tracker.capture_request_content(
+            second,
+            _ProviderRequest(image_urls=["second.png"]),
+        )
+
+        third = _Event("session", "第三条")
+        tracker.begin_request(third)
+
+        self.assertEqual(
+            tracker.get_merge_hint(third)["old_image_urls"],
+            ["first.png", "second.png"],
+        )
+
+    def test_invalid_caption_placeholders_are_not_carried(self) -> None:
+        tracker = ConversationTracker()
+        event = _Event("session", "一张图")
+        tracker.begin_request(event)
+        tracker.capture_request_content(
+            event,
+            _ProviderRequest(
+                extra_user_content_parts=[
+                    _TextPart("<image_caption>[Image Captioning Failed]</image_caption>"),
+                    _TextPart(
+                        "<image_caption>C:\\temp\\image.png</image_caption>"
+                    ),
+                    _TextPart("[Image Attachment: path C:\\temp\\image.png]"),
+                ]
+            ),
+        )
+
+        pending = tracker.get_state("session").pending[1]
+        self.assertEqual(pending.media.captions, [])
 
     def test_completed_turn_records_user_and_actual_reply(self) -> None:
         tracker = ConversationTracker()
@@ -2124,6 +2269,110 @@ class InterruptWindowTests(unittest.TestCase):
         tracker.begin_request(second)
         # window=0 表示不过滤时间
         self.assertTrue(tracker.is_discarded(first))
+
+
+class NativeFollowupDebounceTests(unittest.TestCase):
+    @staticmethod
+    def _plugin():
+        from astrbot_plugin_conversation_flow.main import ConversationalFlowPlugin
+
+        plugin = object.__new__(ConversationalFlowPlugin)
+        plugin.config = build_plugin_config({})
+        plugin.tracker = ConversationTracker()
+        plugin.logger = _Logger()
+        return plugin
+
+    @staticmethod
+    def _private_event(text: str) -> _Event:
+        event = _Event("aiocqhttp:FriendMessage:123", text)
+        event.is_at_or_wake_command = False
+        event.is_private_chat = lambda: True
+        return event
+
+    def test_early_hook_hands_active_turn_to_conv_flow(self) -> None:
+        plugin = self._plugin()
+        first = self._private_event("好噢")
+        second = self._private_event("[图片]")
+        plugin.tracker.begin_request(first)
+
+        calls = []
+        plugin._request_native_followup_stop = lambda event: calls.append(event) or True
+
+        asyncio.run(plugin.preempt_native_follow_up(second))
+
+        self.assertEqual(calls, [second])
+        self.assertTrue(second.get_extra(plugin.NATIVE_FOLLOWUP_BYPASSED_KEY))
+
+    def test_expired_turn_is_left_to_normal_core_flow(self) -> None:
+        plugin = self._plugin()
+        plugin.tracker.update_interrupt_config(window_ms=1000, scope="sender")
+        first = self._private_event("旧消息")
+        second = self._private_event("新消息")
+        plugin.tracker.begin_request(first)
+        plugin.tracker.get_state(first.unified_msg_origin).pending[1].started_at = 0
+        calls = []
+        plugin._request_native_followup_stop = lambda event: calls.append(event) or True
+
+        asyncio.run(plugin.preempt_native_follow_up(second))
+
+        self.assertEqual(calls, [])
+
+    def test_decorator_uses_max_priority(self) -> None:
+        import astrbot_plugin_conversation_flow.main  # noqa: F401
+
+        self.assertEqual(HOOK_PRIORITIES["preempt_native_follow_up"], sys.maxsize)
+
+
+class InterruptMediaInjectionTests(unittest.TestCase):
+    def test_plugin_prepends_old_media_and_caption(self) -> None:
+        from astrbot_plugin_conversation_flow.main import ConversationalFlowPlugin
+
+        plugin = object.__new__(ConversationalFlowPlugin)
+        plugin.config = build_plugin_config({})
+        plugin.logger = _Logger()
+        plugin.tracker = ConversationTracker()
+
+        old = _Event("session", "旧图")
+        plugin.tracker.begin_request(old)
+        plugin.tracker.capture_request_content(
+            old,
+            _ProviderRequest(
+                image_urls=["old.png"],
+                audio_urls=["old.wav"],
+                extra_user_content_parts=[
+                    _TextPart("<image_caption>旧图描述</image_caption>")
+                ],
+            ),
+        )
+
+        current = _ImageEvent([_MockImage(url="new.png")], message_text="")
+        current.unified_msg_origin = "session"
+        plugin.tracker.begin_request(current)
+        req = _ProviderRequest(
+            image_urls=["new.png"],
+            audio_urls=["new.wav"],
+            extra_user_content_parts=[],
+        )
+
+        asyncio.run(plugin._apply_merge(current, req, "session"))
+
+        self.assertEqual(req.image_urls, ["old.png", "new.png"])
+        self.assertEqual(req.audio_urls, ["old.wav", "new.wav"])
+        caption = req.extra_user_content_parts[0]
+        caption_text = (
+            caption.get("text", "")
+            if isinstance(caption, dict)
+            else getattr(caption, "text", "")
+        )
+        self.assertEqual(caption_text, "<image_caption>旧图描述</image_caption>")
+        merge_part = req.extra_user_content_parts[-1]
+        merge_text = (
+            merge_part.get("text", "")
+            if isinstance(merge_part, dict)
+            else getattr(merge_part, "text", "")
+        )
+        self.assertIn("把两条消息视作连续的语境一起回应", merge_text)
+        self.assertNotEqual(req.image_urls, ["image-placeholder"])
 
 
 class InterruptScopeTests(unittest.TestCase):
