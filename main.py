@@ -105,7 +105,7 @@ from .series_diagnostics import (
     logger,
 )
 
-__version__ = "0.8.2"
+__version__ = "0.8.3"
 RELATIONSHIP_PLUGIN_NAME = "astrbot_plugin_relationship"
 RELATIONSHIP_SNAPSHOT_CONTRACT_NAME = "relationship.snapshot"
 RELATIONSHIP_SNAPSHOT_CONTRACT_MAJOR = "1"
@@ -180,6 +180,9 @@ class ConversationalFlowPlugin(Star):
 
     # event extra 上用于标记"已发送分段"的 key
     SENT_CHUNKS_KEY = "conv_flow_sent_chunks"
+    # AstrBot 4.26.8 只会在 Agent 真正结束后触发 on_llm_response。
+    # 装饰阶段据此区分工具调用前的空白中间帧与真正终态空白结果。
+    LLM_RESPONSE_TERMINAL_KEY = "conv_flow_llm_response_terminal"
     # event extra 上用于标记"本请求被拦截命中（polite_reject 模式）"的 key
     INTERCEPTED_KEY = "conv_flow_intercepted"
     # event extra 上用于标记"群聊上下文本轮已注入"的 key
@@ -765,6 +768,20 @@ class ConversationalFlowPlugin(Star):
     ) -> None:
         """LLM 请求前：注册会话状态、做沉默判断、注入插话合并上下文。"""
         request_context = ensure_context(event, PHASE_LLM_REQUEST)
+        # AstrBot 4.26.8 在 AgentRunner 启动前只触发一次本钩子，工具循环内部
+        # 不会重入。复用同一 event 启动新 Agent 时必须先清掉上一轮终态。
+        self._set_extra(event, self.LLM_RESPONSE_TERMINAL_KEY, False)
+        set_flag(
+            request_context,
+            OWNER_CONVERSATION_FLOW,
+            "llm_response_terminal",
+            False,
+        )
+        add_reason(
+            request_context,
+            OWNER_CONVERSATION_FLOW,
+            "LLM_RESPONSE_TERMINAL_RESET",
+        )
         add_reason(
             request_context,
             OWNER_CONVERSATION_FLOW,
@@ -936,11 +953,23 @@ class ConversationalFlowPlugin(Star):
         self, event: AstrMessageEvent, response: Any, *args: Any, **kwargs: Any
     ) -> None:
         """LLM 响应后：检查是否被插话取代、检查沉默标记。"""
+        self._set_extra(event, self.LLM_RESPONSE_TERMINAL_KEY, True)
         request_context = ensure_context(event, PHASE_LLM_RESPONSE)
+        set_flag(
+            request_context,
+            OWNER_CONVERSATION_FLOW,
+            "llm_response_terminal",
+            True,
+        )
         add_reason(
             request_context,
             OWNER_CONVERSATION_FLOW,
             "FLOW_RESPONSE_STARTED",
+        )
+        add_reason(
+            request_context,
+            OWNER_CONVERSATION_FLOW,
+            "LLM_RESPONSE_TERMINAL",
         )
         seq = event.get_extra(ConversationTracker.SEQ_EXTRA_KEY)
         self.tracker.mark_response_started(event)
@@ -1004,7 +1033,12 @@ class ConversationalFlowPlugin(Star):
         # 2) 获取结果文本
         result = self._get_result(event)
         if result is None:
-            self.tracker.finish_response(event)
+            self._finish_empty_result_if_terminal(
+                event,
+                seq,
+                request_context,
+                "missing_result",
+            )
             return
 
         # 仅对 LLM 生成的纯文本结果做处理
@@ -1027,10 +1061,20 @@ class ConversationalFlowPlugin(Star):
         try:
             text = result.get_plain_text() or ""
         except Exception:
-            self.tracker.finish_response(event)
+            self._finish_empty_result_if_terminal(
+                event,
+                seq,
+                request_context,
+                "plain_text_error",
+            )
             return
         if not text or not text.strip():
-            self.tracker.finish_response(event)
+            self._finish_empty_result_if_terminal(
+                event,
+                seq,
+                request_context,
+                "blank_llm_text",
+            )
             return
 
         # 3) 沉默标记二次校验（注入模式、拦截命中、场景指令注入时都需检测）
@@ -1051,6 +1095,12 @@ class ConversationalFlowPlugin(Star):
                 text = stripped
                 text_modified = True
             if not text or not text.strip():
+                self._finish_empty_result_if_terminal(
+                    event,
+                    seq,
+                    request_context,
+                    "blank_after_plain_text_cleanup",
+                )
                 return
 
         # 5) 检查是否有非文本组件（图片、音频等），有则跳过分段和文本替换。
@@ -3471,6 +3521,41 @@ class ConversationalFlowPlugin(Star):
             return event.get_result()
         except Exception:
             return None
+
+    def _finish_empty_result_if_terminal(
+        self,
+        event: AstrMessageEvent,
+        seq: Any,
+        request_context: dict[str, Any],
+        frame_kind: str,
+    ) -> bool:
+        """仅在 Agent 终态收敛空白结果，工具前中间帧继续保留 pending。"""
+        terminal = bool(self._get_extra(event, self.LLM_RESPONSE_TERMINAL_KEY))
+        if not terminal:
+            add_reason(
+                request_context,
+                OWNER_CONVERSATION_FLOW,
+                "INTERMEDIATE_EMPTY_FRAME_DEFERRED",
+            )
+            self.logger.debug(
+                "[conv-flow] seq=%s deferred intermediate empty frame (%s)",
+                seq,
+                frame_kind,
+            )
+            return False
+
+        add_reason(
+            request_context,
+            OWNER_CONVERSATION_FLOW,
+            "TERMINAL_EMPTY_FRAME_COMPLETED",
+        )
+        self.logger.debug(
+            "[conv-flow] seq=%s completed terminal empty frame (%s)",
+            seq,
+            frame_kind,
+        )
+        self.tracker.finish_response(event)
+        return True
 
     @staticmethod
     def _set_extra(event: AstrMessageEvent, key: str, value: Any) -> None:

@@ -3417,6 +3417,237 @@ class ScenePromptTests(unittest.TestCase):
         self.assertIn("不要分点回答", text)
 
 
+class _TerminalFrameResult:
+    def __init__(self, text: str) -> None:
+        self.text = text
+        self.chain = [_MockPlain(text)]
+
+    def is_llm_result(self) -> bool:
+        return True
+
+    def get_plain_text(self) -> str:
+        return self.text
+
+
+class _TerminalFrameEvent(_Event):
+    def __init__(self, umo: str, text: str, result_text: str) -> None:
+        super().__init__(umo, text)
+        self._result = _TerminalFrameResult(result_text)
+        self.sent: list[str] = []
+        self.stopped = False
+
+    def get_result(self):
+        return self._result
+
+    def set_result_text(self, text: str) -> None:
+        self._result = _TerminalFrameResult(text)
+
+    def clear_result(self) -> None:
+        self._result.chain = []
+
+    def stop_event(self) -> None:
+        self.stopped = True
+
+    def plain_result(self, text: str):
+        return types.SimpleNamespace(text=text)
+
+    async def send(self, result) -> None:
+        self.sent.append(str(getattr(result, "text", "")))
+
+    def get_group_id(self):
+        return ""
+
+
+class AgentTerminalFrameTests(unittest.IsolatedAsyncioTestCase):
+    @staticmethod
+    def _plugin():
+        from astrbot_plugin_conversation_flow.main import ConversationalFlowPlugin
+
+        plugin = object.__new__(ConversationalFlowPlugin)
+        plugin.config = build_plugin_config(
+            {
+                "silence_enabled": False,
+                "plain_text_mode": False,
+                "chunking_enabled": True,
+                "chunking_delay_mode": "fixed",
+                "chunking_segment_interval_ms": 0,
+                "private_context_bridge_enabled": True,
+                "private_context_bridge_max_turns": 1,
+                "private_context_bridge_short_max_chars": 40,
+                "recent_activity_context_enabled": False,
+                "group_context_enabled": False,
+                "group_air_guard_enabled": False,
+                "followup_guard_enabled": False,
+                "mood_enabled": False,
+            }
+        )
+        plugin.logger = _Logger()
+        plugin.tracker = ConversationTracker(max_history_turns=1)
+        plugin.chunker = Chunker(plugin.config, types.SimpleNamespace())
+        plugin.silence_judge = types.SimpleNamespace(
+            should_inject=lambda: False,
+            should_prejudge=lambda: False,
+            is_silence_response=lambda _text: False,
+        )
+        plugin._stats = {
+            "chunked": 0,
+            "private_context_bridged": 0,
+            "total_requests": 0,
+        }
+
+        async def no_voice(_event, _result):
+            return False
+
+        plugin._voice_delivery_requested = no_voice
+        return plugin
+
+    @staticmethod
+    def _instruction_text(req) -> str:
+        part = req.extra_user_content_parts[-1]
+        return getattr(part, "text", None) or part.get("text", "")
+
+    async def test_intermediate_blank_keeps_final_chunked_turn_for_short_followup(
+        self,
+    ) -> None:
+        plugin = self._plugin()
+        umo = "PrivateMessage:qq:terminal-frame"
+
+        old_event = _Event(umo, "旧话题是什么")
+        plugin.tracker.begin_request(old_event, detect_interrupt=False)
+        plugin.tracker.finish_response(old_event, bot_text="这是旧话题回答")
+
+        event = _TerminalFrameEvent(umo, "讲一个新的短故事", "  \n")
+        plugin.tracker.begin_request(event, detect_interrupt=False)
+
+        await plugin.on_decorating_result(event)
+
+        state = plugin.tracker.get_state(umo)
+        self.assertIn(2, state.pending)
+        self.assertFalse(
+            event.get_extra(plugin.LLM_RESPONSE_TERMINAL_KEY),
+            "工具调用前的空白装饰帧不应被标记为 Agent 终态",
+        )
+
+        final_text = (
+            "这是最终第一段正文，描述刚刚完成的新故事。\n\n"
+            "这是最终第二段正文，也是需要下一句短评承接的结尾。"
+        )
+        event.set_result_text(final_text)
+        await plugin.on_llm_response(
+            event,
+            types.SimpleNamespace(completion_text=final_text),
+        )
+        await plugin.on_decorating_result(event)
+
+        self.assertTrue(event.get_extra(plugin.LLM_RESPONSE_TERMINAL_KEY))
+        self.assertEqual(len(event.sent), 2)
+        self.assertEqual(
+            [turn.bot_text for turn in plugin.tracker.get_recent_turns(event)],
+            [final_text.replace("\n\n", "\n")],
+        )
+
+        followup = _Event(umo, "这个结尾什么意思？")
+        plugin.tracker.begin_request(followup, detect_interrupt=False)
+        req = types.SimpleNamespace(
+            extra_user_content_parts=[],
+            system_prompt="",
+            contexts=[],
+        )
+
+        plugin._inject_private_context_bridge(
+            followup,
+            req,
+            seq=3,
+            user_text=followup.message_str,
+        )
+
+        instruction = self._instruction_text(req)
+        self.assertIn("最终第一段正文", instruction)
+        self.assertIn("最终第二段正文", instruction)
+        self.assertNotIn("旧话题回答", instruction)
+
+    async def test_terminal_blank_frame_finishes_pending_without_completed_turn(
+        self,
+    ) -> None:
+        plugin = self._plugin()
+        event = _TerminalFrameEvent(
+            "PrivateMessage:qq:terminal-blank",
+            "执行一个工具任务",
+            "   ",
+        )
+        plugin.tracker.begin_request(event, detect_interrupt=False)
+
+        await plugin.on_llm_response(
+            event,
+            types.SimpleNamespace(completion_text=""),
+        )
+        await plugin.on_decorating_result(event)
+
+        self.assertTrue(event.get_extra(plugin.LLM_RESPONSE_TERMINAL_KEY))
+        state = plugin.tracker.get_state(event.unified_msg_origin)
+        self.assertEqual(state.pending, {})
+        self.assertEqual(plugin.tracker.get_recent_turns(event), [])
+
+    async def test_reused_event_resets_previous_terminal_before_intermediate_blank(
+        self,
+    ) -> None:
+        plugin = self._plugin()
+        event = _TerminalFrameEvent(
+            "PrivateMessage:qq:reused-event",
+            "继续执行另一个 Agent 请求",
+            "   ",
+        )
+        seq = plugin.tracker.begin_request(event, detect_interrupt=False)
+        event.set_extra(plugin.LLM_RESPONSE_TERMINAL_KEY, True)
+
+        async def false_async(*_args, **_kwargs):
+            return False
+
+        async def none_async(*_args, **_kwargs):
+            return None
+
+        plugin._apply_air_guard = false_async
+        plugin._apply_mood = false_async
+        plugin._apply_scene_awareness = false_async
+        plugin._compose_series_prompt_fragments = lambda *_args, **_kwargs: False
+        plugin._inject_image_intent_instruction = lambda *_args, **_kwargs: None
+        plugin._inject_group_context = lambda *_args, **_kwargs: None
+        plugin._inject_topic_context = lambda *_args, **_kwargs: None
+        plugin._inject_recent_activity_context = none_async
+        plugin._inject_private_context_bridge = lambda *_args, **_kwargs: None
+        plugin._inject_reply_context = none_async
+        plugin._inject_plain_text_instruction = lambda *_args, **_kwargs: None
+        plugin._inject_chunking_instruction = lambda *_args, **_kwargs: None
+        plugin._inject_natural_tool_call_instruction = lambda *_args, **_kwargs: None
+        plugin.intercept_judge = types.SimpleNamespace(
+            should_inject=lambda _umo: False
+        )
+        req = types.SimpleNamespace(
+            prompt=event.message_str,
+            system_prompt="",
+            contexts=[],
+            image_urls=[],
+            audio_urls=[],
+            extra_user_content_parts=[],
+        )
+
+        await plugin.on_llm_request(event, req)
+
+        self.assertFalse(event.get_extra(plugin.LLM_RESPONSE_TERMINAL_KEY))
+        finish_calls: list[str] = []
+        original_finish = plugin.tracker.finish_response
+
+        def finish_spy(target_event, bot_text=""):
+            finish_calls.append(bot_text)
+            return original_finish(target_event, bot_text=bot_text)
+
+        plugin.tracker.finish_response = finish_spy
+        await plugin.on_decorating_result(event)
+
+        self.assertEqual(finish_calls, [])
+        self.assertIn(seq, plugin.tracker.get_state(event.unified_msg_origin).pending)
+
+
 class DecoratingHookPriorityTests(unittest.TestCase):
     """CONVENTIONS.md 3.3：言的分段必须先于声的语音合成（优先级 600 > 400）。"""
 
