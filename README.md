@@ -111,7 +111,7 @@ tracker；只有带终态标志的空白帧才清理 pending。最终非空正�
 | `silence_strategy` | `inject` | `inject` / `prejudge` / `both` |
 | `silence_marker` | `<SILENCE/>` | inject 策略下 LLM 输出的沉默标记 |
 | `silence_notify_text` | `""` | 沉默时是否发送提示文本（如 `…`），留空则完全静默 |
-| `silence_prejudge_provider_id` | `""` | 预判断专用 Provider，留空按 4 层 fallback 解析 |
+| `silence_prejudge_provider_id` | `""` | 预判断专用 Provider，留空则自动跟随当前对话模型（插件专用 LLM Provider 优先） |
 | `silence_prejudge_max_chars` | `200` | 超过此长度的用户消息跳过预判断 |
 
 #### 智能分段

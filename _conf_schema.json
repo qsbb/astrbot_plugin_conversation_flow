@@ -7,7 +7,7 @@
   },
   "silence_strategy": {
     "type": "string",
-    "description": "[沉默判断] 判断策略",
+    "description": "[沉默判断] 判断策略（inject=指令注入 / prejudge=独立预判 / both=两者结合）",
     "options": ["inject", "prejudge", "both"],
     "hint": "inject=指令注入（省一次 LLM 调用，推荐）；prejudge=独立预判断（更可控但慢）；both=二者结合。",
     "default": "inject"
@@ -21,21 +21,22 @@
   "silence_notify_text": {
     "type": "string",
     "description": "[沉默判断] 沉默时发送的提示文本",
-    "hint": "留空则完全静默；填写则会发送此文本作为暗示（如'…'）。仅在 silence_strategy=inject 时生效。",
+    "hint": "留空则完全静默；填写则会发送此文本作为暗示（如'…'）。仅在判断策略选择 inject（指令注入）时生效。",
     "default": ""
   },
   "silence_prejudge_provider_id": {
     "type": "string",
     "_special": "select_provider",
     "description": "[沉默判断] 预判断专用 LLM Provider",
-    "hint": "仅在 silence_strategy=prejudge 或 both 时使用。留空用当前对话模型，建议选一个快且便宜的模型。",
+    "hint": "仅在判断策略选择 prejudge（独立预判）或 both（两者结合）时使用。留空则自动跟随当前对话模型（若已配置插件专用 LLM Provider 则优先使用）；建议选一个快且便宜的模型。",
     "default": ""
   },
   "silence_prejudge_max_chars": {
     "type": "int",
     "description": "[沉默判断] 预判断输入文本最大字符数",
     "hint": "超过此长度的用户消息不参与预判断（认为长文本通常需要正常回复）。",
-    "default": 200
+    "default": 200,
+    "minimum": 10
   },
   "plain_text_mode": {
     "type": "bool",
@@ -59,13 +60,15 @@
     "type": "int",
     "description": "[智能分段] 触发分段的最小回复长度",
     "hint": "常规回复短于此长度（字符数）保持单条发送；但若无双空行、存在全角/半角强语气句界且前后都是完整自然句，可放宽一次拆分，避免长短句黏在一起。默认 60。",
-    "default": 60
+    "default": 60,
+    "minimum": 1
   },
   "chunking_max_segments": {
     "type": "int",
     "description": "[智能分段] 单次回复最大分段数",
     "hint": "超过此数量时会合并末尾的多段为一段，避免刷屏。默认 5。",
-    "default": 5
+    "default": 5,
+    "minimum": 1
   },
   "chunking_preserve_paragraphs": {
     "type": "bool",
@@ -77,7 +80,8 @@
     "type": "int",
     "description": "[智能分段] 需要进一步拆分的段落长度",
     "hint": "仅超过此长度的自然段才按句末标点继续拆分。默认 20，作为 LLM 主动分段（双空行）未生效时的保底策略。",
-    "default": 20
+    "default": 20,
+    "minimum": 10
   },
   "chunking_protect_code_block": {
     "type": "bool",
@@ -88,12 +92,12 @@
   "chunking_llm_assist": {
     "type": "bool",
     "description": "[智能分段] 对长文本启用 LLM 辅助切分",
-    "hint": "仅当启发式切分得到超过 max_segments 段时启用，调用一次轻量 LLM 重新规划。会额外消耗 token。",
+    "hint": "仅当自动切分得到的段数超过「单次回复最大分段数」时启用，调用一次轻量 LLM 重新规划。会额外消耗 token。",
     "default": false
   },
   "chunking_delay_mode": {
     "type": "string",
-    "description": "[分段延迟] 延迟模式",
+    "description": "[分段延迟] 延迟模式（fixed=每段固定延迟 / per_char=按下一段字数计算延迟）",
     "options": ["fixed", "per_char"],
     "hint": "fixed=每段固定延迟；per_char=按下一段有效字数乘以每字延迟，并受最小/最大值限制。推荐 per_char。",
     "default": "per_char"
@@ -102,25 +106,29 @@
     "type": "int",
     "description": "[分段延迟] 固定分段延迟（毫秒）",
     "hint": "仅在 fixed 模式生效。默认 800ms。设为 0 则无间隔立即发送。",
-    "default": 800
+    "default": 800,
+    "minimum": 0
   },
   "chunking_delay_per_char_ms": {
     "type": "int",
     "description": "[分段延迟] 按字数延迟系数（毫秒/字）",
     "hint": "仅在 per_char 模式生效。推荐 35ms/字。",
-    "default": 35
+    "default": 35,
+    "minimum": 0
   },
   "chunking_delay_min_ms": {
     "type": "int",
     "description": "[分段延迟] 按字数模式最小延迟（毫秒）",
     "hint": "per_char 模式下每段延迟的下限。默认 500ms。",
-    "default": 500
+    "default": 500,
+    "minimum": 0
   },
   "chunking_delay_max_ms": {
     "type": "int",
     "description": "[分段延迟] 按字数模式最大延迟（毫秒）",
     "hint": "per_char 模式下每段延迟的上限。默认 4000ms。",
-    "default": 4000
+    "default": 4000,
+    "minimum": 0
   },
   "interrupt_enabled": {
     "type": "bool",
@@ -130,7 +138,7 @@
   },
   "interrupt_scope": {
     "type": "string",
-    "description": "[插话中断] 群聊中断作用域",
+    "description": "[插话中断] 群聊中断作用域（room=本群任何新消息 / sender=仅同一发送者 / mention_or_sender=同一发送者或明确@Bot）",
     "options": ["room", "sender", "mention_or_sender"],
     "hint": "room=房间内任何新消息可中断旧回复；sender=仅同一发送者的新消息可中断（推荐）；mention_or_sender=同一发送者或明确@/回复bot时中断。",
     "default": "sender"
@@ -139,17 +147,19 @@
     "type": "int",
     "description": "[插话中断] 插话检测时间窗口（毫秒）",
     "hint": "仅当上一条消息在此时间窗口内且尚未完成回复时，新消息才算插话并中断旧回复。超过此时间的旧请求视为已完成，不会被打断。默认 30000ms。",
-    "default": 30000
+    "default": 30000,
+    "minimum": 0
   },
   "interrupt_state_ttl_ms": {
     "type": "int",
     "description": "[插话中断] 会话状态保留时长（毫秒）",
     "hint": "超过此时长未活动的会话状态会被清理，避免内存泄漏。默认 600000ms（10分钟）。",
-    "default": 600000
+    "default": 600000,
+    "minimum": 10000
   },
   "interrupt_merge_strategy": {
     "type": "string",
-    "description": "[插话中断] 插话合并策略",
+    "description": "[插话中断] 插话合并策略（append=旧消息追加为上下文 / rewrite=让 LLM 重写合并 / discard_old=直接丢弃旧响应）",
     "options": ["append", "rewrite", "discard_old"],
     "hint": "append=把旧消息作为追加上下文注入（推荐）；rewrite=让 LLM 重写为新语境；discard_old=直接丢弃旧响应不合并。",
     "default": "append"
@@ -157,14 +167,15 @@
   "experimental_thinking_merge_enabled": {
     "type": "bool",
     "description": "[插话中断] 实验性：打断思考并合并到下一轮",
-    "hint": "兼容开关，默认关闭。新消息到达后，尚未发送的旧结果和旧消息现在始终会作废并合并到下一次请求；开启本项后，额外使用未回复历史模板来弥补公开历史过短的 Provider，可能增加重复 Token。当前无法取消 Provider 端推理，频繁插话仍可能消耗 Token。",
+    "hint": "开启后，插话时额外把插件记录的未回复历史注入新请求，弥补公开历史过短的 Provider。风险：可能增加重复 Token，频繁插话时更明显，默认关闭。",
     "default": false
   },
   "interrupt_thinking_merge_context_count": {
     "type": "int",
     "description": "[插话中断] 打断后注入的历史上下文条数",
-    "hint": "基础插话合并始终会保留旧文本与真实媒体；开启兼容历史模板后，再从插件维护的未回复消息中取最近 N 条注入新请求，弥补公开历史过短导致的上下文缺失。默认 5 条；设为 0 则不主动注入（仅依赖 LLM 自带历史）。仅在 experimental_thinking_merge_enabled=true 时生效。",
-    "default": 5
+    "hint": "从插件维护的未回复消息中取最近 N 条注入新请求，弥补公开历史过短导致的上下文缺失。仅在开启「实验性：打断思考并合并到下一轮」时生效；默认 5 条，设为 0 则不主动注入。",
+    "default": 5,
+    "minimum": 0
   },
   "private_context_bridge_enabled": {
     "type": "bool",
@@ -176,13 +187,17 @@
     "type": "int",
     "description": "[私聊上下文] 最近完成轮次数",
     "hint": "承接兜底最多保留和注入多少个已完成轮次，仅驻留内存，范围 1-10。默认 3。",
-    "default": 3
+    "default": 3,
+    "minimum": 1,
+    "maximum": 10
   },
   "private_context_bridge_short_max_chars": {
     "type": "int",
     "description": "[私聊上下文] 短承接消息长度上限",
     "hint": "不超过该字符数的私聊消息会主动获得最近轮次提示，用于名称、简称、省略式追问和纠正。范围 4-200，默认 40。",
-    "default": 40
+    "default": 40,
+    "minimum": 4,
+    "maximum": 200
   },
   "recent_activity_context_enabled": {
     "type": "bool",
@@ -226,7 +241,8 @@
     "type": "int",
     "description": "[群聊上下文] 群聊上下文最大消息条数",
     "hint": "被唤醒时获取的最近群聊消息条数上限。推荐 10-20 条。",
-    "default": 10
+    "default": 10,
+    "minimum": 1
   },
   "group_context_only_when_woken": {
     "type": "bool",
@@ -244,7 +260,9 @@
     "type": "int",
     "description": "[群聊上下文] 反向唤醒时间窗（秒）",
     "hint": "只会承接该秒数内同一用户尚未消费的最近正文。范围 1-120，默认 15；时间窗越大，误取旧话题的概率越高。",
-    "default": 15
+    "default": 15,
+    "minimum": 1,
+    "maximum": 120
   },
   "group_context_record_bot": {
     "type": "bool",
@@ -268,19 +286,22 @@
     "type": "int",
     "description": "[读空气] 读空气检测窗口秒数",
     "hint": "统计最近多少秒内 Bot 在本群的回复次数。建议 60-180 秒；越短越宽松。",
-    "default": 120
+    "default": 120,
+    "minimum": 10
   },
   "group_air_guard_max_bot_replies": {
     "type": "int",
     "description": "[读空气] 窗口内最大 Bot 回复数",
     "hint": "窗口内 Bot 回复达到该次数后，后续即使被明确唤醒也会硬拦截，用来兜住机器人互相引用的死循环。注意这条规则不区分说话的是人还是 Bot，调太小会把正常连续对话的人也拦掉，建议保持 6 或更大。填 0 关闭这条规则，只留礼貌收尾判定。",
-    "default": 6
+    "default": 6,
+    "minimum": 0
   },
   "group_air_guard_polite_loop_limit": {
     "type": "int",
     "description": "[读空气] 礼貌收尾循环上限",
     "hint": "窗口内 Bot 已回复过几次晚安/谢谢/拜拜等收尾话术后，再遇到同类消息就静默。建议 1-2。填 0 关闭这条规则。",
-    "default": 2
+    "default": 2,
+    "minimum": 0
   },
   "followup_guard_enabled": {
     "type": "bool",
@@ -332,7 +353,8 @@
     "type": "int",
     "description": "[场景感知] 参与昵称匹配的最近发言人数",
     "hint": "从群聊缓冲中取最近多少位发言者的昵称，用于判断「这句话里提到的名字是不是群里某个人」。默认 8 人；填 0 表示不限制（取整个缓冲）。",
-    "default": 8
+    "default": 8,
+    "minimum": 0
   },
   "mood_enabled": {
     "type": "bool",
@@ -350,55 +372,68 @@
     "type": "int",
     "description": "[拟人化情绪] 疲劳统计窗口秒数",
     "hint": "只统计该窗口内的互动与复读；长时间没人说话后情绪会自然恢复。默认 300 秒。",
-    "default": 300
+    "default": 300,
+    "minimum": 10
   },
   "mood_frequent_after": {
     "type": "int",
     "description": "[拟人化情绪] 开始厌烦的窗口互动数",
     "hint": "窗口内超过该次数后开始降低回复意愿。默认 6；越小越容易烦。",
-    "default": 6
+    "default": 6,
+    "minimum": 1
   },
   "mood_streak_after": {
     "type": "int",
     "description": "[拟人化情绪] 开始疲劳的连续对话轮数",
     "hint": "连续对话超过该轮数后开始降低回复意愿。默认 8。",
-    "default": 8
+    "default": 8,
+    "minimum": 1
   },
   "mood_streak_gap_seconds": {
     "type": "int",
     "description": "[拟人化情绪] 连续对话中断秒数",
     "hint": "两条消息间隔超过该秒数后，连续轮数重新计算。默认 90 秒。",
-    "default": 90
+    "default": 90,
+    "minimum": 1
   },
   "mood_lazy_score": {
     "type": "int",
     "description": "[拟人化情绪] 懒散阈值",
     "hint": "回复意愿低于该分数时，Bot 仍会回复但会更短、更随口。范围 0-100，默认 72。",
-    "default": 72
+    "default": 72,
+    "minimum": 0,
+    "maximum": 100
   },
   "mood_annoyed_score": {
     "type": "int",
     "description": "[拟人化情绪] 烦躁阈值",
     "hint": "回复意愿低于该分数时，Bot 可自行输出沉默标记或只敷衍一句。默认 45。",
-    "default": 45
+    "default": 45,
+    "minimum": 0,
+    "maximum": 100
   },
   "mood_silence_score": {
     "type": "int",
     "description": "[拟人化情绪] 概率硬静默阈值",
     "hint": "回复意愿低于该分数时，可在调用 LLM 前直接装作没看见。默认 25。",
-    "default": 25
+    "default": 25,
+    "minimum": 0,
+    "maximum": 100
   },
   "mood_silence_chance_percent": {
     "type": "int",
     "description": "[拟人化情绪] 极低意愿时静默概率",
     "hint": "达到硬静默阈值后的不回复概率，范围 0-100。默认 45%；填 0 关闭硬静默，只让模型自行决定。",
-    "default": 45
+    "default": 45,
+    "minimum": 0,
+    "maximum": 100
   },
   "mood_max_consecutive_silences": {
     "type": "int",
     "description": "[拟人化情绪] 最大连续静默次数",
     "hint": "连续装作没看见达到该次数后，下一条强制交给模型回应，避免长期失联。默认 2；填 0 表示不限制。",
-    "default": 2
+    "default": 2,
+    "minimum": 0
   },
   "natural_tool_call_enabled": {
     "type": "bool",
@@ -427,13 +462,14 @@
   "topic_context_max_messages": {
     "type": "int",
     "description": "[话题上下文] 话题上下文最大消息条数",
-    "hint": "注入的最近消息条数上限。默认 10 条。仅在 topic_context_enabled=true 时生效。",
-    "default": 10
+    "hint": "注入的最近消息条数上限。默认 10 条。仅在开启「启用话题上下文注入」时生效。",
+    "default": 10,
+    "minimum": 1
   },
   "intercept_enabled": {
     "type": "bool",
     "description": "[智能拦截] 启用智能拦截（实验性）",
-    "hint": "开启后向主 LLM 注入拦截指令，让模型在主对话思维链中一并判断用户输入是否为不良内容（色情/暴力/辱骂/违法/越狱等），命中则礼貌拒绝或输出 silence_marker 静默。不做独立 LLM 预判断，不增加额外调用。白名单会话完全跳过。",
+    "hint": "开启后向主 LLM 注入拦截指令，让模型在主对话思维链中一并判断用户输入是否为不良内容（色情/暴力/辱骂/违法/越狱等），命中则礼貌拒绝或输出沉默标记静默。不做独立 LLM 预判断，不增加额外调用。白名单会话完全跳过。",
     "default": false
   },
   "intercept_whitelist": {
@@ -446,7 +482,7 @@
     "type": "string",
     "_special": "select_provider",
     "description": "[通用] 插件专用 LLM Provider",
-    "hint": "用于预判断、LLM 辅助切分等插件内部 LLM 调用。留空则按 4 层 fallback 解析（当前对话模型 → 全局默认）。",
+    "hint": "用于沉默预判断、LLM 辅助切分等插件内部 LLM 调用。留空则自动依次尝试可用模型（当前对话模型 → 全局默认模型），通常无需填写。",
     "default": ""
   },
   "log_level": {
