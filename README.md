@@ -59,10 +59,19 @@
 
 ### 环境关心与主动交付契约
 
+言提供两个主动交付契约。旧的 `conversation.proactive_delivery@1.0` 继续负责境的环境候选
+校验、模型决策与兼容编排；新增的 `conversation.proactive_message@1.0` 只接收已经生成好的
+主动文本，负责私聊授权复核、言的自然分段、延迟和发送，不额外调用 LLM。完整请求/响应
+schema、超时和降级行为见 [`docs/proactive-message-contract.md`](docs/proactive-message-contract.md)。
+
+- `conversation.proactive_message@1.0` 的调用方（例如 `astrbot_plugin_private_companion.daily_state_tick`）必须调用言的 `deliver_proactive_message(request)`，传入自然人 `person_id`、私聊 `recipient_umo`、来源标识和已生成文本；不得直接调用 `StarTools.send_message`。
+- 契约会重新调用序的 `identity.proactive_authorization@1` 与情的 `relationship.delivery_identity@1`。缺失、版本不兼容、目标不是私聊、身份未授权或文本安全校验失败时均失败关闭。
+- 主动文本保留 LLM 双换行作为段落意图，复用 `chunking_enabled`、`chunking_min_length`、`chunking_max_segments`、分段延迟和现有纯文本清理；发送失败时只在尚未确认发送任何段落时回退一次完整文本，部分发送后不重复已发送段落。
+
 言提供 `conversation.proactive_delivery@1.0`，作为境的环境候选进入回复或主动私聊前的唯一交付入口：
 
 - 普通回复：`prepare_environment_reply_context()` 只接受新鲜的 `environment.opportunity@1` 结构化事实，先调用序确认完整 UMO 的主人私聊权限，再调用情确认该会话属于配置的自然人。通过后只生成一段“可忽略、不抢当前话题”的背景约束，仍由本轮主模型一次决定是否自然提及。
-- 真正主动消息：`deliver_environment_opportunity()` 重复执行同一组失败关闭校验，把环境事实和情的派生语气建议交给对话模型；模型可选择不发。选择发送时，言生成一条短私聊并调用平台发送接口。
+- 真正主动消息：`deliver_environment_opportunity()` 重复执行同一组失败关闭校验，把环境事实和情的派生语气建议交给对话模型；模型可选择不发。选择发送时，言把已生成文本交给共享主动文本交付内部函数，因此环境消息也会按段发送。
 - 安全边界：言不信任境传入的身份结论，不接受旧候选、未知事件/事实字段、群聊授权或缺失依赖；不会在序/情不可用时改用模板直发。环境 JSON 只作为数据，不作为指令。主动文本在发送前会移除格式、限制为 120 字，并拦截内部机制泄漏与服务式追问；模型异常或返回格式错误时不发送。
 
 安静时段、严重度门槛、事件去重、每日上限和暂停开关由境在调用交付契约前处理；序只授权收件权限，情只提供关系表达建议，言只决定表达与发送。普通回复链不增加第二次 LLM 判断，只有显式开启的真正主动消息会在后台额外调用一次模型。

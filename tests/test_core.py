@@ -327,6 +327,16 @@ class ProactiveEnvironmentDeliveryTests(unittest.TestCase):
         plugin.logger = _Logger()
         plugin._contract_warnings = set()
         plugin.llm = LLM()
+        plugin.config = build_plugin_config(
+            {
+                "chunking_enabled": True,
+                "chunking_min_length": 30,
+                "chunking_max_segments": 5,
+                "chunking_delay_mode": "fixed",
+                "chunking_segment_interval_ms": 0,
+            }
+        )
+        plugin.chunker = Chunker(plugin.config, types.SimpleNamespace())
         return plugin
 
     def test_reply_context_fails_closed_without_identity_authorizer(self):
@@ -455,6 +465,168 @@ class ProactiveEnvironmentDeliveryTests(unittest.TestCase):
             )
         self.assertTrue(sent["sent"])
         self.assertLessEqual(len(sender.await_args.args[1][0].text), 120)
+
+    def test_proactive_message_contract_is_versioned_and_structured(self):
+        plugin = self._plugin()
+        contract = plugin.proactive_message_contract()
+
+        self.assertEqual(contract["name"], "conversation.proactive_message")
+        self.assertEqual(contract["version"], "1.0")
+        self.assertIn("deliver_prepared_private_text", contract["capabilities"])
+        self.assertIn("identity.proactive_authorization@1", contract["requires"])
+        self.assertEqual(
+            contract["request_schema"]["required"],
+            (
+                "contract",
+                "version",
+                "source",
+                "person_id",
+                "recipient_umo",
+                "text",
+            ),
+        )
+        self.assertEqual(contract["send_timeout_seconds"], 30.0)
+
+    def test_proactive_message_rejects_incompatible_request_without_authorization(self):
+        plugin = self._plugin()
+        result = asyncio.run(
+            plugin.deliver_proactive_message(
+                {
+                    "contract": "conversation.proactive_message",
+                    "version": "2.0",
+                    "source": "caller",
+                    "person_id": "owner-person",
+                    "recipient_umo": "qq:FriendMessage:owner",
+                    "text": "不应进入授权阶段。",
+                }
+            )
+        )
+
+        self.assertFalse(result["sent"])
+        self.assertEqual(result["reason"], "incompatible_contract")
+
+    def test_proactive_message_delivers_chunked_private_text_without_llm(self):
+        from unittest.mock import AsyncMock, patch
+
+        from astrbot_plugin_conversation_flow import main as flow_main
+
+        plugin = self._plugin()
+        plugin.config.chunking_segment_interval_ms = 7
+        plugin.llm.chat_json = AsyncMock()
+        sender = AsyncMock()
+        sleeper = AsyncMock()
+        request = {
+            "contract": "conversation.proactive_message",
+            "version": "1.0",
+            "source": "astrbot_plugin_private_companion.daily_state_tick",
+            "person_id": "owner-person",
+            "recipient_umo": "qq:FriendMessage:owner",
+            "text": (
+                "主动消息第一段需要保持完整，不应和下一段揉在一起。\n\n"
+                "主动消息第二段也要作为独立的自然朗读段落发送。"
+            ),
+        }
+        with (
+            patch.object(flow_main.StarTools, "send_message", sender, create=True),
+            patch.object(flow_main.asyncio, "sleep", sleeper),
+        ):
+            result = asyncio.run(plugin.deliver_proactive_message(request))
+
+        self.assertTrue(result["sent"])
+        self.assertEqual(result["reason"], "sent")
+        self.assertEqual(result["segment_count"], 2)
+        self.assertEqual(result["sent_count"], 2)
+        self.assertFalse(result["fallback_used"])
+        self.assertEqual(sender.await_count, 2)
+        self.assertEqual(sleeper.await_count, 1)
+        self.assertFalse(plugin.llm.chat_json.await_count)
+        self.assertEqual(
+            [call.args[1][0].text for call in sender.await_args_list],
+            [
+                "主动消息第一段需要保持完整，不应和下一段揉在一起。",
+                "主动消息第二段也要作为独立的自然朗读段落发送。",
+            ],
+        )
+
+    def test_proactive_message_permission_failure_is_fail_closed(self):
+        from unittest.mock import AsyncMock, patch
+
+        from astrbot_plugin_conversation_flow import main as flow_main
+
+        plugin = self._plugin(with_identity=False)
+        sender = AsyncMock()
+        request = {
+            "contract": "conversation.proactive_message",
+            "version": "1.0",
+            "source": "astrbot_plugin_private_companion.daily_state_tick",
+            "person_id": "owner-person",
+            "recipient_umo": "qq:FriendMessage:owner",
+            "text": "一条已经生成好的主动消息。",
+        }
+        with patch.object(flow_main.StarTools, "send_message", sender, create=True):
+            result = asyncio.run(plugin.deliver_proactive_message(request))
+
+        self.assertFalse(result["sent"])
+        self.assertEqual(result["reason"], "identity_authorization_unavailable")
+        sender.assert_not_awaited()
+
+    def test_proactive_message_rejects_non_private_authorization(self):
+        from unittest.mock import AsyncMock, patch
+
+        from astrbot_plugin_conversation_flow import main as flow_main
+
+        plugin = self._plugin()
+        identity = plugin.context.get_star_instance(
+            "astrbot_plugin_identity_guardian"
+        )
+        identity.authorize_proactive_delivery = lambda _recipient: {
+            "authorized": True,
+            "channel": "group",
+            "reason": "group_not_allowed",
+        }
+        sender = AsyncMock()
+        request = {
+            "contract": "conversation.proactive_message",
+            "version": "1.0",
+            "source": "astrbot_plugin_private_companion.daily_state_tick",
+            "person_id": "owner-person",
+            "recipient_umo": "qq:GroupMessage:group",
+            "text": "不应发送到群里的主动消息。",
+        }
+        with patch.object(flow_main.StarTools, "send_message", sender, create=True):
+            result = asyncio.run(plugin.deliver_proactive_message(request))
+
+        self.assertFalse(result["sent"])
+        self.assertEqual(result["reason"], "private_target_required")
+        sender.assert_not_awaited()
+
+    def test_proactive_message_first_send_failure_uses_single_text_fallback(self):
+        from unittest.mock import AsyncMock, patch
+
+        from astrbot_plugin_conversation_flow import main as flow_main
+
+        plugin = self._plugin()
+        sender = AsyncMock(side_effect=[RuntimeError("first send failed"), None])
+        request = {
+            "contract": "conversation.proactive_message",
+            "version": "1.0",
+            "source": "astrbot_plugin_private_companion.daily_state_tick",
+            "person_id": "owner-person",
+            "recipient_umo": "qq:FriendMessage:owner",
+            "text": (
+                "主动消息第一段发送失败时需要回退。\n\n"
+                "回退只能尝试一次完整原文，不能重复已确认发送的段落。"
+            ),
+        }
+        with patch.object(flow_main.StarTools, "send_message", sender, create=True):
+            result = asyncio.run(plugin.deliver_proactive_message(request))
+
+        self.assertTrue(result["sent"])
+        self.assertEqual(result["reason"], "sent_fallback")
+        self.assertTrue(result["fallback_used"])
+        self.assertEqual(result["sent_count"], 1)
+        self.assertEqual(sender.await_count, 2)
+        self.assertNotIn("\n\n", sender.await_args_list[-1].args[1][0].text)
 
 
 class _LLM:

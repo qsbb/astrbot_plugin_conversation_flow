@@ -126,6 +126,9 @@ IDENTITY_CONTEXT_BRIDGE_AUTH_CONTRACT_NAME = "identity.context_bridge_authorizat
 IDENTITY_CONTEXT_BRIDGE_AUTH_CONTRACT_MAJOR = "1"
 PROACTIVE_DELIVERY_CONTRACT_NAME = "conversation.proactive_delivery"
 PROACTIVE_DELIVERY_CONTRACT_VERSION = "1.0"
+PROACTIVE_MESSAGE_CONTRACT_NAME = "conversation.proactive_message"
+PROACTIVE_MESSAGE_CONTRACT_VERSION = "1.0"
+PROACTIVE_MESSAGE_SEND_TIMEOUT_SECONDS = 30.0
 _ENVIRONMENT_FACT_FIELDS = {
     "official_weather_warning": frozenset(
         {"warning_title", "warning_level", "warning_kind", "issued_at"}
@@ -375,6 +378,53 @@ class ConversationalFlowPlugin(Star):
             "fallback_send": False,
         }
 
+    def proactive_message_contract(self) -> dict[str, object]:
+        """Declare the shared, already-generated private text delivery contract."""
+        return {
+            "name": PROACTIVE_MESSAGE_CONTRACT_NAME,
+            "version": PROACTIVE_MESSAGE_CONTRACT_VERSION,
+            "plugin": "astrbot_plugin_conversation_flow",
+            "capabilities": ("deliver_prepared_private_text",),
+            "requires": (
+                "identity.proactive_authorization@1",
+                "relationship.delivery_identity@1",
+            ),
+            "request_schema": {
+                "type": "object",
+                "required": (
+                    "contract",
+                    "version",
+                    "source",
+                    "person_id",
+                    "recipient_umo",
+                    "text",
+                ),
+                "properties": {
+                    "contract": {"const": PROACTIVE_MESSAGE_CONTRACT_NAME},
+                    "version": {"type": "string", "pattern": "^1\\."},
+                    "source": {"type": "string", "maxLength": 160},
+                    "person_id": {"type": "string", "maxLength": 200},
+                    "recipient_umo": {"type": "string", "maxLength": 240},
+                    "text": {"type": "string", "maxLength": 1200},
+                },
+            },
+            "response_schema": {
+                "type": "object",
+                "required": (
+                    "contract",
+                    "version",
+                    "sent",
+                    "reason",
+                    "segment_count",
+                    "sent_count",
+                    "fallback_used",
+                ),
+            },
+            "send_timeout_seconds": PROACTIVE_MESSAGE_SEND_TIMEOUT_SECONDS,
+            "fallback": "single_original_text_only_when_no_segment_was_sent",
+            "fallback_send": False,
+        }
+
     @staticmethod
     def _safe_environment_fact(value: Any) -> Any:
         if value is None or isinstance(value, bool):
@@ -457,9 +507,24 @@ class ConversationalFlowPlugin(Star):
     def _valid_environment_opportunity(cls, candidate: Any) -> bool:
         return cls._environment_payload(candidate) is not None
 
-    @staticmethod
-    def _normalize_proactive_text(value: Any, limit: int = 120) -> str:
-        text = " ".join(strip_markdown_format(str(value or "")).split()).strip()
+    @classmethod
+    def _normalize_proactive_text(
+        cls,
+        value: Any,
+        limit: int = 120,
+        *,
+        preserve_paragraphs: bool = False,
+    ) -> str:
+        raw = strip_markdown_format(str(value or ""))
+        if preserve_paragraphs:
+            paragraphs = [
+                " ".join(paragraph.split()).strip()
+                for paragraph in re.split(r"\n\s*\n+", raw)
+                if paragraph.strip()
+            ]
+            text = "\n\n".join(paragraphs).strip()
+        else:
+            text = " ".join(raw.split()).strip()
         if len(text) <= limit:
             return text
         clipped = text[:limit]
@@ -606,7 +671,10 @@ class ConversationalFlowPlugin(Star):
             return {"sent": False, "reason": "invalid_model_decision"}
         if decision.get("send") is not True:
             return {"sent": False, "reason": "dialogue_model_suppressed"}
-        text = self._normalize_proactive_text(decision.get("text"))
+        text = self._normalize_proactive_text(
+            decision.get("text"),
+            preserve_paragraphs=True,
+        )
         if not text:
             return {"sent": False, "reason": "empty_message"}
         if is_followup_offer(text):
@@ -615,12 +683,222 @@ class ConversationalFlowPlugin(Star):
             term.casefold() in text.casefold() for term in _PROACTIVE_INTERNAL_TERMS
         ):
             return {"sent": False, "reason": "internal_reference_rejected"}
-        try:
-            await StarTools.send_message(recipient_umo, [Plain(text=text)])
-        except Exception as exc:
-            self.logger.warning("[conv-flow] proactive delivery failed: %s", exc)
-            return {"sent": False, "reason": "send_failed"}
-        return {"sent": True, "reason": "sent"}
+        delivery = await self._deliver_proactive_text(
+            text=text,
+            person_id=person_id,
+            recipient_umo=recipient_umo,
+            preflight_snapshot=snapshot,
+            source="astrbot_plugin_environment_awareness",
+        )
+        return {
+            "sent": bool(delivery.get("sent")),
+            "reason": str(delivery.get("reason") or "send_failed"),
+        }
+
+    async def deliver_proactive_message(
+        self, request: dict[str, Any]
+    ) -> dict[str, object]:
+        """Deliver already-generated proactive text through the shared contract."""
+        response_base = {
+            "contract": PROACTIVE_MESSAGE_CONTRACT_NAME,
+            "version": PROACTIVE_MESSAGE_CONTRACT_VERSION,
+        }
+        if not isinstance(request, dict):
+            return {
+                **response_base,
+                "sent": False,
+                "reason": "invalid_request",
+                "segment_count": 0,
+                "sent_count": 0,
+                "fallback_used": False,
+            }
+        request_version = request.get("version")
+        if (
+            request.get("contract") != PROACTIVE_MESSAGE_CONTRACT_NAME
+            or not isinstance(request_version, str)
+            or not request_version.startswith("1.")
+        ):
+            return {
+                **response_base,
+                "sent": False,
+                "reason": "incompatible_contract",
+                "segment_count": 0,
+                "sent_count": 0,
+                "fallback_used": False,
+            }
+        source = str(request.get("source") or "").strip()
+        person_id = str(request.get("person_id") or "").strip()
+        recipient_umo = str(request.get("recipient_umo") or "").strip()
+        request_text = request.get("text")
+        if (
+            not source
+            or len(source) > 160
+            or not person_id
+            or len(person_id) > 200
+            or not recipient_umo
+            or len(recipient_umo) > 240
+            or not isinstance(request_text, str)
+            or len(request_text) > 1200
+        ):
+            return {
+                **response_base,
+                "sent": False,
+                "reason": "invalid_request",
+                "segment_count": 0,
+                "sent_count": 0,
+                "fallback_used": False,
+            }
+
+        snapshot, reason = await self._environment_delivery_preflight(
+            person_id, recipient_umo
+        )
+        if snapshot is None:
+            return {
+                **response_base,
+                "sent": False,
+                "reason": reason,
+                "segment_count": 0,
+                "sent_count": 0,
+                "fallback_used": False,
+            }
+        return await self._deliver_proactive_text(
+            text=request["text"],
+            person_id=person_id,
+            recipient_umo=recipient_umo,
+            preflight_snapshot=snapshot,
+            source=source,
+            response_base=response_base,
+        )
+
+    async def _deliver_proactive_text(
+        self,
+        *,
+        text: Any,
+        person_id: str,
+        recipient_umo: str,
+        preflight_snapshot: dict[str, Any] | None,
+        source: str,
+        response_base: dict[str, str] | None = None,
+    ) -> dict[str, object]:
+        """Clean, chunk and send prepared private text without an LLM call."""
+        response = response_base or {
+            "contract": PROACTIVE_MESSAGE_CONTRACT_NAME,
+            "version": PROACTIVE_MESSAGE_CONTRACT_VERSION,
+        }
+        normalized = self._normalize_proactive_text(
+            text,
+            preserve_paragraphs=True,
+        )
+        if not normalized:
+            return {
+                **response,
+                "sent": False,
+                "reason": "empty_message",
+                "segment_count": 0,
+                "sent_count": 0,
+                "fallback_used": False,
+            }
+        if is_followup_offer(normalized):
+            return {
+                **response,
+                "sent": False,
+                "reason": "service_followup_rejected",
+                "segment_count": 0,
+                "sent_count": 0,
+                "fallback_used": False,
+            }
+        if any(
+            term.casefold() in normalized.casefold()
+            for term in _PROACTIVE_INTERNAL_TERMS
+        ):
+            return {
+                **response,
+                "sent": False,
+                "reason": "internal_reference_rejected",
+                "segment_count": 0,
+                "sent_count": 0,
+                "fallback_used": False,
+            }
+
+        if self.config.chunking_enabled:
+            segments = self.chunker.split(normalized)
+        else:
+            segments = [normalized]
+        segments = [str(segment).strip() for segment in segments if str(segment).strip()]
+        if not segments:
+            return {
+                **response,
+                "sent": False,
+                "reason": "empty_message",
+                "segment_count": 0,
+                "sent_count": 0,
+                "fallback_used": False,
+            }
+
+        sent_count = 0
+        for index, segment in enumerate(segments):
+            if index > 0:
+                delay_ms = calculate_segment_delay_ms(segment, self.config)
+                if delay_ms > 0:
+                    await asyncio.sleep(delay_ms / 1000)
+            try:
+                await asyncio.wait_for(
+                    StarTools.send_message(recipient_umo, [Plain(text=segment)]),
+                    timeout=PROACTIVE_MESSAGE_SEND_TIMEOUT_SECONDS,
+                )
+                sent_count += 1
+            except Exception as exc:
+                self.logger.warning(
+                    "[conv-flow] proactive segment delivery failed: %s",
+                    type(exc).__name__,
+                )
+                if sent_count > 0:
+                    return {
+                        **response,
+                        "sent": False,
+                        "reason": "send_failed_partial",
+                        "segment_count": len(segments),
+                        "sent_count": sent_count,
+                        "fallback_used": False,
+                    }
+                try:
+                    await asyncio.wait_for(
+                        StarTools.send_message(
+                            recipient_umo,
+                            [Plain(text=normalized.replace("\n\n", "\n"))],
+                        ),
+                        timeout=PROACTIVE_MESSAGE_SEND_TIMEOUT_SECONDS,
+                    )
+                    return {
+                        **response,
+                        "sent": True,
+                        "reason": "sent_fallback",
+                        "segment_count": len(segments),
+                        "sent_count": 1,
+                        "fallback_used": True,
+                    }
+                except Exception as fallback_exc:
+                    self.logger.warning(
+                        "[conv-flow] proactive fallback delivery failed: %s",
+                        type(fallback_exc).__name__,
+                    )
+                    return {
+                        **response,
+                        "sent": False,
+                        "reason": "send_failed",
+                        "segment_count": len(segments),
+                        "sent_count": 0,
+                        "fallback_used": True,
+                    }
+
+        return {
+            **response,
+            "sent": True,
+            "reason": "sent",
+            "segment_count": len(segments),
+            "sent_count": sent_count,
+            "fallback_used": False,
+        }
 
     # ------------------------------------------------------------------
     # 配置处理
