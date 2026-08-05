@@ -15,6 +15,7 @@ import inspect
 import json
 import math
 import pathlib
+import re
 import secrets
 from sys import maxsize
 from datetime import UTC, datetime, timedelta
@@ -79,6 +80,7 @@ from .core.prompts import (
     MOOD_LAZY_INSTRUCTION,
     PLAIN_TEXT_INSTRUCTION,
     CHUNKING_INSTRUCTION,
+    RELATIONSHIP_OFFENSE_MARKER_INSTRUCTION,
 )
 from .core.scene import SceneInput, detect_scene
 from .core.request_context import (
@@ -105,10 +107,14 @@ from .series_diagnostics import (
     logger,
 )
 
-__version__ = "0.8.4"
+__version__ = "0.8.5"
 RELATIONSHIP_PLUGIN_NAME = "astrbot_plugin_relationship"
 RELATIONSHIP_SNAPSHOT_CONTRACT_NAME = "relationship.snapshot"
 RELATIONSHIP_SNAPSHOT_CONTRACT_MAJOR = "1"
+RELATIONSHIP_EVENT_CONTRACT_NAME = "relationship.event"
+RELATIONSHIP_EVENT_CONTRACT_MAJOR = "1"
+RELATIONSHIP_OFFENSE_RECORDED_KEY = "conv_flow.relationship_offense_recorded"
+RELATIONSHIP_OFFENSE_SEEN_KEY = "conv_flow.relationship_offense_seen"
 RELATIONSHIP_DELIVERY_IDENTITY_CONTRACT_NAME = "relationship.delivery_identity"
 RELATIONSHIP_DELIVERY_IDENTITY_CONTRACT_MAJOR = "1"
 RELATIONSHIP_CONTINUITY_IDENTITY_CONTRACT_NAME = "relationship.continuity_identity"
@@ -867,6 +873,8 @@ class ConversationalFlowPlugin(Star):
         if not user_text:
             return
 
+        self._inject_relationship_offense_instruction(event, req, umo)
+
         # 智能拦截：注入指令让主 LLM 在主对话思维链中一并判断不良内容
         # 不做独立 LLM 预判断，省一次调用
         if self.intercept_judge.should_inject(umo):
@@ -981,6 +989,12 @@ class ConversationalFlowPlugin(Star):
             self.tracker.finish_response(event)
             return
 
+        response_text = self._extract_response_text(response)
+        parsed_offense_response = self._parse_relationship_offense_marker(response_text)
+        if parsed_offense_response is not None:
+            _, confidence, severity = parsed_offense_response
+            await self._submit_relationship_offense_marker(event, confidence, severity)
+
         # 2) 检查沉默标记（silence_judge 注入模式、拦截命中、场景指令注入时都需检测）
         should_check_marker = self._should_check_silence_marker(event)
         if should_check_marker:
@@ -1055,6 +1069,19 @@ class ConversationalFlowPlugin(Star):
             return
 
         # 声在较低优先级消费同一结果；这里先通过版本化契约固定本轮交付决策。
+        result_text_for_offense = ""
+        try:
+            result_text_for_offense = result.get_plain_text() or ""
+        except Exception:
+            result_text_for_offense = ""
+        parsed_offense_result = self._parse_relationship_offense_marker(
+            result_text_for_offense
+        )
+        if parsed_offense_result is not None:
+            _, confidence, severity = parsed_offense_result
+            await self._submit_relationship_offense_marker(event, confidence, severity)
+            self._strip_relationship_offense_from_result(event)
+
         voice_requested = await self._voice_delivery_requested(event, result)
 
         text = ""
@@ -2875,6 +2902,174 @@ class ConversationalFlowPlugin(Star):
             )
         return compatible
 
+    def _relationship_offense_provider(self) -> Any | None:
+        if not self.config.relationship_offense_detection_enabled:
+            return None
+        provider = self._get_plugin_instance(RELATIONSHIP_PLUGIN_NAME)
+        if provider is None or not self._contract_compatible(
+            provider,
+            "relationship_event_contract",
+            RELATIONSHIP_EVENT_CONTRACT_NAME,
+            RELATIONSHIP_EVENT_CONTRACT_MAJOR,
+        ):
+            return None
+        if not callable(getattr(provider, "submit_relationship_event", None)):
+            self._warn_contract_once(
+                RELATIONSHIP_EVENT_CONTRACT_NAME,
+                "missing submit_relationship_event()",
+            )
+            return None
+        return provider
+
+    @staticmethod
+    def _parse_relationship_offense_marker(
+        text: str,
+    ) -> tuple[str, float, float] | None:
+        match = _RELATIONSHIP_OFFENSE_MARKER_RE.match(str(text or ""))
+        if match is None:
+            return None
+        attributes: dict[str, float] = {}
+        for token in match.group(1).split():
+            key, separator, raw_value = token.partition("=")
+            key = key.lower()
+            if separator == "" or key not in {"confidence", "severity"}:
+                return None
+            if key in attributes:
+                return None
+            try:
+                value = float(raw_value)
+            except (TypeError, ValueError):
+                return None
+            if not math.isfinite(value) or not 0.0 <= value <= 1.0:
+                return None
+            attributes[key] = value
+        if set(attributes) != {"confidence", "severity"}:
+            return None
+        return (
+            str(text or "")[match.end() :].lstrip(),
+            attributes["confidence"],
+            attributes["severity"],
+        )
+
+    @staticmethod
+    def _relationship_offense_platform_id(event: AstrMessageEvent) -> str:
+        getter = getattr(event, "get_platform_id", None)
+        if callable(getter):
+            try:
+                return str(getter() or "").strip()
+            except Exception:
+                return ""
+        return str(getattr(event, "platform_id", "") or "").strip()
+
+    def _relationship_offense_event_id(self, event: AstrMessageEvent) -> str:
+        message_id = get_message_id(event)
+        if message_id:
+            return f"conversation_flow:offense:{message_id}"
+        umo = self.tracker._get_umo(event)
+        seq = str(self._get_extra(event, ConversationTracker.SEQ_EXTRA_KEY) or "")
+        digest = hashlib.sha256(f"{umo}|{seq}".encode("utf-8")).hexdigest()[:24]
+        return f"conversation_flow:offense:{digest}"
+
+    async def _submit_relationship_offense_marker(
+        self,
+        event: AstrMessageEvent,
+        confidence: float,
+        severity: float,
+    ) -> None:
+        if self._get_extra(event, RELATIONSHIP_OFFENSE_SEEN_KEY):
+            return
+        self._set_extra(event, RELATIONSHIP_OFFENSE_SEEN_KEY, True)
+        if confidence < 0.85 or severity <= 0.0:
+            return
+        if (
+            self._get_extra(event, "conv_flow.relationship_offense_injected")
+            is not True
+        ):
+            return
+        provider = self._relationship_offense_provider()
+        if provider is None:
+            return
+        bot_id = self._get_self_id(event)
+        user_id = self.tracker._get_sender_id(event)
+        if not bot_id or not user_id:
+            return
+        payload = {
+            "version": "1.0",
+            "bot_id": bot_id,
+            "user_id": user_id,
+            "group_id": self._get_group_id(event) or None,
+            "platform_id": self._relationship_offense_platform_id(event) or None,
+            "event_id": self._relationship_offense_event_id(event),
+            "kind": "offense",
+            "source": "direct",
+            "confidence": confidence,
+            "severity": severity,
+            "evidence_refs": ["conversation_flow:llm_offense_marker"],
+        }
+        submit = provider.submit_relationship_event
+        try:
+            result = submit(payload)
+            if inspect.isawaitable(result):
+                result = await result
+        except Exception as exc:
+            self.logger.warning(
+                "[conv-flow] relationship offense submission failed: %s",
+                type(exc).__name__,
+            )
+            return
+        if isinstance(result, dict) and result.get("accepted") is True:
+            self._set_extra(event, RELATIONSHIP_OFFENSE_RECORDED_KEY, True)
+            self.logger.info(
+                "[conv-flow] relationship offense recorded: confidence=%.2f severity=%.2f",
+                confidence,
+                severity,
+            )
+
+    def _strip_relationship_offense_from_result(self, event: AstrMessageEvent) -> bool:
+        try:
+            result = event.get_result()
+            chain = getattr(result, "chain", None)
+            if not isinstance(chain, list):
+                return False
+            for component in chain:
+                if not isinstance(component, Plain):
+                    continue
+                raw_text = str(getattr(component, "text", "") or "")
+                match = _RELATIONSHIP_OFFENSE_TAG_RE.match(raw_text)
+                if match is None:
+                    continue
+                cleaned_text = raw_text[match.end() :].lstrip()
+                component.text = cleaned_text
+                try:
+                    result.text = cleaned_text
+                except Exception:
+                    pass
+                return True
+        except Exception as exc:
+            self.logger.debug(
+                "[conv-flow] relationship offense marker cleanup failed: %s",
+                type(exc).__name__,
+            )
+        return False
+
+    def _inject_relationship_offense_instruction(
+        self, event: AstrMessageEvent, req: Any, umo: str
+    ) -> bool:
+        if not self.config.relationship_offense_detection_enabled:
+            return False
+        if self.intercept_judge.is_whitelisted(umo):
+            return False
+        if self._relationship_offense_provider() is None:
+            return False
+        injected = self._inject_instruction(
+            req,
+            RELATIONSHIP_OFFENSE_MARKER_INSTRUCTION,
+            "relationship offense",
+        )
+        if injected:
+            self._set_extra(event, "conv_flow.relationship_offense_injected", True)
+        return injected
+
     def _warn_contract_once(self, name: str, detail: str) -> None:
         key = f"{name}:{detail}"
         if key in self._contract_warnings:
@@ -3647,3 +3842,10 @@ class ConversationalFlowPlugin(Star):
             tmp_path.replace(self._config_file)
         except Exception as exc:
             self.logger.warning("[conv-flow] failed to persist config: %s", exc)
+
+_RELATIONSHIP_OFFENSE_TAG_RE = re.compile(
+    r"^\s*<RELATIONSHIP_OFFENSE(?:\s+[^>]*)?>\s*", re.IGNORECASE
+)
+_RELATIONSHIP_OFFENSE_MARKER_RE = re.compile(
+    r"^\s*<RELATIONSHIP_OFFENSE\s+([^>]+)>\s*", re.IGNORECASE
+)

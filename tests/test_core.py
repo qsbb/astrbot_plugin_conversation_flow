@@ -3648,6 +3648,179 @@ class AgentTerminalFrameTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn(seq, plugin.tracker.get_state(event.unified_msg_origin).pending)
 
 
+class _IdentityEvent(_Event):
+    def __init__(self, umo: str, text: str) -> None:
+        super().__init__(umo, text)
+        self.message_id = "message-1"
+        self.self_id = "bot-1"
+
+    def get_sender_id(self):
+        return "user-1"
+
+    def get_self_id(self):
+        return self.self_id
+
+    def get_platform_id(self):
+        return "qq-main"
+
+    def get_group_id(self):
+        return "group-1"
+
+
+class RelationshipOffenseMarkerTests(unittest.IsolatedAsyncioTestCase):
+    @staticmethod
+    def _plugin():
+        from astrbot_plugin_conversation_flow.main import ConversationalFlowPlugin
+
+        submitted = []
+
+        class RelationshipProvider:
+            @staticmethod
+            def relationship_event_contract():
+                return {"name": "relationship.event", "version": "1.0"}
+
+            async def submit_relationship_event(self, payload):
+                submitted.append(payload)
+                return {"accepted": True, "event_id": payload["event_id"]}
+
+        class Context:
+            @staticmethod
+            def get_star_instance(name):
+                return (
+                    RelationshipProvider()
+                    if name == "astrbot_plugin_relationship"
+                    else None
+                )
+
+        plugin = object.__new__(ConversationalFlowPlugin)
+        plugin.config = build_plugin_config(
+            {
+                "relationship_offense_detection_enabled": True,
+                "intercept_whitelist": [],
+                "silence_enabled": False,
+            }
+        )
+        plugin.context = Context()
+        plugin.logger = _Logger()
+        plugin._contract_warnings = set()
+        plugin._self_id_cache = ""
+        plugin.tracker = ConversationTracker(max_history_turns=1)
+        plugin.intercept_judge = types.SimpleNamespace(
+            is_whitelisted=lambda _umo: False
+        )
+        plugin.silence_judge = types.SimpleNamespace(
+            should_inject=lambda: False,
+            should_prejudge=lambda: False,
+            is_silence_response=lambda _text: False,
+        )
+        return plugin, submitted
+
+    async def test_request_injects_one_internal_instruction(self):
+        plugin, _submitted = self._plugin()
+        event = _IdentityEvent("qq-main:FriendMessage:user-1", "你这个笨蛋")
+        req = types.SimpleNamespace(extra_user_content_parts=[], system_prompt="")
+        self.assertTrue(
+            plugin._inject_relationship_offense_instruction(
+                event, req, event.unified_msg_origin
+            )
+        )
+        self.assertTrue(event.get_extra("conv_flow.relationship_offense_injected"))
+        self.assertIn(
+            "RELATIONSHIP_OFFENSE",
+            req.extra_user_content_parts[-1]["text"],
+        )
+
+    async def test_response_marker_is_submitted_once_with_platform_scope(self):
+        plugin, submitted = self._plugin()
+        event = _IdentityEvent("qq-main:FriendMessage:user-1", "你这个笨蛋")
+        event.set_extra("conv_flow.relationship_offense_injected", True)
+        plugin.tracker.begin_request(event, detect_interrupt=False)
+        marker = "<RELATIONSHIP_OFFENSE confidence=0.95 severity=0.80>先冷静一下。"
+        await plugin.on_llm_response(
+            event, types.SimpleNamespace(completion_text=marker)
+        )
+        await plugin._submit_relationship_offense_marker(event, 0.95, 0.80)
+        self.assertEqual(len(submitted), 1)
+        self.assertEqual(
+            {
+                "version",
+                "bot_id",
+                "user_id",
+                "group_id",
+                "platform_id",
+                "event_id",
+                "kind",
+                "source",
+                "confidence",
+                "severity",
+                "evidence_refs",
+            },
+            set(submitted[0]),
+        )
+        self.assertEqual(submitted[0]["platform_id"], "qq-main")
+        self.assertEqual(submitted[0]["kind"], "offense")
+
+    def test_default_off_and_whitelist_skip_injection(self):
+        plugin, _submitted = self._plugin()
+        event = _IdentityEvent("qq-main:FriendMessage:user-1", "你这个笨蛋")
+        req = types.SimpleNamespace(extra_user_content_parts=[], system_prompt="")
+        plugin.config = build_plugin_config({})
+        self.assertFalse(
+            plugin._inject_relationship_offense_instruction(
+                event, req, event.unified_msg_origin
+            )
+        )
+        plugin.config = build_plugin_config(
+            {"relationship_offense_detection_enabled": True}
+        )
+        plugin.intercept_judge.is_whitelisted = lambda _umo: True
+        self.assertFalse(
+            plugin._inject_relationship_offense_instruction(
+                event, req, event.unified_msg_origin
+            )
+        )
+        self.assertEqual(req.extra_user_content_parts, [])
+    def test_marker_parser_requires_exact_numeric_attributes(self):
+        from astrbot_plugin_conversation_flow.main import ConversationalFlowPlugin
+
+        parsed = ConversationalFlowPlugin._parse_relationship_offense_marker(
+            "<RELATIONSHIP_OFFENSE confidence=0.9 severity=0.4>回复"
+        )
+        self.assertEqual(parsed, ("回复", 0.9, 0.4))
+        self.assertIsNone(
+            ConversationalFlowPlugin._parse_relationship_offense_marker(
+                "<RELATIONSHIP_OFFENSE confidence=1.2 severity=0.4>回复"
+            )
+        )
+        self.assertIsNone(
+            ConversationalFlowPlugin._parse_relationship_offense_marker(
+                "<RELATIONSHIP_OFFENSE confidence=0.9 severity=0.4 extra=x>回复"
+            )
+        )
+
+    def test_result_cleanup_removes_marker_from_plain_component(self):
+        plugin, _submitted = self._plugin()
+        event = _TerminalFrameEvent(
+            "qq-main:FriendMessage:user-1",
+            "你这个笨蛋",
+            "<RELATIONSHIP_OFFENSE confidence=0.9 severity=0.4>请不要这样。",
+        )
+        self.assertTrue(plugin._strip_relationship_offense_from_result(event))
+        self.assertEqual(event.get_result().chain[0].text, "请不要这样。")
+
+    def test_malformed_internal_tag_is_cleaned_without_being_valid(self):
+        plugin, _submitted = self._plugin()
+        raw = "<RELATIONSHIP_OFFENSE bogus=yes>请不要这样。"
+        self.assertIsNone(plugin._parse_relationship_offense_marker(raw))
+        event = _TerminalFrameEvent(
+            "qq-main:FriendMessage:user-1",
+            "你这个笨蛋",
+            raw,
+        )
+        self.assertTrue(plugin._strip_relationship_offense_from_result(event))
+        self.assertEqual(event.get_result().get_plain_text(), "请不要这样。")
+
+
 class DecoratingHookPriorityTests(unittest.TestCase):
     """CONVENTIONS.md 3.3：言的分段必须先于声的语音合成（优先级 600 > 400）。"""
 

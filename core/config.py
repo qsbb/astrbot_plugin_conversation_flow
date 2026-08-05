@@ -80,6 +80,7 @@ DEFAULTS: dict[str, Any] = {
     "mood_max_consecutive_silences": 2,
     "natural_tool_call_enabled": True,
     "reply_context_enabled": True,
+    "relationship_offense_detection_enabled": False,
     "reply_context_api_fallback": True,
     "topic_context_enabled": False,
     "topic_context_max_messages": 10,
@@ -504,6 +505,10 @@ def normalize_config(raw: dict[str, Any] | None) -> dict[str, Any]:
     out["intercept_enabled"] = _coerce_bool(
         raw.get("intercept_enabled"), DEFAULTS["intercept_enabled"]
     )
+    out["relationship_offense_detection_enabled"] = _coerce_bool(
+        raw.get("relationship_offense_detection_enabled"),
+        DEFAULTS["relationship_offense_detection_enabled"],
+    )
     out["intercept_whitelist"] = _coerce_str_list(
         raw.get("intercept_whitelist"), DEFAULTS["intercept_whitelist"]
     )
@@ -591,6 +596,7 @@ class PluginConfig:
     mood_max_consecutive_silences: int = 2
     natural_tool_call_enabled: bool = True
     reply_context_enabled: bool = True
+    relationship_offense_detection_enabled: bool = False
     reply_context_api_fallback: bool = True
     topic_context_enabled: bool = False
     topic_context_max_messages: int = 10

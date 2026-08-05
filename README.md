@@ -354,6 +354,7 @@ OneBot v11 的消息事件自带 `message_id`，引用消息以 `reply` 段携�
 | 字段 | 默认 | 说明 |
 |---|---|---|
 | `intercept_enabled` | `false` | 向主 LLM 注入拦截指令，让模型在主对话思维链中一并判断不良内容（色情/暴力/辱骂/违法/越狱等），命中则礼貌拒绝或输出 `silence_marker` 静默 |
+| `relationship_offense_detection_enabled` | `false` | 可选的关系保护：让主模型在本轮判断是否存在直接针对 Bot 的高把握恶意辱骂/骚扰/威胁，并将通过 relationship.event@1.0 的脱敏事件交给“情”；不额外调用 LLM，默认关闭 |
 | `intercept_whitelist` | `[]` | 白名单会话（unified_msg_origin），完全跳过拦截注入。每行一个，格式如 `aiocqhttp:FriendMessage:123456` |
 
 拦截判断融入主对话思维链，**不做独立 LLM 预判断，不增加额外调用**。白名单会话完全跳过检测。
