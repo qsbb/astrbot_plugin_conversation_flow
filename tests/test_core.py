@@ -1479,6 +1479,124 @@ class InterceptJudgeTests(unittest.TestCase):
         self.assertIn("<SILENCE/>", text)
 
 
+class SilenceMarkerParsingTests(unittest.TestCase):
+    @staticmethod
+    def _judge(marker: str = "<SILENCE/>"):
+        from astrbot_plugin_conversation_flow.core.silence_judge import SilenceJudge
+
+        return SilenceJudge(build_plugin_config({"silence_marker": marker}), _StubLLM())
+
+    def test_exact_marker_requires_leading_control_position(self) -> None:
+        judge = self._judge()
+        self.assertEqual(judge.parse_silence_response("<SILENCE/>").kind, "matched")
+        self.assertEqual(
+            judge.parse_silence_response("  **<SILENCE/>**").kind, "matched"
+        )
+        self.assertEqual(
+            judge.parse_silence_response("前置说明 <SILENCE/>").kind, "no_match"
+        )
+        self.assertEqual(
+            judge.parse_silence_response("请解释 <SILENCE/> 是什么").kind, "no_match"
+        )
+        self.assertEqual(
+            judge.parse_silence_response(
+                "<SILENCE/> 这是正常回答，包含明显内容。"
+            ).kind,
+            "no_match",
+        )
+        self.assertTrue(judge.is_silence_response("<SILENCE/>"))
+
+    def test_default_control_tag_variants_require_leading_position(self) -> None:
+        for text in (
+            "<SILENT/>",
+            "<SILENCE>",
+            "<SILENCE />",
+            "```xml\n<SILENT/>\n```",
+        ):
+            with self.subTest(text=text):
+                match = self._judge().parse_silence_response(text)
+                self.assertEqual(match.kind, "variant")
+
+        self.assertEqual(
+            self._judge()
+            .parse_silence_response("<SILENT/> 好像大概是这样")
+            .kind,
+            "variant",
+        )
+        self.assertEqual(
+            self._judge()
+            .parse_silence_response("&lt;SILENT/&gt; 好像大概是这样")
+            .kind,
+            "variant",
+        )
+        self.assertEqual(
+            self._judge()
+            .parse_silence_response("请解释 <SILENT/> 是什么")
+            .kind,
+            "no_match",
+        )
+        self.assertEqual(
+            self._judge()
+            .parse_silence_response("我不想输出 <SILENT/>，但这里是正常回答")
+            .kind,
+            "no_match",
+        )
+
+    def test_unknown_ampersand_token_is_not_a_global_alias(self) -> None:
+        self.assertEqual(
+            self._judge().parse_silence_response("&&tired&&").kind,
+            "no_match",
+        )
+        self.assertEqual(
+            self._judge().parse_silence_response("&amp;&amp;tired&amp;&amp;").kind,
+            "no_match",
+        )
+        self.assertEqual(
+            self._judge().parse_silence_response("SILENT").kind,
+            "no_match",
+        )
+
+    def test_custom_marker_only_matches_its_exact_configured_value(self) -> None:
+        judge = self._judge("&&tired&&")
+        self.assertEqual(
+            judge.parse_silence_response("&&tired&&").kind,
+            "matched",
+        )
+        self.assertEqual(
+            judge.parse_silence_response("前文 &&tired&&").kind,
+            "no_match",
+        )
+        self.assertEqual(
+            judge.parse_silence_response("&&tired&& 这是正常回答").kind,
+            "no_match",
+        )
+        encoded_judge = self._judge("&amp;&amp;tired&amp;&amp;")
+        self.assertEqual(
+            encoded_judge.parse_silence_response("&amp;&amp;tired&amp;&amp;").kind,
+            "matched",
+        )
+        self.assertEqual(
+            encoded_judge.parse_silence_response(
+                "正常回答 &amp;&amp;tired&amp;&amp;"
+            ).kind,
+            "no_match",
+        )
+        self.assertEqual(
+            judge.parse_silence_response("<SILENT/>").kind,
+            "no_match",
+        )
+
+    def test_disabled_silence_injection_preserves_existing_bool_contract(self) -> None:
+        from astrbot_plugin_conversation_flow.core.silence_judge import SilenceJudge
+
+        cfg = build_plugin_config(
+            {"silence_enabled": False, "silence_strategy": "inject"}
+        )
+        judge = SilenceJudge(cfg, _StubLLM())
+        self.assertFalse(judge.should_inject())
+        self.assertTrue(judge.is_silence_response("<SILENCE/>"))
+
+
 class ConversationTrackerTests(unittest.TestCase):
     def test_merge_hint_preserves_reserved_delimiters(self) -> None:
         tracker = ConversationTracker()

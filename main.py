@@ -107,7 +107,7 @@ from .series_diagnostics import (
     logger,
 )
 
-__version__ = "0.8.6"
+__version__ = "0.8.7"
 RELATIONSHIP_PLUGIN_NAME = "astrbot_plugin_relationship"
 RELATIONSHIP_SNAPSHOT_CONTRACT_NAME = "relationship.snapshot"
 RELATIONSHIP_SNAPSHOT_CONTRACT_MAJOR = "1"
@@ -1279,11 +1279,18 @@ class ConversationalFlowPlugin(Star):
         should_check_marker = self._should_check_silence_marker(event)
         if should_check_marker:
             text = self._extract_response_text(response)
-            if text and self.silence_judge.is_silence_response(text):
+            silence_match = self.silence_judge.parse_silence_response(text)
+            if silence_match.matched:
+                add_reason(
+                    request_context,
+                    OWNER_CONVERSATION_FLOW,
+                    f"SILENCE_MARKER_{silence_match.kind.upper()}",
+                )
                 self.logger.info(
-                    "[conv-flow] seq=%s silenced by inject marker, response=%r",
+                    "[conv-flow] seq=%s silenced by %s marker (%s)",
                     seq,
-                    text[:80],
+                    silence_match.kind,
+                    silence_match.reason,
                 )
                 await self._silence_event(event)
                 self.tracker.cancel_request(event)
@@ -1386,13 +1393,23 @@ class ConversationalFlowPlugin(Star):
 
         # 3) 沉默标记二次校验（注入模式、拦截命中、场景指令注入时都需检测）
         should_check_marker = self._should_check_silence_marker(event)
-        if should_check_marker and self.silence_judge.is_silence_response(text):
-            self.logger.info(
-                "[conv-flow] seq=%s silence marker found at decorating", seq
-            )
-            await self._silence_event(event)
-            self.tracker.cancel_request(event)
-            return
+        if should_check_marker:
+            silence_match = self.silence_judge.parse_silence_response(text)
+            if silence_match.matched:
+                add_reason(
+                    request_context,
+                    OWNER_CONVERSATION_FLOW,
+                    f"SILENCE_MARKER_{silence_match.kind.upper()}",
+                )
+                self.logger.info(
+                    "[conv-flow] seq=%s silence marker found at decorating (%s, %s)",
+                    seq,
+                    silence_match.kind,
+                    silence_match.reason,
+                )
+                await self._silence_event(event)
+                self.tracker.cancel_request(event)
+                return
 
         # 4) 纯文本模式：剥离 Markdown 格式标记
         text_modified = False

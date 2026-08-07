@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
-from typing import Any
+import html
+import re
+from dataclasses import dataclass
+from typing import Any, Literal
 
 from ..series_diagnostics import logger
 
@@ -13,6 +16,103 @@ from .prompts import (
     SILENCE_PREJUDGE_SYSTEM,
     SILENCE_PREJUDGE_USER_TEMPLATE,
 )
+
+
+SilenceMatchKind = Literal["matched", "variant", "no_match"]
+
+
+@dataclass(frozen=True)
+class SilenceResponseMatch:
+    kind: SilenceMatchKind
+    reason: str
+
+    @property
+    def matched(self) -> bool:
+        return self.kind != "no_match"
+
+
+_DEFAULT_SILENCE_MARKER = "<SILENCE/>"
+_CONTROL_PREFIX_RE = re.compile(
+    r"""
+    \A\s*
+    (?:```(?:[a-z0-9_-]{0,16})?\s*)?
+    [>*_~`#\-:：,，.!！?？()（）\[\]【】「」『』\s]{0,12}
+    """,
+    re.IGNORECASE | re.VERBOSE,
+)
+_CONTROL_TAG_VARIANT_RE = re.compile(
+    r"""
+    \A\s*
+    (?:```(?:[a-z0-9_-]{0,16})?\s*)?
+    [>*_~`#\-:：,，.!！?？()（）\[\]【】「」『』\s]{0,12}
+    (?P<tag><\s*(?:SILENCE|SILENT)\s*/?\s*>)
+    """,
+    re.IGNORECASE | re.VERBOSE,
+)
+_SHORT_VARIANT_EXPLANATION_RE = re.compile(
+    r"""
+    \A
+    (?:(?:
+        好像|似乎|大概|可能|应该|看起来|貌似|是这样|就这样|这样|嗯|呃|额|抱歉|
+        maybe|probably|perhaps|sorry|i\s+think|that(?:'s|\s+is)\s+it
+    )[\s，,。.!！?？]*){1,5}
+    \Z
+    """,
+    re.IGNORECASE | re.VERBOSE,
+)
+_VARIANT_EDGE_CHARS = " \t\r\n`*_~>#-:：,，.!！?？()（）[]【】「」『』"
+
+
+def _classify_marker_tail(
+    text: str, end: int, kind: SilenceMatchKind, reason: str
+) -> SilenceResponseMatch:
+    tail = text[end:]
+    tail = re.sub(r"^\s*```", "", tail, count=1).strip(_VARIANT_EDGE_CHARS)
+    if not tail:
+        return SilenceResponseMatch(kind, reason)
+    if len(tail) > 32 or "\n" in tail:
+        return SilenceResponseMatch("no_match", "marker_tail_too_long")
+    if not _SHORT_VARIANT_EXPLANATION_RE.fullmatch(tail):
+        return SilenceResponseMatch("no_match", "marker_tail_is_answer_content")
+    return SilenceResponseMatch(kind, f"{reason}_with_short_explanation")
+
+
+def parse_silence_response(text: str, marker: str) -> SilenceResponseMatch:
+    """Parse an exact configured marker or a high-confidence default variant."""
+    response_text = str(text or "")
+    configured_marker = str(marker or "")
+    if not response_text or not configured_marker:
+        return SilenceResponseMatch("no_match", "empty_input_or_marker")
+
+    # A configured marker is authoritative only in the leading control
+    # position, so ordinary prose quoting it is never silenced.
+    prefix = _CONTROL_PREFIX_RE.match(response_text)
+    if prefix is not None and response_text.startswith(
+        configured_marker, prefix.end()
+    ):
+        return _classify_marker_tail(
+            response_text,
+            prefix.end() + len(configured_marker),
+            "matched",
+            "configured_marker",
+        )
+
+    if html.unescape(configured_marker).strip() != _DEFAULT_SILENCE_MARKER:
+        return SilenceResponseMatch("no_match", "custom_marker_without_exact_match")
+
+    normalized = html.unescape(response_text)
+    match = _CONTROL_TAG_VARIANT_RE.match(normalized)
+    if match is None:
+        return SilenceResponseMatch("no_match", "no_leading_control_tag")
+
+    raw_tag = match.group("tag")
+    if raw_tag == _DEFAULT_SILENCE_MARKER:
+        reason = "encoded_default_marker"
+    else:
+        reason = "default_control_tag_variant"
+
+    kind: SilenceMatchKind = "matched" if raw_tag == _DEFAULT_SILENCE_MARKER else "variant"
+    return _classify_marker_tail(normalized, match.end(), kind, reason)
 
 
 class SilenceJudge:
@@ -101,10 +201,9 @@ class SilenceJudge:
         return False
 
     def is_silence_response(self, text: str) -> bool:
-        """检测 LLM 回复是否包含沉默标记。"""
-        if not text:
-            return False
-        marker = self.cfg.silence_marker
-        if not marker:
-            return False
-        return marker in text
+        """兼容布尔接口：检测正式 marker 或高置信默认标签变体。"""
+        return self.parse_silence_response(text).matched
+
+    def parse_silence_response(self, text: str) -> SilenceResponseMatch:
+        """Return a sanitized exact/variant/no-match result for diagnostics."""
+        return parse_silence_response(text, self.cfg.silence_marker)

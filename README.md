@@ -124,6 +124,12 @@ tracker；只有带终态标志的空白帧才清理 pending。最终非空正�
 | `silence_prejudge_provider_id` | `""` | 预判断专用 Provider，留空则自动跟随当前对话模型（插件专用 LLM Provider 优先） |
 | `silence_prejudge_max_chars` | `200` | 超过此长度的用户消息跳过预判断 |
 
+沉默标记解析保留 `silence_marker` 的精确匹配权威性，但正式 marker 也必须位于回复开头的控制语境（允许空白、少量标点或代码围栏）。
+标签后只能为空或严格的短误加解释；明显的正常回答内容不会触发沉默。默认 `<SILENCE/>` 额外兼容位于回复开头的
+`<SILENT/>`、`<SILENCE>`、`<SILENCE />` 及 HTML 转义形式，标签后只允许很短的模型误加解释；
+正文中讨论或引用这些标签不会触发沉默。自定义 marker 不获得这些别名，普通 `SILENT`、`SILENCE`
+以及任意 `&&...&&` 文本也不会被模糊识别。响应日志只记录 `matched`/`variant` 类型和原因，不记录完整回复正文。
+
 #### 智能分段
 
 | 字段 | 默认 | 说明 |
