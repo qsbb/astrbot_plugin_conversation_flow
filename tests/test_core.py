@@ -178,6 +178,7 @@ from astrbot_plugin_conversation_flow.core.prompts import (  # noqa: E402
     GROUP_CONTEXT_INSTRUCTION_TEMPLATE,
     REPLY_SPEAKER_SELF,
     REPLY_TARGET_INSTRUCTION_TEMPLATE,
+    REVERSE_WAKE_DECISION_INSTRUCTION_TEMPLATE,
     TOPIC_CONTEXT_INSTRUCTION_TEMPLATE,
     IMAGE_INTENT_INSTRUCTION,
     INTERCEPT_INJECT_INSTRUCTION,
@@ -191,6 +192,8 @@ from astrbot_plugin_conversation_flow.core.prompts import (  # noqa: E402
     SCENE_TARGET_HINT_UNKNOWN,
     SCENE_TO_GROUP_INSTRUCTION,
     SCENE_TO_OTHER_INSTRUCTION_TEMPLATE,
+    SILENCE_INJECT_INSTRUCTION,
+    SILENCE_PREJUDGE_SYSTEM,
 )
 from astrbot_plugin_conversation_flow.core.message_meta import (  # noqa: E402
     extract_at_targets,
@@ -1598,6 +1601,42 @@ class InterceptJudgeTests(unittest.TestCase):
         self.assertIn("<SILENCE/>", text)
 
 
+class SilencePromptBoundaryTests(unittest.TestCase):
+    def test_social_bids_are_explicit_reply_cases_in_both_strategies(self) -> None:
+        for prompt in (SILENCE_INJECT_INSTRUCTION, SILENCE_PREJUDGE_SYSTEM):
+            with self.subTest(prompt=prompt[:32]):
+                for phrase in (
+                    "普通问候、直接称呼、呼唤、撒娇、求关注",
+                    "早上好",
+                    "在吗",
+                    "妈妈",
+                    "姐姐",
+                    "抱抱",
+                    "看看我",
+                    "想你了",
+                ):
+                    self.assertIn(phrase, prompt)
+
+    def test_short_closure_words_require_context_and_ambiguity_prefers_reply(
+        self,
+    ) -> None:
+        for prompt in (SILENCE_INJECT_INSTRUCTION, SILENCE_PREJUDGE_SYSTEM):
+            with self.subTest(prompt=prompt[:32]):
+                for phrase in ("好的", "嗯", "谢谢", "晚安"):
+                    self.assertIn(phrase, prompt)
+                self.assertIn("不能", prompt)
+                self.assertIn("不确定", prompt)
+
+    def test_greetings_and_negative_content_are_not_blanket_silence_categories(
+        self,
+    ) -> None:
+        self.assertNotIn("情绪宣泄/打招呼/无意义", SILENCE_INJECT_INSTRUCTION)
+        self.assertNotIn("情绪宣泄/打招呼/无意义", SILENCE_PREJUDGE_SYSTEM)
+        for prompt in (SILENCE_INJECT_INSTRUCTION, SILENCE_PREJUDGE_SYSTEM):
+            self.assertIn("言语攻击", prompt)
+            self.assertIn("安全", prompt)
+
+
 class SilenceMarkerParsingTests(unittest.TestCase):
     @staticmethod
     def _judge(marker: str = "<SILENCE/>"):
@@ -2718,6 +2757,40 @@ class ReverseWakeTests(unittest.IsolatedAsyncioTestCase):
             sys.maxsize,
         )
 
+    async def test_reverse_wake_uses_recent_context_and_asks_model_to_decide(
+        self,
+    ) -> None:
+        plugin = self._plugin()
+        plugin.group_context.record("group1", "user2", "Bob", "我们在讨论晚饭")
+        plugin.group_context.record(
+            "group1",
+            "user1",
+            "Alice",
+            "吃什么好呢",
+            message_id="source-message",
+        )
+        event = _ReverseWakeEvent()
+        await plugin.restore_preceding_message_for_empty_mention(event)
+        req = types.SimpleNamespace(extra_user_content_parts=[], system_prompt="")
+
+        plugin._inject_group_context(event, req, seq=1, is_wake=True)
+        injected = plugin._inject_reverse_wake_decision(event, req)
+
+        self.assertTrue(injected)
+        texts = [
+            getattr(part, "text", None) or part.get("text", "")
+            for part in req.extra_user_content_parts
+        ]
+        combined = "\n".join(texts)
+        self.assertIn("我们在讨论晚饭", combined)
+        self.assertIn("最多最近 10 条", combined)
+        self.assertIn("不代表你必须回复", combined)
+        self.assertIn("只输出 <SILENCE/>", combined)
+        self.assertNotIn("Alice: 吃什么好呢", combined)
+        self.assertTrue(event.get_extra(plugin.REVERSE_WAKE_DECISION_INJECTED_KEY))
+        plugin.silence_judge = types.SimpleNamespace(should_inject=lambda: False)
+        self.assertTrue(plugin._should_check_silence_marker(event))
+
     async def test_records_only_unhandled_plain_text_as_reverse_wake_source(
         self,
     ) -> None:
@@ -2985,6 +3058,17 @@ class GroupContextPromptTests(unittest.TestCase):
         )
         self.assertIn("回复", formatted)
         self.assertIn("引用", formatted)
+
+    def test_reverse_wake_template_requires_contextual_reply_decision(self) -> None:
+        formatted = REVERSE_WAKE_DECISION_INSTRUCTION_TEMPLATE.format(
+            context_limit=10,
+            marker="<SILENCE/>",
+        )
+        self.assertIn("最多最近 10 条", formatted)
+        self.assertIn("不代表上一句话一定是在问你", formatted)
+        self.assertIn("不代表你必须回复", formatted)
+        self.assertIn("前后消息", formatted)
+        self.assertIn("只输出 <SILENCE/>", formatted)
 
 
 class ReplyTargetPromptTests(unittest.TestCase):

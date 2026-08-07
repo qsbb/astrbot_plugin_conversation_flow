@@ -61,6 +61,7 @@ from .core.prompts import (
     GROUP_CONTEXT_INSTRUCTION_TEMPLATE,
     REPLY_SPEAKER_SELF,
     REPLY_TARGET_INSTRUCTION_TEMPLATE,
+    REVERSE_WAKE_DECISION_INSTRUCTION_TEMPLATE,
     SCENE_TARGET_HINT_NAMED,
     SCENE_TARGET_HINT_UNKNOWN,
     SCENE_TO_GROUP_INSTRUCTION,
@@ -108,7 +109,7 @@ from .series_diagnostics import (
     logger,
 )
 
-__version__ = "0.8.8"
+__version__ = "0.8.9"
 RELATIONSHIP_PLUGIN_NAME = "astrbot_plugin_relationship"
 RELATIONSHIP_SNAPSHOT_CONTRACT_NAME = "relationship.snapshot"
 RELATIONSHIP_SNAPSHOT_CONTRACT_MAJOR = "1"
@@ -204,6 +205,7 @@ class ConversationalFlowPlugin(Star):
     # event extra 上用于标记“先发正文、后单独 @”已恢复成本轮正文的 key
     REVERSE_WAKE_RESTORED_KEY = "conv_flow_reverse_wake_restored"
     REVERSE_WAKE_SOURCE_MESSAGE_ID_KEY = "conv_flow_reverse_wake_source_message_id"
+    REVERSE_WAKE_DECISION_INJECTED_KEY = "conv_flow_reverse_wake_decision_injected"
     # event extra 上用于标记"私聊短消息承接上下文已注入"的 key
     PRIVATE_CONTEXT_INJECTED_KEY = "conv_flow_private_context_injected"
     DYNAMIC_CONTEXT_INJECTED_KEY = "conv_flow_dynamic_context_injected"
@@ -1233,6 +1235,10 @@ class ConversationalFlowPlugin(Star):
         if self.config.natural_tool_call_enabled:
             self._inject_natural_tool_call_instruction(req)
 
+        # “先发正文、再单独 @”只表示用户希望 bot 回看刚才的群聊；最后追加
+        # 专用判断指令，让主模型结合已注入的最近群聊记录决定是否自然参与。
+        self._inject_reverse_wake_decision(event, req)
+
     # Memory Companion 在 -20 注入长期记忆，情在 -30 补跨平台只读记忆。
     # 本钩子不新增任何提示内容或 LLM 调用，只把已经生成的当前轮承接块移到末尾，
     # 保证当前短答与紧邻上一问的明确语义不会被较长的背景片段覆盖。
@@ -1633,7 +1639,7 @@ class ConversationalFlowPlugin(Star):
     async def restore_preceding_message_for_empty_mention(
         self, event: AstrMessageEvent, *args: Any, **kwargs: Any
     ) -> None:
-        """把同一用户刚发出的正文恢复为随后空 @ 的当前问题。"""
+        """把同一用户刚发出的正文恢复为随后空 @ 的当前判断对象。"""
         if (
             not self.config.group_context_enabled
             or not self.config.group_context_reverse_wake_enabled
@@ -2586,6 +2592,18 @@ class ConversationalFlowPlugin(Star):
                 group_id,
                 is_wake,
             )
+
+    def _inject_reverse_wake_decision(self, event: AstrMessageEvent, req: Any) -> bool:
+        if self._get_extra(event, self.REVERSE_WAKE_RESTORED_KEY) is not True:
+            return False
+        instruction = REVERSE_WAKE_DECISION_INSTRUCTION_TEMPLATE.format(
+            context_limit=self.config.group_context_max_messages,
+            marker=self.config.silence_marker,
+        )
+        if not self._inject_instruction(req, instruction, "reverse wake decision"):
+            return False
+        self._set_extra(event, self.REVERSE_WAKE_DECISION_INJECTED_KEY, True)
+        return True
 
     def _inject_topic_context(
         self, event: AstrMessageEvent, req: Any, seq: Any
@@ -3746,8 +3764,8 @@ class ConversationalFlowPlugin(Star):
     def _should_check_silence_marker(self, event: AstrMessageEvent) -> bool:
         """判断本轮是否需要在响应中检测 silence_marker。
 
-        三类注入都会让模型有机会输出 marker：沉默判断的 inject 模式、
-        智能拦截、以及场景感知。任一命中都必须检测，否则 marker 会
+        多类注入都会让模型有机会输出 marker：沉默判断的 inject 模式、
+        智能拦截、场景感知、拟人情绪和反向唤醒判断。任一命中都必须检测，否则 marker 会
         原样发到群里。
         """
         if self.silence_judge.should_inject():
@@ -3756,7 +3774,9 @@ class ConversationalFlowPlugin(Star):
             return True
         if self._get_extra(event, self.SCENE_INJECTED_KEY) is True:
             return True
-        return self._get_extra(event, self.MOOD_INJECTED_KEY) is True
+        if self._get_extra(event, self.MOOD_INJECTED_KEY) is True:
+            return True
+        return self._get_extra(event, self.REVERSE_WAKE_DECISION_INJECTED_KEY) is True
 
     def _build_scene_input(self, event: AstrMessageEvent, group_id: str) -> SceneInput:
         """从 event 与群聊缓冲中收集场景判定所需的原始信号。"""
