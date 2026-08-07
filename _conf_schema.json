@@ -91,8 +91,8 @@
   },
   "chunking_llm_assist": {
     "type": "bool",
-    "description": "[智能分段] 对长文本启用 LLM 辅助切分",
-    "hint": "仅当自动切分得到的段数超过「单次回复最大分段数」时启用，调用一次轻量 LLM 重新规划。会额外消耗 token。",
+    "description": "[智能分段] 让 LLM 判断长回复怎么分段",
+    "hint": "开启后，达到最小长度且主模型没有用空行主动分段时，会额外调用一次 LLM，判断保持一条还是按语义切成多条。没有可用模型、调用关闭、超过 6 秒、返回异常或改写原文时，自动改用本地标点规则。短回复和其他插件发起的主动消息不会额外调用。会增加少量等待时间和 token 消耗。",
     "default": false
   },
   "chunking_delay_mode": {
@@ -198,6 +198,28 @@
     "default": 40,
     "minimum": 4,
     "maximum": 200
+  },
+  "dynamic_context_enabled": {
+    "type": "bool",
+    "description": "[动态上下文] 聊久后仍能接住当前话题",
+    "hint": "开启后，言会在内存里多保留几轮同一私聊。只有 AstrBot 交给模型的公开聊天记录已经缺页时才补回；记录完整时不会重复注入。主模型会自行判断当前消息是在继续旧话题还是已经换题，不额外调用一次模型。",
+    "default": true
+  },
+  "dynamic_context_max_turns": {
+    "type": "int",
+    "description": "[动态上下文] 最多保留多少轮当前话题",
+    "hint": "范围 2-12，默认 8。数值越大越不容易忘记较早的目标和约定，但缺页时会占用更多上下文。只保存在内存，重载或重启后清空。",
+    "default": 8,
+    "minimum": 2,
+    "maximum": 12
+  },
+  "dynamic_context_max_chars": {
+    "type": "int",
+    "description": "[动态上下文] 单次补回的文字上限",
+    "hint": "范围 600-4000，默认 1800。言优先保留最近的缺失轮次；超过上限会停止继续向前补，避免聊天越久提示词越大。",
+    "default": 1800,
+    "minimum": 600,
+    "maximum": 4000
   },
   "recent_activity_context_enabled": {
     "type": "bool",

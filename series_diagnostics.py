@@ -156,6 +156,7 @@ class DiagnosticBuffer(logging.Handler):
         with self._lock:
             self._events.clear()
             self._stream_id = uuid.uuid4().hex
+            self._sequence = 0
 
 
 _buffer = DiagnosticBuffer()

@@ -38,6 +38,9 @@ DEFAULTS: dict[str, Any] = {
     "private_context_bridge_enabled": True,
     "private_context_bridge_max_turns": 3,
     "private_context_bridge_short_max_chars": 40,
+    "dynamic_context_enabled": True,
+    "dynamic_context_max_turns": 8,
+    "dynamic_context_max_chars": 1800,
     "recent_activity_context_enabled": False,
     "recent_activity_retention_minutes": 120,
     "recent_activity_private_to_private_enabled": True,
@@ -292,6 +295,30 @@ def normalize_config(raw: dict[str, Any] | None) -> dict[str, Any]:
         ),
     )
 
+    out["dynamic_context_enabled"] = _coerce_bool(
+        raw.get("dynamic_context_enabled"), DEFAULTS["dynamic_context_enabled"]
+    )
+    out["dynamic_context_max_turns"] = min(
+        12,
+        max(
+            2,
+            _coerce_int(
+                raw.get("dynamic_context_max_turns"),
+                DEFAULTS["dynamic_context_max_turns"],
+            ),
+        ),
+    )
+    out["dynamic_context_max_chars"] = min(
+        4000,
+        max(
+            600,
+            _coerce_int(
+                raw.get("dynamic_context_max_chars"),
+                DEFAULTS["dynamic_context_max_chars"],
+            ),
+        ),
+    )
+
     out["recent_activity_context_enabled"] = _coerce_bool(
         raw.get("recent_activity_context_enabled"),
         DEFAULTS["recent_activity_context_enabled"],
@@ -445,7 +472,8 @@ def normalize_config(raw: dict[str, Any] | None) -> dict[str, Any]:
         ),
     )
     lazy_score = max(
-        0, min(100, _coerce_int(raw.get("mood_lazy_score"), DEFAULTS["mood_lazy_score"]))
+        0,
+        min(100, _coerce_int(raw.get("mood_lazy_score"), DEFAULTS["mood_lazy_score"])),
     )
     annoyed_score = max(
         0,
@@ -559,6 +587,9 @@ class PluginConfig:
     private_context_bridge_enabled: bool = True
     private_context_bridge_max_turns: int = 3
     private_context_bridge_short_max_chars: int = 40
+    dynamic_context_enabled: bool = True
+    dynamic_context_max_turns: int = 8
+    dynamic_context_max_chars: int = 1800
     recent_activity_context_enabled: bool = False
     recent_activity_retention_minutes: int = 120
     recent_activity_private_to_private_enabled: bool = True

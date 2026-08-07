@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import pathlib
 import sys
 import types
@@ -185,6 +186,7 @@ from astrbot_plugin_conversation_flow.core.prompts import (  # noqa: E402
     build_followup_guard_instruction,
     PRIVATE_CONTEXT_BRIDGE_TEMPLATE,
     CHUNKING_INSTRUCTION,
+    DYNAMIC_CONTEXT_TEMPLATE,
     SCENE_TARGET_HINT_NAMED,
     SCENE_TARGET_HINT_UNKNOWN,
     SCENE_TO_GROUP_INSTRUCTION,
@@ -576,9 +578,7 @@ class ProactiveEnvironmentDeliveryTests(unittest.TestCase):
         from astrbot_plugin_conversation_flow import main as flow_main
 
         plugin = self._plugin()
-        identity = plugin.context.get_star_instance(
-            "astrbot_plugin_identity_guardian"
-        )
+        identity = plugin.context.get_star_instance("astrbot_plugin_identity_guardian")
         identity.authorize_proactive_delivery = lambda _recipient: {
             "authorized": True,
             "channel": "group",
@@ -815,6 +815,114 @@ class ChunkerTests(unittest.TestCase):
         self.assertTrue(any("短段" in seg for seg in result))
 
 
+class _RecordingChunkLLM:
+    def __init__(self, response: str = "", error: Exception | None = None) -> None:
+        self.response = response
+        self.error = error
+        self.calls = 0
+
+    async def chat(self, *args, **kwargs) -> str:
+        self.calls += 1
+        if self.error is not None:
+            raise self.error
+        return self.response
+
+
+class LLMChunkingAssistTests(unittest.IsolatedAsyncioTestCase):
+    @staticmethod
+    def _config(**overrides):
+        values = {
+            "chunking_min_length": 10,
+            "chunking_max_segments": 5,
+            "chunking_preserve_paragraphs": False,
+            "chunking_llm_assist": True,
+        }
+        values.update(overrides)
+        return build_plugin_config(values)
+
+    async def test_llm_can_keep_reply_whole_before_local_candidate_limit(self) -> None:
+        text = "第一句话已经足够长。第二句话同样足够长。"
+        llm = _RecordingChunkLLM(json.dumps([text], ensure_ascii=False))
+        chunker = Chunker(self._config(), llm)
+
+        self.assertGreater(len(chunker.split(text)), 1)
+        self.assertEqual(await chunker.split_smart(text), [text])
+        self.assertEqual(llm.calls, 1)
+
+    async def test_llm_can_split_single_local_candidate_by_semantics(self) -> None:
+        first = "先确认今天要处理的主要事情"
+        second = "然后再安排晚上的休息时间"
+        llm = _RecordingChunkLLM(json.dumps([first, second], ensure_ascii=False))
+        chunker = Chunker(self._config(), llm)
+
+        self.assertEqual(chunker.split(first + second), [first + second])
+        self.assertEqual(
+            await chunker.split_smart(first + second),
+            [first, second],
+        )
+
+    async def test_primary_model_paragraphs_skip_second_llm_call(self) -> None:
+        text = "主模型已经决定的第一段内容。\n\n主模型已经决定的第二段内容。"
+        llm = _RecordingChunkLLM(json.dumps([text], ensure_ascii=False))
+        chunker = Chunker(self._config(), llm)
+
+        self.assertEqual(await chunker.split_smart(text), chunker.split(text))
+        self.assertEqual(llm.calls, 0)
+
+    async def test_disabled_and_short_replies_never_call_llm(self) -> None:
+        text = "第一句话已经足够长。第二句话同样足够长。"
+        disabled_llm = _RecordingChunkLLM()
+        disabled = Chunker(
+            self._config(chunking_llm_assist=False),
+            disabled_llm,
+        )
+        self.assertEqual(await disabled.split_smart(text), disabled.split(text))
+        self.assertEqual(disabled_llm.calls, 0)
+
+        short_llm = _RecordingChunkLLM()
+        short = Chunker(
+            self._config(chunking_min_length=60),
+            short_llm,
+        )
+        self.assertEqual(
+            await short.split_smart("收到，马上处理。"), ["收到，马上处理。"]
+        )
+        self.assertEqual(short_llm.calls, 0)
+
+    async def test_unavailable_invalid_rewritten_or_failed_llm_falls_back(self) -> None:
+        text = "第一句话已经足够长。第二句话同样足够长。"
+        expected = Chunker(self._config(), _RecordingChunkLLM()).split(text)
+        cases = (
+            _RecordingChunkLLM(""),
+            _RecordingChunkLLM("not-json"),
+            _RecordingChunkLLM(json.dumps(["模型擅自改写了正文"], ensure_ascii=False)),
+            _RecordingChunkLLM(error=RuntimeError("provider failed")),
+        )
+
+        for llm in cases:
+            with self.subTest(response=llm.response, error=type(llm.error).__name__):
+                chunker = Chunker(self._config(), llm)
+                self.assertEqual(await chunker.split_smart(text), expected)
+                self.assertEqual(llm.calls, 1)
+
+    async def test_llm_timeout_falls_back_without_waiting_for_provider(self) -> None:
+        from unittest.mock import patch
+
+        class SlowLLM:
+            async def chat(self, *args, **kwargs) -> str:
+                await asyncio.sleep(1)
+                return ""
+
+        text = "第一句话已经足够长。第二句话同样足够长。"
+        chunker = Chunker(self._config(), SlowLLM())
+        expected = chunker.split(text)
+        with patch(
+            "astrbot_plugin_conversation_flow.core.chunker.LLM_ASSIST_TIMEOUT_SECONDS",
+            0.001,
+        ):
+            self.assertEqual(await chunker.split_smart(text), expected)
+
+
 class ChunkingPromptTests(unittest.TestCase):
     def test_chunking_instruction_mentions_double_newline(self) -> None:
         """分段引导指令应明确提到双空行分段。"""
@@ -927,6 +1035,18 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(cfg.private_context_bridge_max_turns, 10)
         self.assertEqual(cfg.private_context_bridge_short_max_chars, 4)
 
+    def test_dynamic_context_defaults_and_limits(self) -> None:
+        cfg = build_plugin_config({})
+        self.assertTrue(cfg.dynamic_context_enabled)
+        self.assertEqual(cfg.dynamic_context_max_turns, 8)
+        self.assertEqual(cfg.dynamic_context_max_chars, 1800)
+
+        clamped = build_plugin_config(
+            {"dynamic_context_max_turns": 99, "dynamic_context_max_chars": 100}
+        )
+        self.assertEqual(clamped.dynamic_context_max_turns, 12)
+        self.assertEqual(clamped.dynamic_context_max_chars, 600)
+
     def test_topic_context_defaults(self) -> None:
         cfg = build_plugin_config({})
         self.assertFalse(cfg.topic_context_enabled)
@@ -957,6 +1077,11 @@ class TopicContextPromptTests(unittest.TestCase):
         )
         self.assertIn("消息一", result)
         self.assertIn("消息二", result)
+
+    def test_dynamic_template_delegates_topic_relevance_to_main_llm(self) -> None:
+        self.assertIn("自行判断", DYNAMIC_CONTEXT_TEMPLATE)
+        self.assertIn("独立新话题", DYNAMIC_CONTEXT_TEMPLATE)
+        self.assertIn("当前用户消息（最高优先级）", DYNAMIC_CONTEXT_TEMPLATE)
 
 
 class ThinkingMergeContextPromptTests(unittest.TestCase):
@@ -1292,9 +1417,7 @@ class ImageIntentTests(unittest.TestCase):
         )
         visible, source = is_image_visible_to_llm(req, event)
         self.assertTrue(visible)
-        self.assertEqual(
-            source, "extra_user_content_parts:visual_summary:图片描述"
-        )
+        self.assertEqual(source, "extra_user_content_parts:visual_summary:图片描述")
 
     def test_captioning_failure_is_not_visible(self) -> None:
         event = _ImageEvent([_MockImage(url="event.png")])
@@ -1331,15 +1454,11 @@ class ImageIntentTests(unittest.TestCase):
             ),
             _ProviderRequest(
                 extra_user_content_parts=[
-                    _TextPart(
-                        "<image_caption>C:\\temp\\image.png</image_caption>"
-                    )
+                    _TextPart("<image_caption>C:\\temp\\image.png</image_caption>")
                 ]
             ),
             _ProviderRequest(
-                extra_user_content_parts=[
-                    _TextPart("图片描述：C:\\temp\\image.png")
-                ]
+                extra_user_content_parts=[_TextPart("图片描述：C:\\temp\\image.png")]
             ),
             _ProviderRequest(
                 extra_user_content_parts=[{"type": "text", "text": "[图片]"}]
@@ -1511,6 +1630,8 @@ class SilenceMarkerParsingTests(unittest.TestCase):
             "<SILENT/>",
             "<SILENCE>",
             "<SILENCE />",
+            "[silence]",
+            "<NO_RESPONSE>",
             "```xml\n<SILENT/>\n```",
         ):
             with self.subTest(text=text):
@@ -1518,21 +1639,23 @@ class SilenceMarkerParsingTests(unittest.TestCase):
                 self.assertEqual(match.kind, "variant")
 
         self.assertEqual(
-            self._judge()
-            .parse_silence_response("<SILENT/> 好像大概是这样")
-            .kind,
+            self._judge().parse_silence_response("<SILENT/> 好像大概是这样").kind,
             "variant",
         )
         self.assertEqual(
-            self._judge()
-            .parse_silence_response("&lt;SILENT/&gt; 好像大概是这样")
-            .kind,
+            self._judge().parse_silence_response("&lt;SILENT/&gt; 好像大概是这样").kind,
             "variant",
         )
         self.assertEqual(
-            self._judge()
-            .parse_silence_response("请解释 <SILENT/> 是什么")
-            .kind,
+            self._judge().parse_silence_response("请解释 <SILENT/> 是什么").kind,
+            "no_match",
+        )
+        self.assertEqual(
+            self._judge().parse_silence_response("代码里的 [silence] 是什么").kind,
+            "no_match",
+        )
+        self.assertEqual(
+            self._judge().parse_silence_response("<NO_RESPONSE> 后面是正常回答").kind,
             "no_match",
         )
         self.assertEqual(
@@ -1799,10 +1922,10 @@ class ConversationTrackerTests(unittest.TestCase):
             event,
             _ProviderRequest(
                 extra_user_content_parts=[
-                    _TextPart("<image_caption>[Image Captioning Failed]</image_caption>"),
                     _TextPart(
-                        "<image_caption>C:\\temp\\image.png</image_caption>"
+                        "<image_caption>[Image Captioning Failed]</image_caption>"
                     ),
+                    _TextPart("<image_caption>C:\\temp\\image.png</image_caption>"),
                     _TextPart("[Image Attachment: path C:\\temp\\image.png]"),
                 ]
             ),
@@ -2009,9 +2132,7 @@ class RecentActivityIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(
             context["flags"]["conversation_flow"]["recent_context_selected"]
         )
-        artifact = context["artifacts"]["conversation_flow"][
-            "recent_activity_context"
-        ]
+        artifact = context["artifacts"]["conversation_flow"]["recent_activity_context"]
         self.assertEqual(artifact["source_scopes"], ["private"])
         self.assertNotIn("continuity_key", artifact)
         self.assertEqual(plugin._stats["recent_activity_selected"], 1)
@@ -2056,7 +2177,9 @@ class RecentActivityIntegrationTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(plugin._stats["recent_activity_selected"], 0)
 
-    async def test_private_context_never_enters_group_without_current_consent(self) -> None:
+    async def test_private_context_never_enters_group_without_current_consent(
+        self,
+    ) -> None:
         plugin = self._plugin()
         private = _RecentContextEvent(
             "qq:FriendMessage:user",
@@ -2145,13 +2268,15 @@ class RecentActivityConfigTests(unittest.TestCase):
     def test_feature_is_opt_in_and_retention_is_clamped(self) -> None:
         self.assertFalse(build_plugin_config({}).recent_activity_context_enabled)
         self.assertEqual(
-            build_plugin_config({"recent_activity_retention_minutes": 1})
-            .recent_activity_retention_minutes,
+            build_plugin_config(
+                {"recent_activity_retention_minutes": 1}
+            ).recent_activity_retention_minutes,
             30,
         )
         self.assertEqual(
-            build_plugin_config({"recent_activity_retention_minutes": 999})
-            .recent_activity_retention_minutes,
+            build_plugin_config(
+                {"recent_activity_retention_minutes": 999}
+            ).recent_activity_retention_minutes,
             360,
         )
 
@@ -2264,6 +2389,127 @@ class PrivateContextBridgeTests(unittest.TestCase):
         )
 
         plugin._inject_private_context_bridge(event, req, 2, event.message_str)
+
+        self.assertEqual(req.extra_user_content_parts, [])
+
+
+class DynamicContextTests(unittest.TestCase):
+    @staticmethod
+    def _plugin():
+        from astrbot_plugin_conversation_flow.main import ConversationalFlowPlugin
+
+        plugin = object.__new__(ConversationalFlowPlugin)
+        plugin.config = build_plugin_config(
+            {
+                "private_context_bridge_enabled": True,
+                "private_context_bridge_max_turns": 3,
+                "private_context_bridge_short_max_chars": 40,
+                "dynamic_context_enabled": True,
+                "dynamic_context_max_turns": 8,
+                "dynamic_context_max_chars": 1200,
+            }
+        )
+        plugin.tracker = ConversationTracker(max_history_turns=8)
+        plugin.logger = _Logger()
+        plugin._stats = {
+            "private_context_bridged": 0,
+            "dynamic_context_injected": 0,
+        }
+        return plugin
+
+    @staticmethod
+    def _complete_turn(plugin, umo: str, user_text: str, bot_text: str) -> None:
+        event = _Event(umo, user_text)
+        plugin.tracker.begin_request(event, detect_interrupt=False)
+        plugin.tracker.finish_response(event, bot_text=bot_text)
+
+    @staticmethod
+    def _instruction_text(req) -> str:
+        part = req.extra_user_content_parts[0]
+        return getattr(part, "text", None) or part.get("text", "")
+
+    def test_long_message_uses_dynamic_context_only_when_history_is_missing(
+        self,
+    ) -> None:
+        plugin = self._plugin()
+        umo = "PrivateMessage:qq:dynamic"
+        self._complete_turn(
+            plugin,
+            umo,
+            "我们正在设计动态上下文，关键实体是话题胶囊。",
+            "先保留近期原文，再在历史缺页时补回。",
+        )
+        event = _Event(
+            umo,
+            "继续把刚才这个动态上下文方案完整做完，并且确保当前纠正条件不会被较早内容覆盖，"
+            "最后还要补齐设置说明、隐私边界和自动化回归测试。",
+        )
+        plugin.tracker.begin_request(event, detect_interrupt=False)
+        req = types.SimpleNamespace(
+            extra_user_content_parts=[], system_prompt="", contexts=[]
+        )
+
+        plugin._inject_private_context_bridge(event, req, 2, event.message_str)
+        plugin._inject_dynamic_context(event, req, 2, event.message_str)
+
+        instruction = self._instruction_text(req)
+        self.assertIn("动态话题续接", instruction)
+        self.assertIn("话题胶囊", instruction)
+        self.assertIn("自行判断", instruction)
+        self.assertFalse(event.get_extra(plugin.PRIVATE_CONTEXT_INJECTED_KEY))
+        self.assertTrue(event.get_extra(plugin.DYNAMIC_CONTEXT_INJECTED_KEY))
+        self.assertEqual(plugin._stats["dynamic_context_injected"], 1)
+
+    def test_complete_framework_history_skips_dynamic_context(self) -> None:
+        plugin = self._plugin()
+        umo = "PrivateMessage:qq:complete"
+        previous_user = "继续处理同一个完整话题"
+        previous_bot = "这轮回答已经保留在框架公开历史"
+        self._complete_turn(plugin, umo, previous_user, previous_bot)
+        event = _Event(umo, "这是一个足够长的新问题，用来验证完整历史不会重复注入。")
+        plugin.tracker.begin_request(event, detect_interrupt=False)
+        req = types.SimpleNamespace(
+            extra_user_content_parts=[],
+            system_prompt="",
+            contexts=[previous_user, previous_bot],
+        )
+
+        plugin._inject_dynamic_context(event, req, 2, event.message_str)
+
+        self.assertEqual(req.extra_user_content_parts, [])
+        self.assertFalse(event.get_extra(plugin.DYNAMIC_CONTEXT_INJECTED_KEY))
+
+    def test_short_followup_uses_existing_private_bridge_without_duplicate(
+        self,
+    ) -> None:
+        plugin = self._plugin()
+        umo = "PrivateMessage:qq:short"
+        self._complete_turn(plugin, umo, "上一个具体对象是 stealer", "它负责表情标签。")
+        event = _Event(umo, "继续")
+        plugin.tracker.begin_request(event, detect_interrupt=False)
+        req = types.SimpleNamespace(
+            extra_user_content_parts=[], system_prompt="", contexts=[]
+        )
+
+        plugin._inject_private_context_bridge(event, req, 2, event.message_str)
+        plugin._inject_dynamic_context(event, req, 2, event.message_str)
+
+        self.assertEqual(len(req.extra_user_content_parts), 1)
+        self.assertIn("最近私聊承接", self._instruction_text(req))
+        self.assertFalse(event.get_extra(plugin.DYNAMIC_CONTEXT_INJECTED_KEY))
+
+    def test_group_message_never_uses_private_dynamic_context(self) -> None:
+        plugin = self._plugin()
+        umo = "GroupMessage:qq:dynamic"
+        self._complete_turn(plugin, umo, "群聊旧话题", "群聊旧回复")
+        event = _Event(umo, "继续这个足够长的群聊话题")
+        event.get_group_id = lambda: "dynamic"
+        plugin.tracker.begin_request(event, detect_interrupt=False)
+        req = types.SimpleNamespace(
+            extra_user_content_parts=[], system_prompt="", contexts=[]
+        )
+
+        plugin._inject_dynamic_context(event, req, 2, event.message_str)
 
         self.assertEqual(req.extra_user_content_parts, [])
 
@@ -3778,6 +4024,9 @@ class AgentTerminalFrameTests(unittest.IsolatedAsyncioTestCase):
             should_inject=lambda: False,
             should_prejudge=lambda: False,
             is_silence_response=lambda _text: False,
+            parse_silence_response=lambda _text: types.SimpleNamespace(
+                matched=False, kind="no_match", reason="test"
+            ),
         )
         plugin._stats = {
             "chunked": 0,
@@ -3856,6 +4105,50 @@ class AgentTerminalFrameTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("最终第二段正文", instruction)
         self.assertNotIn("旧话题回答", instruction)
 
+    async def test_stealer_emotion_tag_is_left_for_lower_priority_consumer(
+        self,
+    ) -> None:
+        plugin = self._plugin()
+        umo = "PrivateMessage:qq:stealer"
+        raw_text = "&&troll&& 你先把好感度刷到95再说喵！这一段本来可能被言拆开。"
+        event = _TerminalFrameEvent(umo, "再说一次", raw_text)
+        event.set_extra("stealer_auto_emoji_turn_decided", True)
+        event.set_extra("stealer_auto_emoji_turn_allowed", True)
+        plugin.tracker.begin_request(event, detect_interrupt=False)
+
+        await plugin.on_decorating_result(event)
+
+        self.assertFalse(event.stopped)
+        self.assertEqual(event.sent, [])
+        self.assertEqual(event.get_result().get_plain_text(), raw_text)
+        plan = event.get_extra("conversation_flow.delivery_plan")
+        self.assertEqual(
+            plan["segments"],
+            ["你先把好感度刷到95再说喵！这一段本来可能被言拆开。"],
+        )
+        recent = plugin.tracker.get_recent_turns(event)
+        self.assertEqual(len(recent), 1)
+        self.assertNotIn("&&troll&&", recent[0].bot_text)
+
+    async def test_external_silence_variants_are_suppressed_without_local_injection(
+        self,
+    ) -> None:
+        from astrbot_plugin_conversation_flow.core.silence_judge import SilenceJudge
+
+        for marker in ("[silence]", "<NO_RESPONSE>"):
+            with self.subTest(marker=marker):
+                plugin = self._plugin()
+                plugin.silence_judge = SilenceJudge(plugin.config, _StubLLM())
+                event = _TerminalFrameEvent(
+                    f"PrivateMessage:qq:{marker}", "测试外部沉默", marker
+                )
+                plugin.tracker.begin_request(event, detect_interrupt=False)
+
+                await plugin.on_decorating_result(event)
+
+                self.assertTrue(event.stopped)
+                self.assertEqual(event.get_result().chain, [])
+
     async def test_terminal_blank_frame_finishes_pending_without_completed_turn(
         self,
     ) -> None:
@@ -3909,9 +4202,7 @@ class AgentTerminalFrameTests(unittest.IsolatedAsyncioTestCase):
         plugin._inject_plain_text_instruction = lambda *_args, **_kwargs: None
         plugin._inject_chunking_instruction = lambda *_args, **_kwargs: None
         plugin._inject_natural_tool_call_instruction = lambda *_args, **_kwargs: None
-        plugin.intercept_judge = types.SimpleNamespace(
-            should_inject=lambda _umo: False
-        )
+        plugin.intercept_judge = types.SimpleNamespace(should_inject=lambda _umo: False)
         req = types.SimpleNamespace(
             prompt=event.message_str,
             system_prompt="",
@@ -4002,6 +4293,9 @@ class RelationshipOffenseMarkerTests(unittest.IsolatedAsyncioTestCase):
             should_inject=lambda: False,
             should_prejudge=lambda: False,
             is_silence_response=lambda _text: False,
+            parse_silence_response=lambda _text: types.SimpleNamespace(
+                matched=False, kind="no_match", reason="test"
+            ),
         )
         return plugin, submitted
 
@@ -4070,6 +4364,7 @@ class RelationshipOffenseMarkerTests(unittest.IsolatedAsyncioTestCase):
             )
         )
         self.assertEqual(req.extra_user_content_parts, [])
+
     def test_marker_parser_requires_exact_numeric_attributes(self):
         from astrbot_plugin_conversation_flow.main import ConversationalFlowPlugin
 
@@ -4246,9 +4541,9 @@ class PrivateContextBridgeFinalizerTests(unittest.TestCase):
         bridge_parts = [
             part
             for part in req.extra_user_content_parts
-            if str(
-                part.get("text", "") if isinstance(part, dict) else part.text
-            ).lstrip().startswith(marker)
+            if str(part.get("text", "") if isinstance(part, dict) else part.text)
+            .lstrip()
+            .startswith(marker)
         ]
         self.assertEqual(bridge_parts, [selected_bridge])
         self.assertIn(memory, req.extra_user_content_parts)

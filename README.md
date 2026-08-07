@@ -145,7 +145,7 @@ tracker；只有带终态标志的空白帧才清理 pending。最终非空正�
 | `chunking_protect_code_block` | `true` | 保护代码块不被切分 |
 | `chunking_preserve_paragraphs` | `true` | 优先保持自然段 |
 | `chunking_long_paragraph_threshold` | `20` | 超过此长度的自然段才继续按句子切分（LLM 主动分段未生效时的保底策略） |
-| `chunking_llm_assist` | `false` | 超长文本启用 LLM 辅助切分（额外消耗 token） |
+| `chunking_llm_assist` | `false` | 达到最小长度且主模型未主动分段时，由 LLM 判断保持一条或按语义切分；无模型、关闭、超时或结果不可信时回退本地规则（额外消耗 token） |
 
 #### 纯文本模式
 
@@ -193,6 +193,16 @@ tracker；只有带终态标志的空白帧才清理 pending。最终非空正�
 | `private_context_bridge_short_max_chars` | `40` | 主动承接的短消息长度上限，范围 4-200 |
 
 插件会在内存中保留少量“用户消息 + 实际交付回复”。遇到“试试能不能用”、单独给出的名称/术语、纠正语等短消息时，把最近明确对象和未完成任务重新放到当前请求附近。普通长消息若 AstrBot 公开历史已经完整，则不重复注入；当前消息明显开启新话题时，提示词要求忽略不相关历史。缓存不写磁盘，会随会话 TTL、重载或重启清理。
+
+#### 动态话题续接
+
+| 配置项 | 默认值 | 说明 |
+|---|---:|---|
+| `dynamic_context_enabled` | `true` | 私聊公开历史缺页时补回较早的同会话轮次 |
+| `dynamic_context_max_turns` | `8` | 内存中最多保留 2-12 个已完成轮次 |
+| `dynamic_context_max_chars` | `1800` | 单次补回的文字上限，范围 600-4000 |
+
+动态话题续接不会每轮把完整聊天记录重复塞给模型，也不会额外调用一次 LLM。言先检查 AstrBot 当前请求已经携带的公开历史：记录完整时不注入；发现较早轮次缺失时，按文字预算优先补回最近的真实“用户消息 + 实际回复”，再由本轮主模型自行判断当前消息是在继续原话题还是已经换题。最近的否定、纠正和新增条件始终优先。该能力只处理同一私聊；群聊继续使用群聊上下文，跨平台继续使用经过序授权的近期弱上下文，不会把私聊原文带进群聊。
 
 #### 同一人的跨会话近期感知
 
@@ -403,6 +413,10 @@ OneBot v11 的消息事件自带 `message_id`，引用消息以 `reply` 段携�
 ```
 
 主 LLM 输出 `<SILENCE/>` 时，插件在 `on_llm_response` 与 `on_decorating_result` 两处检测并 `clear_result()`。
+
+为兼容已有插件，整条 `[silence]` 与 SpectreCore 的整条 `<NO_RESPONSE>` 也按高置信沉默控制标记处理；标记出现在正常正文、代码说明或后面跟有实际回答时不会触发静默。
+
+安装 `astrbot_plugin_stealer` 且其本轮事件标记已经明确允许自动表情时，言会识别回复开头的 `&&emotion&&`。由于 stealer 在 `on_decorating_result(priority=100)` 才清理标签和选择表情，而言在 600，言不会在这类回复上提前分段并停止事件；它只把去标签正文写入语音交付计划和短期历史，再把原结果留给 stealer 消费。未出现 stealer 的本轮授权标记时，普通 `&&...&&` 文本不会被言擅自解释。
 
 **`prejudge` 策略**
 

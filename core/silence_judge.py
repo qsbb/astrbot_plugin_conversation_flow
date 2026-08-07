@@ -45,7 +45,11 @@ _CONTROL_TAG_VARIANT_RE = re.compile(
     \A\s*
     (?:```(?:[a-z0-9_-]{0,16})?\s*)?
     [>*_~`#\-:：,，.!！?？()（）\[\]【】「」『』\s]{0,12}
-    (?P<tag><\s*(?:SILENCE|SILENT)\s*/?\s*>)
+    (?P<tag>
+        <\s*(?:SILENCE|SILENT)\s*/?\s*>
+        |\[\s*SILENCE\s*\]
+        |<\s*NO_RESPONSE\s*>
+    )
     """,
     re.IGNORECASE | re.VERBOSE,
 )
@@ -87,9 +91,7 @@ def parse_silence_response(text: str, marker: str) -> SilenceResponseMatch:
     # A configured marker is authoritative only in the leading control
     # position, so ordinary prose quoting it is never silenced.
     prefix = _CONTROL_PREFIX_RE.match(response_text)
-    if prefix is not None and response_text.startswith(
-        configured_marker, prefix.end()
-    ):
+    if prefix is not None and response_text.startswith(configured_marker, prefix.end()):
         return _classify_marker_tail(
             response_text,
             prefix.end() + len(configured_marker),
@@ -111,7 +113,9 @@ def parse_silence_response(text: str, marker: str) -> SilenceResponseMatch:
     else:
         reason = "default_control_tag_variant"
 
-    kind: SilenceMatchKind = "matched" if raw_tag == _DEFAULT_SILENCE_MARKER else "variant"
+    kind: SilenceMatchKind = (
+        "matched" if raw_tag == _DEFAULT_SILENCE_MARKER else "variant"
+    )
     return _classify_marker_tail(normalized, match.end(), kind, reason)
 
 

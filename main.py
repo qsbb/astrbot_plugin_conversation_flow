@@ -80,6 +80,7 @@ from .core.prompts import (
     MOOD_LAZY_INSTRUCTION,
     PLAIN_TEXT_INSTRUCTION,
     CHUNKING_INSTRUCTION,
+    DYNAMIC_CONTEXT_TEMPLATE,
     RELATIONSHIP_OFFENSE_MARKER_INSTRUCTION,
 )
 from .core.scene import SceneInput, detect_scene
@@ -107,7 +108,7 @@ from .series_diagnostics import (
     logger,
 )
 
-__version__ = "0.8.7"
+__version__ = "0.8.8"
 RELATIONSHIP_PLUGIN_NAME = "astrbot_plugin_relationship"
 RELATIONSHIP_SNAPSHOT_CONTRACT_NAME = "relationship.snapshot"
 RELATIONSHIP_SNAPSHOT_CONTRACT_MAJOR = "1"
@@ -169,6 +170,10 @@ DELIVERY_PLAN_EXTRA_KEY = "conversation_flow.delivery_plan"
 DELIVERY_PLAN_VERSION = "1.0"
 SERIES_PROMPT_MARKER = "[凝心溯溪协同上下文]"
 PRIVATE_CONTEXT_BRIDGE_MARKER = "[对话流控制指令 - 最近私聊承接]"
+DYNAMIC_CONTEXT_MARKER = "[对话流控制指令 - 动态话题续接]"
+_STEALER_EMOTION_TAG_RE = re.compile(
+    r"\A\s*&&(?P<tag>[\w.-]{1,64})&&(?=\s|$)", re.UNICODE
+)
 SERIES_PROMPT_OWNERS = (
     OWNER_IDENTITY_GUARDIAN,
     OWNER_ACTIVE_LEARNER,
@@ -201,6 +206,8 @@ class ConversationalFlowPlugin(Star):
     REVERSE_WAKE_SOURCE_MESSAGE_ID_KEY = "conv_flow_reverse_wake_source_message_id"
     # event extra 上用于标记"私聊短消息承接上下文已注入"的 key
     PRIVATE_CONTEXT_INJECTED_KEY = "conv_flow_private_context_injected"
+    DYNAMIC_CONTEXT_INJECTED_KEY = "conv_flow_dynamic_context_injected"
+    EXTERNAL_CONTROL_TAG_KEY = "conv_flow_external_control_tag"
     # event extra 上用于记录本轮已绕过 AstrBot 原生 follow-up 捕获
     NATIVE_FOLLOWUP_BYPASSED_KEY = "conv_flow_native_followup_bypassed"
     RECENT_ACTIVITY_IDENTITY_KEY = "conv_flow_recent_activity_identity"
@@ -245,7 +252,10 @@ class ConversationalFlowPlugin(Star):
         self.chunker = Chunker(cfg=self.config, llm=self.llm)
         self.tracker = ConversationTracker(
             ttl_ms=self.config.interrupt_state_ttl_ms,
-            max_history_turns=self.config.private_context_bridge_max_turns,
+            max_history_turns=max(
+                self.config.private_context_bridge_max_turns,
+                self.config.dynamic_context_max_turns,
+            ),
         )
         self.tracker.update_interrupt_config(
             self.config.interrupt_window_ms, self.config.interrupt_scope
@@ -297,6 +307,7 @@ class ConversationalFlowPlugin(Star):
             "mood_silenced": 0,
             "mood_hinted": 0,
             "private_context_bridged": 0,
+            "dynamic_context_injected": 0,
             "recent_activity_recorded": 0,
             "recent_activity_selected": 0,
             "total_requests": 0,
@@ -826,7 +837,9 @@ class ConversationalFlowPlugin(Star):
             segments = self.chunker.split(normalized)
         else:
             segments = [normalized]
-        segments = [str(segment).strip() for segment in segments if str(segment).strip()]
+        segments = [
+            str(segment).strip() for segment in segments if str(segment).strip()
+        ]
         if not segments:
             return {
                 **response,
@@ -962,7 +975,12 @@ class ConversationalFlowPlugin(Star):
         self.tracker.update_interrupt_config(
             self.config.interrupt_window_ms, self.config.interrupt_scope
         )
-        self.tracker.update_history_limit(self.config.private_context_bridge_max_turns)
+        self.tracker.update_history_limit(
+            max(
+                self.config.private_context_bridge_max_turns,
+                self.config.dynamic_context_max_turns,
+            )
+        )
         self.recent_activity.update_limits(
             retention_seconds=self.config.recent_activity_retention_minutes * 60
         )
@@ -1143,6 +1161,9 @@ class ConversationalFlowPlugin(Star):
             )
         # 私聊短消息承接：补回分段/主动发送后可能未进入框架历史的最近轮次
         self._inject_private_context_bridge(event, req, seq, user_text)
+        # 私聊长消息仅在公开历史确实缺页时补回更早轮次，并由当前主模型判断
+        # 是否仍属同一话题；不会为此增加一次独立 LLM 请求。
+        self._inject_dynamic_context(event, req, seq, user_text)
         # 引用消息指向说明：消除"被引用内容是谁说的"歧义
         # 必须在上下文注入之后，让指向说明更靠近 prompt 末尾、权重更高
         try:
@@ -1219,16 +1240,30 @@ class ConversationalFlowPlugin(Star):
     async def finalize_private_context_bridge(
         self, event: AstrMessageEvent, req: Any, *args: Any, **kwargs: Any
     ) -> None:
-        if not self._get_extra(event, self.PRIVATE_CONTEXT_INJECTED_KEY):
-            return
-        if self._move_private_context_bridge_to_tail(req):
+        private_changed = bool(
+            self._get_extra(event, self.PRIVATE_CONTEXT_INJECTED_KEY)
+            and self._move_private_context_bridge_to_tail(req)
+        )
+        dynamic_changed = bool(
+            self._get_extra(event, self.DYNAMIC_CONTEXT_INJECTED_KEY)
+            and self._move_dynamic_context_to_tail(req)
+        )
+        if private_changed or dynamic_changed:
             request_context = ensure_context(event, PHASE_LLM_REQUEST)
             add_reason(
                 request_context,
                 OWNER_CONVERSATION_FLOW,
-                "PRIVATE_CONTEXT_BRIDGE_FINALIZED",
+                (
+                    "PRIVATE_CONTEXT_BRIDGE_FINALIZED"
+                    if private_changed
+                    else "DYNAMIC_CONTEXT_FINALIZED"
+                ),
             )
-            self.logger.debug("[conv-flow] private context bridge finalized")
+            self.logger.debug(
+                "[conv-flow] context bridge finalized (private=%s, dynamic=%s)",
+                private_changed,
+                dynamic_changed,
+            )
 
     # ------------------------------------------------------------------
     # 主钩子：on_llm_response
@@ -1277,9 +1312,9 @@ class ConversationalFlowPlugin(Star):
 
         # 2) 检查沉默标记（silence_judge 注入模式、拦截命中、场景指令注入时都需检测）
         should_check_marker = self._should_check_silence_marker(event)
-        if should_check_marker:
-            text = self._extract_response_text(response)
-            silence_match = self.silence_judge.parse_silence_response(text)
+        text = self._extract_response_text(response)
+        silence_match = self.silence_judge.parse_silence_response(text)
+        if should_check_marker or silence_match.kind == "variant":
             if silence_match.matched:
                 add_reason(
                     request_context,
@@ -1393,8 +1428,8 @@ class ConversationalFlowPlugin(Star):
 
         # 3) 沉默标记二次校验（注入模式、拦截命中、场景指令注入时都需检测）
         should_check_marker = self._should_check_silence_marker(event)
-        if should_check_marker:
-            silence_match = self.silence_judge.parse_silence_response(text)
+        silence_match = self.silence_judge.parse_silence_response(text)
+        if should_check_marker or silence_match.kind == "variant":
             if silence_match.matched:
                 add_reason(
                     request_context,
@@ -1410,6 +1445,41 @@ class ConversationalFlowPlugin(Star):
                 await self._silence_event(event)
                 self.tracker.cancel_request(event)
                 return
+
+        # astrbot_plugin_stealer 在 priority=100 才消费 ``&&emotion&&``，而言在
+        # 600。若本轮已由 stealer 明确授权并输出了它的首部标签，言只发布去标签
+        # 的语音/历史计划，不 stop_event、不改原结果，让 stealer 后续完成清理与发图。
+        stealer_tag = self._parse_stealer_emotion_tag(event, text)
+        if stealer_tag is not None:
+            tag, visible_text = stealer_tag
+            self._set_extra(
+                event,
+                self.EXTERNAL_CONTROL_TAG_KEY,
+                {"owner": "astrbot_plugin_stealer", "tag": tag},
+            )
+            self._publish_delivery_plan(
+                event,
+                [visible_text] if visible_text else [],
+                visible_text,
+                voice_requested,
+            )
+            if visible_text:
+                self._record_bot_message(event, visible_text)
+                self._record_air_reply(event, visible_text)
+                self._record_followup_reply(event, visible_text)
+                self._record_mood_reply(event)
+            if not voice_requested:
+                self.tracker.finish_response(event, bot_text=visible_text)
+            add_reason(
+                request_context,
+                OWNER_CONVERSATION_FLOW,
+                "EXTERNAL_EMOJI_CONTROL_DEFERRED",
+            )
+            self.logger.info(
+                "[conv-flow] seq=%s deferred stealer emotion tag to downstream",
+                seq,
+            )
+            return
 
         # 4) 纯文本模式：剥离 Markdown 格式标记
         text_modified = False
@@ -1457,8 +1527,14 @@ class ConversationalFlowPlugin(Star):
                 self.tracker.finish_response(event, bot_text=text)
             return
 
-        candidates = self.chunker.split_candidates(text)
-        if len(candidates) <= 1:
+        try:
+            umo = self.tracker._get_umo(event)
+            segments = await self.chunker.split_smart(text, umo=umo)
+        except Exception as exc:
+            self.logger.debug("[conv-flow] smart split failed: %s", exc)
+            segments = self.chunker.split(text)
+
+        if len(segments) <= 1:
             # 只有一段：in-place 修改结果，不抢占发送权
             if text_modified:
                 self._update_result_plain_text(event, text)
@@ -1470,20 +1546,6 @@ class ConversationalFlowPlugin(Star):
             if not voice_requested:
                 self.tracker.finish_response(event, bot_text=text)
             return
-
-        # 多段：需要主动发送
-        if (
-            self.config.chunking_llm_assist
-            and len(candidates) > self.config.chunking_max_segments
-        ):
-            try:
-                umo = self.tracker._get_umo(event)
-                segments = await self.chunker.split_with_llm_assist(text, umo=umo)
-            except Exception as exc:
-                self.logger.debug("[conv-flow] llm assist split failed: %s", exc)
-                segments = self.chunker.split(text)
-        else:
-            segments = self.chunker.split(text)
 
         self._publish_delivery_plan(event, segments, text, voice_requested)
         if voice_requested:
@@ -1775,6 +1837,7 @@ class ConversationalFlowPlugin(Star):
             f"- 分段次数: {self._stats['chunked']}\n"
             f"- 插话合并: {self._stats['interrupted']}\n"
             f"- 私聊上下文承接: {self._stats['private_context_bridged']}\n"
+            f"- 动态话题续接: {self._stats['dynamic_context_injected']}\n"
             f"- 跨会话片段: 选中 {self._stats['recent_activity_selected']} 次, "
             f"记录 {self._stats['recent_activity_recorded']} 条\n"
             f"- 拦截命中: {self._stats['intercepted']}\n"
@@ -1863,6 +1926,7 @@ class ConversationalFlowPlugin(Star):
             "mood_silenced": 0,
             "mood_hinted": 0,
             "private_context_bridged": 0,
+            "dynamic_context_injected": 0,
             "recent_activity_recorded": 0,
             "recent_activity_selected": 0,
             "total_requests": 0,
@@ -2078,11 +2142,7 @@ class ConversationalFlowPlugin(Star):
         raw_captions = raw_hint.get("old_captions", [])
         if not isinstance(raw_captions, (list, tuple)):
             return
-        captions = [
-            str(value).strip()
-            for value in raw_captions
-            if str(value).strip()
-        ]
+        captions = [str(value).strip() for value in raw_captions if str(value).strip()]
         if not captions:
             return
         try:
@@ -2119,6 +2179,7 @@ class ConversationalFlowPlugin(Star):
                 "[conv-flow] prepend interrupted captions failed: %s",
                 type(exc).__name__,
             )
+
     def _request_context_contains(self, req: Any, old_texts: list[Any]) -> bool:
         """检查 ProviderRequest 公开上下文是否已包含所有旧用户消息。"""
         values: list[str] = []
@@ -2404,7 +2465,9 @@ class ConversationalFlowPlugin(Star):
 
             runner = _ACTIVE_AGENT_RUNNERS.get(event.unified_msg_origin)
             runner_context = getattr(runner, "run_context", None)
-            runner_event = getattr(getattr(runner_context, "context", None), "event", None)
+            runner_event = getattr(
+                getattr(runner_context, "context", None), "event", None
+            )
             if runner_event is None:
                 return False
             current_sender = str(self.tracker._get_sender_id(event) or "")
@@ -2869,9 +2932,7 @@ class ConversationalFlowPlugin(Star):
         if recorded:
             self._stats["recent_activity_recorded"] += 1
 
-    def _record_recent_activity_bot(
-        self, event: AstrMessageEvent, text: str
-    ) -> None:
+    def _record_recent_activity_bot(self, event: AstrMessageEvent, text: str) -> None:
         if not self.config.recent_activity_context_enabled:
             return
         continuity_key = self._get_extra(event, self.RECENT_ACTIVITY_IDENTITY_KEY)
@@ -3005,6 +3066,8 @@ class ConversationalFlowPlugin(Star):
         is_short_followup = (
             len(current) <= self.config.private_context_bridge_short_max_chars
         )
+        if not is_short_followup and self.config.dynamic_context_enabled:
+            return
         if not is_short_followup and self._request_context_contains(req, history_texts):
             return
 
@@ -3034,6 +3097,79 @@ class ConversationalFlowPlugin(Star):
             is_short_followup,
         )
 
+    def _inject_dynamic_context(
+        self,
+        event: AstrMessageEvent,
+        req: Any,
+        seq: Any,
+        user_text: str,
+    ) -> None:
+        """公开历史缺页时补回同一私聊的有界真实轮次。"""
+        if not self.config.dynamic_context_enabled:
+            return
+        if self._get_group_id(event):
+            return
+        if self._get_extra(event, self.PRIVATE_CONTEXT_INJECTED_KEY):
+            return
+        current = str(user_text or "").strip()
+        if not current or current.startswith("/"):
+            return
+
+        turns = self.tracker.get_recent_turns(
+            event, self.config.dynamic_context_max_turns
+        )
+        missing_turns = []
+        for turn in turns:
+            texts = [
+                text for text in (*turn.user_texts, turn.bot_text) if str(text).strip()
+            ]
+            if texts and not self._request_context_contains(req, texts):
+                missing_turns.append(turn)
+        if not missing_turns:
+            return
+
+        budget = self.config.dynamic_context_max_chars
+        blocks: list[str] = []
+        used = 0
+        for turn in reversed(missing_turns):
+            lines = [
+                f"用户: {self._context_bridge_preview(text, 360)}"
+                for text in turn.user_texts
+                if self._context_bridge_preview(text, 360)
+            ]
+            bot_preview = self._context_bridge_preview(turn.bot_text, 480)
+            if bot_preview:
+                lines.append(f"你: {bot_preview}")
+            block = "\n".join(lines).strip()
+            if not block:
+                continue
+            separator = 2 if blocks else 0
+            remaining = budget - used - separator
+            if remaining <= 0:
+                break
+            if len(block) > remaining:
+                if blocks:
+                    break
+                block = block[: max(1, remaining - 1)].rstrip() + "…"
+            blocks.append(block)
+            used += separator + len(block)
+        if not blocks:
+            return
+
+        instruction = DYNAMIC_CONTEXT_TEMPLATE.format(
+            context="\n\n".join(reversed(blocks)),
+            current_message=self._context_bridge_preview(current, 240),
+        )
+        if not self._inject_instruction(req, instruction, "dynamic context"):
+            return
+        self._set_extra(event, self.DYNAMIC_CONTEXT_INJECTED_KEY, True)
+        self._stats["dynamic_context_injected"] += 1
+        self.logger.info(
+            "[conv-flow] seq=%s dynamic context injected (missing_turns=%s)",
+            seq,
+            len(missing_turns),
+        )
+
     @staticmethod
     def _context_bridge_preview(text: Any, max_chars: int = 600) -> str:
         """压缩单条历史文本，限制兜底上下文的 Token 体积。"""
@@ -3041,6 +3177,18 @@ class ConversationalFlowPlugin(Star):
         if len(compact) <= max_chars:
             return compact
         return compact[: max_chars - 1].rstrip() + "…"
+
+    def _parse_stealer_emotion_tag(
+        self, event: AstrMessageEvent, text: str
+    ) -> tuple[str, str] | None:
+        if self._get_extra(event, "stealer_auto_emoji_turn_decided") is not True:
+            return None
+        if self._get_extra(event, "stealer_auto_emoji_turn_allowed") is not True:
+            return None
+        match = _STEALER_EMOTION_TAG_RE.match(str(text or ""))
+        if match is None:
+            return None
+        return match.group("tag"), str(text or "")[match.end() :].lstrip()
 
     async def _inject_reply_context(
         self, event: AstrMessageEvent, req: Any, seq: Any
@@ -3432,7 +3580,19 @@ class ConversationalFlowPlugin(Star):
 
     @staticmethod
     def _move_private_context_bridge_to_tail(req: Any) -> bool:
-        """把唯一的私聊承接块移到附加内容末尾，并顺手去除同块重复项。"""
+        return ConversationalFlowPlugin._move_context_block_to_tail(
+            req, PRIVATE_CONTEXT_BRIDGE_MARKER
+        )
+
+    @staticmethod
+    def _move_dynamic_context_to_tail(req: Any) -> bool:
+        return ConversationalFlowPlugin._move_context_block_to_tail(
+            req, DYNAMIC_CONTEXT_MARKER
+        )
+
+    @staticmethod
+    def _move_context_block_to_tail(req: Any, marker: str) -> bool:
+        """把唯一的上下文块移到附加内容末尾，并顺手去除同块重复项。"""
         try:
             parts = getattr(req, "extra_user_content_parts", None)
         except Exception:
@@ -3446,7 +3606,7 @@ class ConversationalFlowPlugin(Star):
                 text = part.get("text", "")
             else:
                 text = getattr(part, "text", "")
-            if str(text or "").lstrip().startswith(PRIVATE_CONTEXT_BRIDGE_MARKER):
+            if str(text or "").lstrip().startswith(marker):
                 matches.append((index, part))
         if not matches:
             return False
@@ -4139,6 +4299,7 @@ class ConversationalFlowPlugin(Star):
             tmp_path.replace(self._config_file)
         except Exception as exc:
             self.logger.warning("[conv-flow] failed to persist config: %s", exc)
+
 
 _RELATIONSHIP_OFFENSE_TAG_RE = re.compile(
     r"^\s*<RELATIONSHIP_OFFENSE(?:\s+[^>]*)?>\s*", re.IGNORECASE

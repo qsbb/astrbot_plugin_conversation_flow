@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import re
 from dataclasses import dataclass
 
@@ -10,6 +11,9 @@ from ..series_diagnostics import logger
 from .config import PluginConfig
 from .llm_service import LLMService
 from .prompts import CHUNK_LLM_ASSIST_SYSTEM, CHUNK_LLM_ASSIST_USER_TEMPLATE
+
+
+LLM_ASSIST_TIMEOUT_SECONDS = 6.0
 
 
 @dataclass
@@ -24,9 +28,7 @@ class ChunkConfig:
 
 # 强句末标点。省略号表示停顿/延续，不应在“嘛……不太行”中间断开。
 # 连续标点和紧随其后的闭合引号作为一个整体，避免从标点串内部切段。
-_SENTENCE_END = re.compile(
-    r"(?:[。！？!?]+[”’」』】》）)\]\"']*|\n+)"
-)
+_SENTENCE_END = re.compile(r"(?:[。！？!?]+[”’」』】》）)\]\"']*|\n+)")
 # 短回复兜底只考虑强语气句界；常规句号仍受 min_length 控制。
 _STRONG_SENTENCE_END = re.compile(r"[！？!?]+[”’」』】》）)\]\"']*")
 _COMPLETE_SENTENCE_END = re.compile(r"[。！？!?]+[”’」』】》）)\]\"']*\s*$")
@@ -91,8 +93,26 @@ class Chunker:
             return self._collapse_to_max(segments)
         return segments
 
+    def should_use_llm_assist(self, text: str) -> bool:
+        # The primary model has already decided when it emitted double newlines.
+        if not self._chunk_cfg.llm_assist or not text:
+            return False
+        normalized = text.rstrip()
+        if (
+            len(normalized) < self._chunk_cfg.min_length
+            or self._chunk_cfg.max_segments <= 1
+        ):
+            return False
+        return _PARAGRAPH_SPLIT.search(normalized) is None
+
+    async def split_smart(self, text: str, umo: str = "") -> list[str]:
+        # Prefer a semantic decision, with deterministic local rules as fallback.
+        if self.should_use_llm_assist(text):
+            return await self.split_with_llm_assist(text, umo=umo)
+        return self.split(text)
+
     async def split_with_llm_assist(self, text: str, umo: str = "") -> list[str]:
-        """对超长文本启用 LLM 辅助切分。失败回退到启发式。"""
+        """让 LLM 决定是否切分；不可用或结果不可信时回退本地规则。"""
         if not self._chunk_cfg.llm_assist:
             return self.split(text)
         try:
@@ -105,19 +125,21 @@ class Chunker:
             )
             from .llm_service import LLMService  # noqa: F401 - 类型提示用
 
-            resp_text = await self.llm.chat(
-                prompt=user_prompt,
-                system_prompt=system_prompt,
-                umo=umo,
-                provider_id=self.cfg.llm_provider_id,
+            resp_text = await asyncio.wait_for(
+                self.llm.chat(
+                    prompt=user_prompt,
+                    system_prompt=system_prompt,
+                    umo=umo,
+                    provider_id=self.cfg.llm_provider_id,
+                ),
+                timeout=LLM_ASSIST_TIMEOUT_SECONDS,
             )
             segments = self._parse_llm_segments(resp_text)
             if segments and len(segments) <= self._chunk_cfg.max_segments:
-                # 用原文片段匹配 LLM 切分点，避免 LLM 改词
+                # 只接受能逐字映射回原文的边界，绝不发送 LLM 改写后的文本。
                 matched = self._match_to_original(text, segments)
                 if matched:
                     return matched
-                return segments
         except Exception as exc:
             self.logger.debug("[conv-flow] LLM assist split failed: %s", exc)
         return self.split(text)
@@ -272,31 +294,29 @@ class Chunker:
         return []
 
     def _match_to_original(self, original: str, llm_segments: list[str]) -> list[str]:
-        """尝试把 LLM 切分点匹配回原文，避免 LLM 改词。
-
-        简单实现：按 LLM 给的每段开头在原文中查找位置，按位置切。
-        """
+        """按完整片段逐字匹配切分边界，拒绝遗漏或改写原文的结果。"""
         if not llm_segments or not original:
             return []
-        result: list[str] = []
+        starts: list[int] = []
         cursor = 0
         for seg in llm_segments:
-            # 取段落前 15 个非空白字符作为锚点
-            anchor = seg.strip()[:15]
-            if not anchor:
-                continue
-            idx = original.find(anchor, cursor)
-            if idx == -1:
-                # 找不到锚点，放弃匹配
+            needle = seg.strip()
+            if not needle:
                 return []
-            if idx > cursor:
-                # 把中间内容并入前一段
-                if result:
-                    result[-1] = result[-1] + original[cursor:idx]
-                else:
-                    result.append(original[cursor:idx])
-            cursor = idx
-        if cursor < len(original):
-            # 最后一段到结尾
-            result.append(original[cursor:])
-        return [s for s in result if s.strip()]
+            idx = original.find(needle, cursor)
+            if idx == -1:
+                return []
+            if original[cursor:idx].strip():
+                return []
+            starts.append(idx)
+            cursor = idx + len(needle)
+        if original[cursor:].strip():
+            return []
+        result: list[str] = []
+        for index, start in enumerate(starts):
+            end = starts[index + 1] if index + 1 < len(starts) else len(original)
+            segment = original[start:end].strip()
+            if not segment:
+                return []
+            result.append(segment)
+        return result
