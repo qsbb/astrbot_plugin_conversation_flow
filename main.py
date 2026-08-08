@@ -109,7 +109,7 @@ from .series_diagnostics import (
     logger,
 )
 
-__version__ = "0.8.9"
+__version__ = "0.8.10"
 RELATIONSHIP_PLUGIN_NAME = "astrbot_plugin_relationship"
 RELATIONSHIP_SNAPSHOT_CONTRACT_NAME = "relationship.snapshot"
 RELATIONSHIP_SNAPSHOT_CONTRACT_MAJOR = "1"
@@ -206,6 +206,8 @@ class ConversationalFlowPlugin(Star):
     REVERSE_WAKE_RESTORED_KEY = "conv_flow_reverse_wake_restored"
     REVERSE_WAKE_SOURCE_MESSAGE_ID_KEY = "conv_flow_reverse_wake_source_message_id"
     REVERSE_WAKE_DECISION_INJECTED_KEY = "conv_flow_reverse_wake_decision_injected"
+    # event extra 上用于记录本轮是否命中“概率引用回复”，避免分段重复抽样
+    REPLY_QUOTE_DECISION_KEY = "conv_flow_reply_quote_decision"
     # event extra 上用于标记"私聊短消息承接上下文已注入"的 key
     PRIVATE_CONTEXT_INJECTED_KEY = "conv_flow_private_context_injected"
     DYNAMIC_CONTEXT_INJECTED_KEY = "conv_flow_dynamic_context_injected"
@@ -1432,6 +1434,9 @@ class ConversationalFlowPlugin(Star):
             )
             return
 
+        # 每轮只抽样一次，后续单段、分段和组件感知发送共用同一个决定。
+        should_quote_reply = self._decide_reply_quote(event)
+
         # 3) 沉默标记二次校验（注入模式、拦截命中、场景指令注入时都需检测）
         should_check_marker = self._should_check_silence_marker(event)
         silence_match = self.silence_judge.parse_silence_response(text)
@@ -1515,6 +1520,7 @@ class ConversationalFlowPlugin(Star):
                 result,
                 text,
                 voice_requested,
+                should_quote_reply,
                 seq,
                 request_context,
             )
@@ -1524,6 +1530,7 @@ class ConversationalFlowPlugin(Star):
         if not self.config.chunking_enabled:
             if text_modified:
                 self._update_result_plain_text(event, text)
+            self._prepend_reply_quote_to_result(event, should_quote_reply)
             self._record_bot_message(event, text)
             self._record_air_reply(event, text)
             self._record_followup_reply(event, text)
@@ -1544,6 +1551,7 @@ class ConversationalFlowPlugin(Star):
             # 只有一段：in-place 修改结果，不抢占发送权
             if text_modified:
                 self._update_result_plain_text(event, text)
+            self._prepend_reply_quote_to_result(event, should_quote_reply)
             self._record_bot_message(event, text)
             self._record_air_reply(event, text)
             self._record_followup_reply(event, text)
@@ -1575,6 +1583,7 @@ class ConversationalFlowPlugin(Star):
             pass
 
         sent_text_parts: list[str] = []
+        quote_pending = should_quote_reply
         for idx, seg in enumerate(segments):
             seg = seg.strip()
             if not seg:
@@ -1594,7 +1603,12 @@ class ConversationalFlowPlugin(Star):
                 )
                 break
             try:
-                await event.send(event.plain_result(seg))
+                if quote_pending:
+                    chain = self._build_reply_quote_chain(event, [Plain(text=seg)])
+                    await event.send(event.chain_result(chain))
+                    quote_pending = False
+                else:
+                    await event.send(event.plain_result(seg))
                 sent_text_parts.append(seg)
             except Exception as exc:
                 self.logger.warning(
@@ -1607,7 +1621,13 @@ class ConversationalFlowPlugin(Star):
                 "[conv-flow] seq=%s all segments failed, sending original text", seq
             )
             try:
-                await event.send(event.plain_result(original_text))
+                if should_quote_reply:
+                    chain = self._build_reply_quote_chain(
+                        event, [Plain(text=original_text)]
+                    )
+                    await event.send(event.chain_result(chain))
+                else:
+                    await event.send(event.plain_result(original_text))
                 sent_text_parts.append(original_text)
             except Exception as exc:
                 self.logger.warning(
@@ -1812,6 +1832,8 @@ class ConversationalFlowPlugin(Star):
             f"events={self.recent_activity.event_count})\n"
             f"- 引用消息: {'on' if self.config.reply_context_enabled else 'off'} "
             f"(api_fallback={self.config.reply_context_api_fallback})\n"
+            f"- 概率引用回复: {'on' if self.config.reply_quote_enabled else 'off'} "
+            f"(chance={self.config.reply_quote_probability}%)\n"
             f"- 话题上下文: {'on' if self.config.topic_context_enabled else 'off'} "
             f"(max={self.config.topic_context_max_messages})\n"
             f"- 智能拦截: {'on' if self.config.intercept_enabled else 'off'}\n"
@@ -3970,6 +3992,100 @@ class ConversationalFlowPlugin(Star):
             is_bot=True,
         )
 
+    def _decide_reply_quote(self, event: AstrMessageEvent) -> bool:
+        """为本轮回复抽取一次是否引用当前用户消息。
+
+        这是纯本地、一次性的发送表现选择，不调用 LLM，也不把历史消息当作
+        引用目标。没有公开消息 ID 时直接关闭，避免伪造平台引用。
+        """
+        existing = self._get_extra(event, self.REPLY_QUOTE_DECISION_KEY)
+        if isinstance(existing, bool):
+            return existing
+
+        enabled = bool(self.config.reply_quote_enabled)
+        probability = max(0, min(100, int(self.config.reply_quote_probability)))
+        message_id = self._reply_quote_target_message_id(event)
+        decision = False
+        if enabled and probability > 0 and message_id:
+            if probability >= 100:
+                decision = True
+            else:
+                try:
+                    decision = secrets.randbelow(100) < probability
+                except Exception as exc:
+                    self.logger.debug(
+                        "[conv-flow] reply quote sampling unavailable: %s",
+                        type(exc).__name__,
+                    )
+        self._set_extra(event, self.REPLY_QUOTE_DECISION_KEY, decision)
+        if enabled:
+            self.logger.debug(
+                "[conv-flow] reply quote decision=%s probability=%s has_message_id=%s",
+                decision,
+                probability,
+                bool(message_id),
+            )
+        return decision
+
+    def _reply_quote_target_message_id(self, event: AstrMessageEvent) -> str:
+        """返回真正被回应的消息 ID；反向唤醒优先引用前一条正文。"""
+        if self._get_extra(event, self.REVERSE_WAKE_RESTORED_KEY) is True:
+            source_message_id = self._get_extra(
+                event, self.REVERSE_WAKE_SOURCE_MESSAGE_ID_KEY
+            )
+            if source_message_id:
+                return str(source_message_id)
+        return get_message_id(event)
+
+    def _build_reply_quote_chain(
+        self, event: AstrMessageEvent, components: list[Any]
+    ) -> list[Any]:
+        """在首个发送链前添加 AstrBot 公共 Reply 组件，失败则原链降级。"""
+        chain = list(components)
+        if self._get_extra(event, self.REPLY_QUOTE_DECISION_KEY) is not True:
+            return chain
+        message_id = self._reply_quote_target_message_id(event)
+        if not message_id or any(
+            type(component).__name__.lower() == "reply" for component in chain
+        ):
+            return chain
+        try:
+            from astrbot.api.message_components import Reply
+
+            try:
+                quote = Reply(message_id)
+            except TypeError:
+                quote = Reply(id=message_id)
+            return [quote, *chain]
+        except Exception as exc:
+            self.logger.debug(
+                "[conv-flow] reply quote component unavailable: %s",
+                type(exc).__name__,
+            )
+            return chain
+
+    def _prepend_reply_quote_to_result(
+        self, event: AstrMessageEvent, should_quote_reply: bool
+    ) -> bool:
+        """给仍由 AstrBot 默认发送的单段结果加引用，保持失败关闭。"""
+        if not should_quote_reply:
+            return False
+        try:
+            result = event.get_result()
+            chain = getattr(result, "chain", None)
+            if not isinstance(chain, list):
+                return False
+            quoted = self._build_reply_quote_chain(event, chain)
+            if quoted == chain:
+                return False
+            chain[:] = quoted
+            return True
+        except Exception as exc:
+            self.logger.debug(
+                "[conv-flow] prepend reply quote failed: %s", type(exc).__name__
+            )
+            return False
+
     def _get_self_id(self, event: AstrMessageEvent) -> str:
         """获取 bot 自身 ID，带本地缓存避免重复解析。"""
         if self._self_id_cache:
@@ -3985,6 +4101,7 @@ class ConversationalFlowPlugin(Star):
         result: Any,
         text: str,
         voice_requested: bool,
+        should_quote_reply: bool,
         seq: Any,
         request_context: dict[str, Any],
     ) -> None:
@@ -4038,6 +4155,8 @@ class ConversationalFlowPlugin(Star):
                     ]
                 except Exception:
                     pass
+            if not voice_requested:
+                self._prepend_reply_quote_to_result(event, should_quote_reply)
             self._record_bot_message(event, text)
             self._record_air_reply(event, text)
             self._record_followup_reply(event, text)
@@ -4061,6 +4180,7 @@ class ConversationalFlowPlugin(Star):
         sent_text: list[str] = []
         sent_units = 0
         interrupted = False
+        quote_pending = should_quote_reply
         for index, unit in enumerate(plan.units):
             if self.config.interrupt_enabled and self.tracker.is_discarded(event):
                 interrupted = True
@@ -4087,7 +4207,11 @@ class ConversationalFlowPlugin(Star):
                     interrupted = True
                     break
             try:
-                await event.send(event.chain_result(list(unit)))
+                delivery_unit = list(unit)
+                if quote_pending:
+                    delivery_unit = self._build_reply_quote_chain(event, delivery_unit)
+                    quote_pending = False
+                await event.send(event.chain_result(delivery_unit))
                 sent_units += 1
                 if unit_text:
                     sent_text.append(unit_text)
@@ -4098,7 +4222,12 @@ class ConversationalFlowPlugin(Star):
 
         if not sent_units and not interrupted:
             try:
-                await event.send(event.chain_result(original_chain))
+                fallback_chain = list(original_chain)
+                if should_quote_reply:
+                    fallback_chain = self._build_reply_quote_chain(
+                        event, fallback_chain
+                    )
+                await event.send(event.chain_result(fallback_chain))
                 sent_units = 1
                 sent_text = [text] if text.strip() else []
             except Exception as exc:

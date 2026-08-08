@@ -42,9 +42,15 @@ class At:
         self.name = name
 
 
+class Reply:
+    def __init__(self, id=""):
+        self.id = str(id)
+
+
 astrbot_mc_module.Image = _MockImage
 astrbot_mc_module.Plain = _MockPlain
 astrbot_mc_module.At = At
+astrbot_mc_module.Reply = Reply
 astrbot_api_module.message_components = astrbot_mc_module
 
 # mock astrbot.api.event（filter 装饰器记录 priority，供入口钩子测试使用）
@@ -3401,6 +3407,8 @@ class ReplyConfigTests(unittest.TestCase):
         self.assertEqual(cfg.group_context_bot_label, "你")
         self.assertTrue(cfg.reply_context_enabled)
         self.assertTrue(cfg.reply_context_api_fallback)
+        self.assertFalse(cfg.reply_quote_enabled)
+        self.assertEqual(cfg.reply_quote_probability, 30)
 
     def test_can_be_disabled(self) -> None:
         cfg = build_plugin_config(
@@ -3408,11 +3416,29 @@ class ReplyConfigTests(unittest.TestCase):
                 "group_context_record_bot": False,
                 "reply_context_enabled": False,
                 "reply_context_api_fallback": False,
+                "reply_quote_enabled": True,
+                "reply_quote_probability": 80,
             }
         )
         self.assertFalse(cfg.group_context_record_bot)
         self.assertFalse(cfg.reply_context_enabled)
         self.assertFalse(cfg.reply_context_api_fallback)
+        self.assertTrue(cfg.reply_quote_enabled)
+        self.assertEqual(cfg.reply_quote_probability, 80)
+
+    def test_reply_quote_probability_is_clamped(self) -> None:
+        self.assertEqual(
+            build_plugin_config(
+                {"reply_quote_probability": -1}
+            ).reply_quote_probability,
+            0,
+        )
+        self.assertEqual(
+            build_plugin_config(
+                {"reply_quote_probability": 101}
+            ).reply_quote_probability,
+            100,
+        )
 
     def test_bot_label_customizable(self) -> None:
         cfg = build_plugin_config({"group_context_bot_label": "溯溪"})
@@ -3436,8 +3462,115 @@ class ReplyConfigTests(unittest.TestCase):
             "private_context_bridge_short_max_chars",
             "reply_context_enabled",
             "reply_context_api_fallback",
+            "reply_quote_enabled",
+            "reply_quote_probability",
         ):
             self.assertIn(key, DEFAULTS)
+
+
+class ReplyQuoteTests(unittest.TestCase):
+    @staticmethod
+    def _plugin(config=None):
+        from astrbot_plugin_conversation_flow.main import ConversationalFlowPlugin
+
+        plugin = ConversationalFlowPlugin.__new__(ConversationalFlowPlugin)
+        plugin.config = build_plugin_config(config or {})
+        plugin.logger = _Logger()
+        return plugin
+
+    @staticmethod
+    def _event(message_id="message-1"):
+        class Event:
+            def __init__(self):
+                self._extra = {}
+                self.message_obj = types.SimpleNamespace(message_id=message_id)
+                self._result = types.SimpleNamespace(chain=[_MockPlain("回复内容")])
+
+            def set_extra(self, key, value):
+                self._extra[key] = value
+
+            def get_extra(self, key):
+                return self._extra.get(key)
+
+            def get_result(self):
+                return self._result
+
+        return Event()
+
+    def test_quote_is_disabled_by_default(self) -> None:
+        plugin = self._plugin()
+        event = self._event()
+        self.assertFalse(plugin._decide_reply_quote(event))
+        self.assertEqual(event.get_result().chain[0].text, "回复内容")
+
+    def test_enabled_quote_uses_current_message_id_once(self) -> None:
+        from unittest.mock import patch
+
+        plugin = self._plugin(
+            {"reply_quote_enabled": True, "reply_quote_probability": 30}
+        )
+        event = self._event("source-42")
+        with patch(
+            "astrbot_plugin_conversation_flow.main.secrets.randbelow", return_value=10
+        ) as draw:
+            self.assertTrue(plugin._decide_reply_quote(event))
+            self.assertTrue(plugin._decide_reply_quote(event))
+        draw.assert_called_once_with(100)
+        chain = plugin._build_reply_quote_chain(event, [_MockPlain("回复")])
+        self.assertIsInstance(chain[0], Reply)
+        self.assertEqual(chain[0].id, "source-42")
+        self.assertEqual(chain[1].text, "回复")
+
+    def test_probability_miss_keeps_plain_chain(self) -> None:
+        from unittest.mock import patch
+
+        plugin = self._plugin(
+            {"reply_quote_enabled": True, "reply_quote_probability": 30}
+        )
+        event = self._event()
+        with patch(
+            "astrbot_plugin_conversation_flow.main.secrets.randbelow", return_value=90
+        ):
+            self.assertFalse(plugin._decide_reply_quote(event))
+        chain = plugin._build_reply_quote_chain(event, [_MockPlain("回复")])
+        self.assertEqual(len(chain), 1)
+        self.assertIsInstance(chain[0], _MockPlain)
+
+    def test_missing_message_id_fails_closed(self) -> None:
+        plugin = self._plugin(
+            {"reply_quote_enabled": True, "reply_quote_probability": 100}
+        )
+        event = self._event("")
+        self.assertFalse(plugin._decide_reply_quote(event))
+        self.assertEqual(
+            len(plugin._build_reply_quote_chain(event, [_MockPlain("回复")])), 1
+        )
+
+    def test_default_result_gets_one_quote_without_duplicate(self) -> None:
+        plugin = self._plugin(
+            {"reply_quote_enabled": True, "reply_quote_probability": 100}
+        )
+        event = self._event("source-7")
+        self.assertTrue(plugin._decide_reply_quote(event))
+        self.assertTrue(plugin._prepend_reply_quote_to_result(event, True))
+        self.assertFalse(plugin._prepend_reply_quote_to_result(event, True))
+        self.assertEqual(
+            [type(item).__name__ for item in event.get_result().chain],
+            ["Reply", "_MockPlain"],
+        )
+
+    def test_reverse_wake_quotes_restored_source_instead_of_empty_mention(self) -> None:
+        plugin = self._plugin(
+            {"reply_quote_enabled": True, "reply_quote_probability": 100}
+        )
+        event = self._event("mention-message")
+        event.set_extra(plugin.REVERSE_WAKE_RESTORED_KEY, True)
+        event.set_extra(plugin.REVERSE_WAKE_SOURCE_MESSAGE_ID_KEY, "source-message")
+
+        self.assertTrue(plugin._decide_reply_quote(event))
+        chain = plugin._build_reply_quote_chain(event, [_MockPlain("回复")])
+
+        self.assertEqual(chain[0].id, "source-message")
 
 
 class NewConfigTests(unittest.TestCase):

@@ -475,6 +475,20 @@
     "hint": "被引用消息不在插件本地缓冲、且引用段自身没带内容预览时，调用 OneBot 的 get_msg 接口反查发送者与内容。会增加一次协议端请求；关闭则该情况下退化为不注入指向说明。",
     "default": true
   },
+  "reply_quote_enabled": {
+    "type": "bool",
+    "description": "[引用回复] 按概率引用用户消息",
+    "hint": "开启后，普通回复有一定概率引用当前想要回复的那条用户消息。默认关闭；只在平台提供消息 ID 且 Reply 组件可用时生效，分段回复只在第一段引用一次。",
+    "default": false
+  },
+  "reply_quote_probability": {
+    "type": "int",
+    "description": "[引用回复] 引用概率（百分比）",
+    "hint": "每轮回复独立抽取一次，范围 0-100。默认 30；设置为 0 等同于不引用，设置为 100 则每次都尝试引用。",
+    "default": 30,
+    "minimum": 0,
+    "maximum": 100
+  },
   "topic_context_enabled": {
     "type": "bool",
     "description": "[话题上下文] 启用话题上下文注入",

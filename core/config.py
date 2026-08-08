@@ -85,6 +85,8 @@ DEFAULTS: dict[str, Any] = {
     "reply_context_enabled": True,
     "relationship_offense_detection_enabled": False,
     "reply_context_api_fallback": True,
+    "reply_quote_enabled": False,
+    "reply_quote_probability": 30,
     "topic_context_enabled": False,
     "topic_context_max_messages": 10,
     "intercept_enabled": False,
@@ -518,6 +520,19 @@ def normalize_config(raw: dict[str, Any] | None) -> dict[str, Any]:
         raw.get("reply_context_api_fallback"),
         DEFAULTS["reply_context_api_fallback"],
     )
+    out["reply_quote_enabled"] = _coerce_bool(
+        raw.get("reply_quote_enabled"), DEFAULTS["reply_quote_enabled"]
+    )
+    out["reply_quote_probability"] = max(
+        0,
+        min(
+            100,
+            _coerce_int(
+                raw.get("reply_quote_probability"),
+                DEFAULTS["reply_quote_probability"],
+            ),
+        ),
+    )
 
     out["topic_context_enabled"] = _coerce_bool(
         raw.get("topic_context_enabled"), DEFAULTS["topic_context_enabled"]
@@ -629,6 +644,8 @@ class PluginConfig:
     reply_context_enabled: bool = True
     relationship_offense_detection_enabled: bool = False
     reply_context_api_fallback: bool = True
+    reply_quote_enabled: bool = False
+    reply_quote_probability: int = 30
     topic_context_enabled: bool = False
     topic_context_max_messages: int = 10
     intercept_enabled: bool = False
