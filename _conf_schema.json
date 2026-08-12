@@ -475,11 +475,12 @@
     "hint": "被引用消息不在插件本地缓冲、且引用段自身没带内容预览时，调用 OneBot 的 get_msg 接口反查发送者与内容。会增加一次协议端请求；关闭则该情况下退化为不注入指向说明。",
     "default": true
   },
-  "reply_quote_enabled": {
-    "type": "bool",
-    "description": "[引用回复] 按概率引用用户消息",
-    "hint": "开启后，群聊普通回复有一定概率引用当前想要回复的那条用户消息。默认关闭；私聊还需单独开启“允许私聊引用回复”，避免连续私聊里出现突兀的引用卡片。只在平台提供消息 ID 且 Reply 组件可用时生效，分段回复只在第一段引用一次。",
-    "default": false
+  "reply_quote_mode": {
+    "type": "string",
+    "description": "[引用回复] 引用决策模式",
+    "options": ["off", "probability", "llm_decides"],
+    "hint": "off=关闭；probability=按本地概率引用；llm_decides=由当前主模型在同一次回复中判断是否确有必要引用，不增加额外 LLM 请求。推荐 llm_decides。",
+    "default": "off"
   },
   "reply_quote_private_enabled": {
     "type": "bool",

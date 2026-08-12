@@ -85,7 +85,7 @@ DEFAULTS: dict[str, Any] = {
     "reply_context_enabled": True,
     "relationship_offense_detection_enabled": False,
     "reply_context_api_fallback": True,
-    "reply_quote_enabled": False,
+    "reply_quote_mode": "off",
     "reply_quote_private_enabled": False,
     "reply_quote_probability": 30,
     "topic_context_enabled": False,
@@ -100,6 +100,7 @@ _VALID_STRATEGIES = {"inject", "prejudge", "both"}
 _VALID_MERGE = {"append", "rewrite", "discard_old"}
 _VALID_DELAY_MODES = {"fixed", "per_char"}
 _VALID_SCOPES = {"room", "sender", "mention_or_sender"}
+_VALID_REPLY_QUOTE_MODES = {"off", "probability", "llm_decides"}
 _VALID_LOG_LEVELS = {"DEBUG", "INFO", "WARNING", "ERROR"}
 
 
@@ -521,9 +522,17 @@ def normalize_config(raw: dict[str, Any] | None) -> dict[str, Any]:
         raw.get("reply_context_api_fallback"),
         DEFAULTS["reply_context_api_fallback"],
     )
-    out["reply_quote_enabled"] = _coerce_bool(
-        raw.get("reply_quote_enabled"), DEFAULTS["reply_quote_enabled"]
-    )
+    raw_quote_mode = str(raw.get("reply_quote_mode") or "").strip().lower()
+    if raw_quote_mode not in _VALID_REPLY_QUOTE_MODES:
+        raw_quote_mode = (
+            "llm_decides"
+            if _coerce_bool(
+                raw.get("reply_quote_enabled"), False
+            )
+            else "off"
+        )
+    out["reply_quote_mode"] = raw_quote_mode
+    # 旧 bool 只用于没有 mode 的配置迁移；开启值迁移到主模型同链决策。
     out["reply_quote_private_enabled"] = _coerce_bool(
         raw.get("reply_quote_private_enabled"),
         DEFAULTS["reply_quote_private_enabled"],
@@ -649,7 +658,7 @@ class PluginConfig:
     reply_context_enabled: bool = True
     relationship_offense_detection_enabled: bool = False
     reply_context_api_fallback: bool = True
-    reply_quote_enabled: bool = False
+    reply_quote_mode: str = "off"
     reply_quote_private_enabled: bool = False
     reply_quote_probability: int = 30
     topic_context_enabled: bool = False

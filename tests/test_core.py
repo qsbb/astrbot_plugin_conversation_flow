@@ -193,6 +193,7 @@ from astrbot_plugin_conversation_flow.core.prompts import (  # noqa: E402
     build_followup_guard_instruction,
     PRIVATE_CONTEXT_BRIDGE_TEMPLATE,
     CHUNKING_INSTRUCTION,
+    REPLY_QUOTE_DECISION_INSTRUCTION,
     DYNAMIC_CONTEXT_TEMPLATE,
     SCENE_TARGET_HINT_NAMED,
     SCENE_TARGET_HINT_UNKNOWN,
@@ -3407,7 +3408,7 @@ class ReplyConfigTests(unittest.TestCase):
         self.assertEqual(cfg.group_context_bot_label, "你")
         self.assertTrue(cfg.reply_context_enabled)
         self.assertTrue(cfg.reply_context_api_fallback)
-        self.assertFalse(cfg.reply_quote_enabled)
+        self.assertEqual(cfg.reply_quote_mode, "off")
         self.assertFalse(cfg.reply_quote_private_enabled)
         self.assertEqual(cfg.reply_quote_probability, 30)
 
@@ -3417,7 +3418,7 @@ class ReplyConfigTests(unittest.TestCase):
                 "group_context_record_bot": False,
                 "reply_context_enabled": False,
                 "reply_context_api_fallback": False,
-                "reply_quote_enabled": True,
+                "reply_quote_mode": "probability",
                 "reply_quote_private_enabled": True,
                 "reply_quote_probability": 80,
             }
@@ -3425,7 +3426,7 @@ class ReplyConfigTests(unittest.TestCase):
         self.assertFalse(cfg.group_context_record_bot)
         self.assertFalse(cfg.reply_context_enabled)
         self.assertFalse(cfg.reply_context_api_fallback)
-        self.assertTrue(cfg.reply_quote_enabled)
+        self.assertEqual(cfg.reply_quote_mode, "probability")
         self.assertTrue(cfg.reply_quote_private_enabled)
         self.assertEqual(cfg.reply_quote_probability, 80)
 
@@ -3441,6 +3442,31 @@ class ReplyConfigTests(unittest.TestCase):
                 {"reply_quote_probability": 101}
             ).reply_quote_probability,
             100,
+        )
+
+    def test_legacy_enabled_migrates_to_llm_decides(self) -> None:
+        cfg = build_plugin_config({"reply_quote_enabled": True})
+        self.assertEqual(cfg.reply_quote_mode, "llm_decides")
+
+        from astrbot_plugin_conversation_flow.main import ConversationalFlowPlugin
+
+        self.assertEqual(
+            ConversationalFlowPlugin._migrate_reply_quote_config(
+                {"reply_quote_enabled": "true"}
+            )["reply_quote_mode"],
+            "llm_decides",
+        )
+        self.assertEqual(
+            ConversationalFlowPlugin._migrate_reply_quote_config(
+                {"reply_quote_enabled": "false"}
+            )["reply_quote_mode"],
+            "off",
+        )
+
+    def test_reply_quote_mode_rejects_unknown_value(self) -> None:
+        self.assertEqual(
+            build_plugin_config({"reply_quote_mode": "unknown"}).reply_quote_mode,
+            "off",
         )
 
     def test_bot_label_customizable(self) -> None:
@@ -3465,7 +3491,7 @@ class ReplyConfigTests(unittest.TestCase):
             "private_context_bridge_short_max_chars",
             "reply_context_enabled",
             "reply_context_api_fallback",
-            "reply_quote_enabled",
+            "reply_quote_mode",
             "reply_quote_private_enabled",
             "reply_quote_probability",
         ):
@@ -3480,6 +3506,7 @@ class ReplyQuoteTests(unittest.TestCase):
         plugin = ConversationalFlowPlugin.__new__(ConversationalFlowPlugin)
         plugin.config = build_plugin_config(config or {})
         plugin.logger = _Logger()
+        plugin.tracker = types.SimpleNamespace(is_discarded=lambda _event: False)
         return plugin
 
     @staticmethod
@@ -3514,7 +3541,7 @@ class ReplyQuoteTests(unittest.TestCase):
         from unittest.mock import patch
 
         plugin = self._plugin(
-            {"reply_quote_enabled": True, "reply_quote_probability": 30}
+            {"reply_quote_mode": "probability", "reply_quote_probability": 30}
         )
         event = self._event("source-42")
         with patch(
@@ -3530,7 +3557,7 @@ class ReplyQuoteTests(unittest.TestCase):
 
     def test_private_quote_requires_explicit_private_opt_in(self) -> None:
         plugin = self._plugin(
-            {"reply_quote_enabled": True, "reply_quote_probability": 100}
+            {"reply_quote_mode": "probability", "reply_quote_probability": 100}
         )
         event = self._event("private-source", private=True)
         self.assertFalse(plugin._decide_reply_quote(event))
@@ -3542,7 +3569,7 @@ class ReplyQuoteTests(unittest.TestCase):
     def test_private_quote_can_be_explicitly_enabled(self) -> None:
         plugin = self._plugin(
             {
-                "reply_quote_enabled": True,
+                "reply_quote_mode": "probability",
                 "reply_quote_private_enabled": True,
                 "reply_quote_probability": 100,
             }
@@ -3557,7 +3584,7 @@ class ReplyQuoteTests(unittest.TestCase):
         from unittest.mock import patch
 
         plugin = self._plugin(
-            {"reply_quote_enabled": True, "reply_quote_probability": 30}
+            {"reply_quote_mode": "probability", "reply_quote_probability": 30}
         )
         event = self._event()
         with patch(
@@ -3570,7 +3597,7 @@ class ReplyQuoteTests(unittest.TestCase):
 
     def test_missing_message_id_fails_closed(self) -> None:
         plugin = self._plugin(
-            {"reply_quote_enabled": True, "reply_quote_probability": 100}
+            {"reply_quote_mode": "probability", "reply_quote_probability": 100}
         )
         event = self._event("")
         self.assertFalse(plugin._decide_reply_quote(event))
@@ -3580,7 +3607,7 @@ class ReplyQuoteTests(unittest.TestCase):
 
     def test_default_result_gets_one_quote_without_duplicate(self) -> None:
         plugin = self._plugin(
-            {"reply_quote_enabled": True, "reply_quote_probability": 100}
+            {"reply_quote_mode": "probability", "reply_quote_probability": 100}
         )
         event = self._event("source-7")
         self.assertTrue(plugin._decide_reply_quote(event))
@@ -3593,7 +3620,7 @@ class ReplyQuoteTests(unittest.TestCase):
 
     def test_reverse_wake_quotes_restored_source_instead_of_empty_mention(self) -> None:
         plugin = self._plugin(
-            {"reply_quote_enabled": True, "reply_quote_probability": 100}
+            {"reply_quote_mode": "probability", "reply_quote_probability": 100}
         )
         event = self._event("mention-message")
         event.set_extra(plugin.REVERSE_WAKE_RESTORED_KEY, True)
@@ -3603,6 +3630,65 @@ class ReplyQuoteTests(unittest.TestCase):
         chain = plugin._build_reply_quote_chain(event, [_MockPlain("回复")])
 
         self.assertEqual(chain[0].id, "source-message")
+
+    def test_llm_decision_prompt_and_tail_marker(self) -> None:
+        plugin = self._plugin({"reply_quote_mode": "llm_decides"})
+        event = self._event("source-llm", private=True)
+        req = types.SimpleNamespace(extra_user_content_parts=[], system_prompt="")
+
+        self.assertTrue(plugin._inject_reply_quote_decision(event, req))
+        self.assertTrue(event.get_extra(plugin.REPLY_QUOTE_INSTRUCTION_KEY))
+        injected = req.extra_user_content_parts[-1]
+        injected_text = getattr(injected, "text", None) or injected["text"]
+        self.assertEqual(injected_text, REPLY_QUOTE_DECISION_INSTRUCTION)
+
+        requested, cleaned = plugin._parse_reply_quote_control(
+            "这是需要明确对象的回复。\n<REPLY_QUOTE/>"
+        )
+        self.assertTrue(requested)
+        self.assertEqual(cleaned, "这是需要明确对象的回复。")
+        self.assertTrue(plugin._decide_reply_quote(event, llm_requested=requested))
+
+    def test_llm_marker_must_be_at_reply_tail(self) -> None:
+        plugin = self._plugin({"reply_quote_mode": "llm_decides"})
+        for text in (
+            "请解释 <REPLY_QUOTE/> 是什么",
+            "<REPLY_QUOTE/> 后面仍有正常正文",
+            "普通回复<REPLY_QUOTE/>",
+        ):
+            with self.subTest(text=text):
+                self.assertEqual(plugin._parse_reply_quote_control(text), (False, text))
+
+    def test_llm_decision_fails_closed_without_message_id_or_request(self) -> None:
+        plugin = self._plugin({"reply_quote_mode": "llm_decides"})
+        missing = self._event("", private=True)
+        req = types.SimpleNamespace(extra_user_content_parts=[], system_prompt="")
+        self.assertFalse(plugin._inject_reply_quote_decision(missing, req))
+        self.assertFalse(plugin._decide_reply_quote(missing, llm_requested=True))
+
+        event = self._event("source", private=True)
+        self.assertFalse(plugin._decide_reply_quote(event, llm_requested=False))
+
+    def test_llm_decision_fails_closed_for_discarded_request(self) -> None:
+        plugin = self._plugin({"reply_quote_mode": "llm_decides"})
+        plugin.tracker = types.SimpleNamespace(is_discarded=lambda _event: True)
+        event = self._event("discarded-source", private=True)
+        self.assertFalse(plugin._decide_reply_quote(event, llm_requested=True))
+
+    def test_marker_cleanup_preserves_non_text_components(self) -> None:
+        plugin = self._plugin({"reply_quote_mode": "llm_decides"})
+        event = self._event("source")
+        image = _MockImage(url="https://example.invalid/image.png")
+        event._result.chain = [
+            _MockPlain("第一段"),
+            image,
+            _MockPlain("第二段\n<REPLY_QUOTE/>"),
+        ]
+
+        self.assertTrue(plugin._strip_reply_quote_control_from_result(event))
+        self.assertEqual(event._result.chain[0].text, "第一段")
+        self.assertIs(event._result.chain[1], image)
+        self.assertEqual(event._result.chain[2].text, "第二段")
 
 
 class NewConfigTests(unittest.TestCase):
@@ -4397,6 +4483,40 @@ class AgentTerminalFrameTests(unittest.IsolatedAsyncioTestCase):
 
                 self.assertTrue(event.stopped)
                 self.assertEqual(event.get_result().chain, [])
+
+    async def test_llm_quote_marker_is_cleaned_before_delivery_and_history(
+        self,
+    ) -> None:
+        plugin = self._plugin()
+        plugin.config = build_plugin_config(
+            {
+                **plugin.config.raw,
+                "reply_quote_mode": "llm_decides",
+                "chunking_enabled": False,
+            }
+        )
+        plugin.chunker = Chunker(plugin.config, types.SimpleNamespace())
+        event = _TerminalFrameEvent(
+            "PrivateMessage:qq:llm-quote",
+            "这句话具体指什么？",
+            "我说的是你刚才提到的第二种方案。\n<REPLY_QUOTE/>",
+        )
+        event.message_obj = types.SimpleNamespace(message_id="source-message")
+        event.is_private_chat = lambda: True
+        event.set_extra(plugin.REPLY_QUOTE_INSTRUCTION_KEY, True)
+        plugin.tracker.begin_request(event, detect_interrupt=False)
+
+        await plugin.on_decorating_result(event)
+
+        chain = event.get_result().chain
+        self.assertEqual([type(item).__name__ for item in chain], ["Reply", "_MockPlain"])
+        self.assertEqual(chain[0].id, "source-message")
+        self.assertEqual(chain[1].text, "我说的是你刚才提到的第二种方案。")
+        plan = event.get_extra("conversation_flow.delivery_plan")
+        self.assertEqual(plan["segments"], ["我说的是你刚才提到的第二种方案。"])
+        self.assertNotIn("REPLY_QUOTE", plan["original_text"])
+        recent = plugin.tracker.get_recent_turns(event)
+        self.assertEqual(recent[-1].bot_text, "我说的是你刚才提到的第二种方案。")
 
     async def test_terminal_blank_frame_finishes_pending_without_completed_turn(
         self,

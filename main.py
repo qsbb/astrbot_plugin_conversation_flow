@@ -81,6 +81,7 @@ from .core.prompts import (
     MOOD_LAZY_INSTRUCTION,
     PLAIN_TEXT_INSTRUCTION,
     CHUNKING_INSTRUCTION,
+    REPLY_QUOTE_DECISION_INSTRUCTION,
     DYNAMIC_CONTEXT_TEMPLATE,
     RELATIONSHIP_OFFENSE_MARKER_INSTRUCTION,
 )
@@ -208,6 +209,7 @@ class ConversationalFlowPlugin(Star):
     REVERSE_WAKE_DECISION_INJECTED_KEY = "conv_flow_reverse_wake_decision_injected"
     # event extra 上用于记录本轮是否命中“概率引用回复”，避免分段重复抽样
     REPLY_QUOTE_DECISION_KEY = "conv_flow_reply_quote_decision"
+    REPLY_QUOTE_INSTRUCTION_KEY = "conv_flow_reply_quote_instruction_injected"
     # event extra 上用于标记"私聊短消息承接上下文已注入"的 key
     PRIVATE_CONTEXT_INJECTED_KEY = "conv_flow_private_context_injected"
     DYNAMIC_CONTEXT_INJECTED_KEY = "conv_flow_dynamic_context_injected"
@@ -240,6 +242,7 @@ class ConversationalFlowPlugin(Star):
         # 加载本地持久化配置，合并到当前配置（Schema 配置优先级低于持久化值）
         persisted = self._load_persisted_config()
         if persisted:
+            persisted = self._migrate_reply_quote_config(persisted)
             self._raw_config = normalize_config(
                 {**normalize_config(self._raw_config), **persisted}
             )
@@ -1079,6 +1082,8 @@ class ConversationalFlowPlugin(Star):
         # AstrBot 4.26.8 在 AgentRunner 启动前只触发一次本钩子，工具循环内部
         # 不会重入。复用同一 event 启动新 Agent 时必须先清掉上一轮终态。
         self._set_extra(event, self.LLM_RESPONSE_TERMINAL_KEY, False)
+        self._set_extra(event, self.REPLY_QUOTE_DECISION_KEY, None)
+        self._set_extra(event, self.REPLY_QUOTE_INSTRUCTION_KEY, False)
         set_flag(
             request_context,
             OWNER_CONVERSATION_FLOW,
@@ -1174,6 +1179,8 @@ class ConversationalFlowPlugin(Star):
             await self._inject_reply_context(event, req, seq)
         except Exception as exc:
             self.logger.debug("[conv-flow] reply context inject failed: %s", exc)
+
+        self._inject_reply_quote_decision(event, req)
 
         if not user_text:
             return
@@ -1434,8 +1441,31 @@ class ConversationalFlowPlugin(Star):
             )
             return
 
-        # 每轮只抽样一次，后续单段、分段和组件感知发送共用同一个决定。
-        should_quote_reply = self._decide_reply_quote(event)
+        # LLM 决策标记必须在分段、TTS、纯文本处理和发送之前剥离。
+        quote_control_enabled = (
+            self.config.reply_quote_mode == "llm_decides"
+            and self._get_extra(event, self.REPLY_QUOTE_INSTRUCTION_KEY) is True
+        )
+        quote_requested, cleaned_quote_text = (
+            self._parse_reply_quote_control(text)
+            if quote_control_enabled
+            else (False, text)
+        )
+        if cleaned_quote_text != text:
+            text = cleaned_quote_text
+            self._strip_reply_quote_control_from_result(event)
+        if quote_requested and not text.strip():
+            add_reason(
+                request_context,
+                OWNER_CONVERSATION_FLOW,
+                "REPLY_QUOTE_EMPTY_BODY_REJECTED",
+            )
+            self._clear_result(event)
+            self.tracker.finish_response(event)
+            return
+        should_quote_reply = self._decide_reply_quote(
+            event, llm_requested=quote_requested
+        )
 
         # 3) 沉默标记二次校验（注入模式、拦截命中、场景指令注入时都需检测）
         should_check_marker = self._should_check_silence_marker(event)
@@ -1832,8 +1862,8 @@ class ConversationalFlowPlugin(Star):
             f"events={self.recent_activity.event_count})\n"
             f"- 引用消息: {'on' if self.config.reply_context_enabled else 'off'} "
             f"(api_fallback={self.config.reply_context_api_fallback})\n"
-            f"- 概率引用回复: {'on' if self.config.reply_quote_enabled else 'off'} "
-            f"(private={self.config.reply_quote_private_enabled}, "
+            f"- 引用回复: {self.config.reply_quote_mode} "
+            f"(probability_private={self.config.reply_quote_private_enabled}, "
             f"chance={self.config.reply_quote_probability}%)\n"
             f"- 话题上下文: {'on' if self.config.topic_context_enabled else 'off'} "
             f"(max={self.config.topic_context_max_messages})\n"
@@ -1894,6 +1924,7 @@ class ConversationalFlowPlugin(Star):
         if not loaded:
             yield event.plain_result("未找到本地持久化配置文件。")
             return
+        loaded = self._migrate_reply_quote_config(loaded)
         self._raw_config = normalize_config(
             {**normalize_config(self._raw_config), **loaded}
         )
@@ -1914,6 +1945,10 @@ class ConversationalFlowPlugin(Star):
             return
         new_raw = dict(self._raw_config)
         new_raw[key] = normalized
+        if key == "reply_quote_enabled":
+            new_raw["reply_quote_mode"] = "llm_decides" if normalized else "off"
+        elif key == "reply_quote_mode":
+            new_raw.pop("reply_quote_enabled", None)
         self._raw_config = normalize_config(new_raw)
         self.config = build_plugin_config(self._raw_config)
         self._refresh_modules()
@@ -3993,23 +4028,91 @@ class ConversationalFlowPlugin(Star):
             is_bot=True,
         )
 
-    def _decide_reply_quote(self, event: AstrMessageEvent) -> bool:
-        """为本轮回复抽取一次是否引用当前用户消息。
+    def _inject_reply_quote_decision(self, event: AstrMessageEvent, req: Any) -> bool:
+        """让主模型在现有请求内决定是否引用，不增加独立 LLM 调用。"""
+        if self.config.reply_quote_mode != "llm_decides":
+            return False
+        if not self._reply_quote_scope_allowed(event):
+            return False
+        if not self._reply_quote_target_message_id(event):
+            return False
+        injected = self._inject_instruction(
+            req, REPLY_QUOTE_DECISION_INSTRUCTION, "reply quote decision"
+        )
+        if injected:
+            self._set_extra(event, self.REPLY_QUOTE_INSTRUCTION_KEY, True)
+        return injected
 
-        这是纯本地、一次性的发送表现选择，不调用 LLM，也不把历史消息当作
-        引用目标。没有公开消息 ID 时直接关闭，避免伪造平台引用。
+    @staticmethod
+    def _parse_reply_quote_control(text: str) -> tuple[bool, str]:
+        """只消费回复末尾精确控制标记，正文中的引用示例保持原样。"""
+        value = str(text or "")
+        match = _REPLY_QUOTE_CONTROL_RE.search(value)
+        if match is None:
+            return False, value
+        return True, value[: match.start()].rstrip()
+
+    def _strip_reply_quote_control_from_result(self, event: AstrMessageEvent) -> bool:
+        """从最后一个含控制标记的 Plain 组件剥离标记，保留其他组件。"""
+        try:
+            result = event.get_result()
+            chain = getattr(result, "chain", None)
+            if not isinstance(chain, list):
+                return False
+            for component in reversed(chain):
+                if not isinstance(component, Plain):
+                    continue
+                raw_text = str(getattr(component, "text", "") or "")
+                requested, cleaned = self._parse_reply_quote_control(raw_text)
+                if not requested:
+                    continue
+                component.text = cleaned
+                try:
+                    result.text = self._parse_reply_quote_control(
+                        str(getattr(result, "text", "") or "")
+                    )[1]
+                except Exception:
+                    pass
+                return True
+        except Exception as exc:
+            self.logger.debug(
+                "[conv-flow] reply quote marker cleanup failed: %s",
+                type(exc).__name__,
+            )
+        return False
+
+    def _reply_quote_scope_allowed(self, event: AstrMessageEvent) -> bool:
+        if self.config.reply_quote_mode == "llm_decides":
+            return True
+        return not self._is_private_chat(event) or bool(
+            self.config.reply_quote_private_enabled
+        )
+
+    def _decide_reply_quote(
+        self, event: AstrMessageEvent, *, llm_requested: bool = False
+    ) -> bool:
+        """按配置模式决定是否引用当前用户消息。
+
+        ``llm_decides`` 只消费本轮主模型的末尾标记，不增加模型调用，也不允许
+        模型指定消息 ID。没有公开消息 ID 时始终关闭。
         """
         existing = self._get_extra(event, self.REPLY_QUOTE_DECISION_KEY)
         if isinstance(existing, bool):
             return existing
 
-        enabled = bool(self.config.reply_quote_enabled)
-        private_allowed = bool(self.config.reply_quote_private_enabled)
+        mode = self.config.reply_quote_mode
         probability = max(0, min(100, int(self.config.reply_quote_probability)))
         message_id = self._reply_quote_target_message_id(event)
         decision = False
-        scope_allowed = not self._is_private_chat(event) or private_allowed
-        if enabled and scope_allowed and probability > 0 and message_id:
+        scope_allowed = self._reply_quote_scope_allowed(event)
+        if mode == "llm_decides":
+            decision = bool(
+                llm_requested
+                and scope_allowed
+                and message_id
+                and not self.tracker.is_discarded(event)
+            )
+        elif mode == "probability" and scope_allowed and probability > 0 and message_id:
             if probability >= 100:
                 decision = True
             else:
@@ -4021,12 +4124,14 @@ class ConversationalFlowPlugin(Star):
                         type(exc).__name__,
                     )
         self._set_extra(event, self.REPLY_QUOTE_DECISION_KEY, decision)
-        if enabled:
+        if mode != "off":
             self.logger.debug(
-                "[conv-flow] reply quote decision=%s probability=%s "
-                "has_message_id=%s private_scope_allowed=%s",
+                "[conv-flow] reply quote decision=%s mode=%s probability=%s "
+                "llm_requested=%s has_message_id=%s scope_allowed=%s",
                 decision,
+                mode,
                 probability,
+                llm_requested,
                 bool(message_id),
                 scope_allowed,
             )
@@ -4413,6 +4518,8 @@ class ConversationalFlowPlugin(Star):
         """根据 schema 默认值类型解析用户输入。"""
         from .core.config import DEFAULTS
 
+        if key == "reply_quote_enabled":
+            return value.strip().lower() in ("1", "true", "yes", "on")
         if key not in DEFAULTS:
             return None
         default = DEFAULTS[key]
@@ -4431,6 +4538,25 @@ class ConversationalFlowPlugin(Star):
             return str(value)
         except (TypeError, ValueError):
             return None
+
+    @staticmethod
+    def _migrate_reply_quote_config(raw: dict[str, Any]) -> dict[str, Any]:
+        """把旧布尔引用开关迁移到三态模式，不保留双事实源。"""
+        migrated = dict(raw)
+        if "reply_quote_mode" not in migrated and "reply_quote_enabled" in migrated:
+            legacy_value = migrated.get("reply_quote_enabled")
+            legacy_enabled = (
+                legacy_value.strip().lower() in ("1", "true", "yes", "on")
+                if isinstance(legacy_value, str)
+                else bool(legacy_value)
+            )
+            migrated["reply_quote_mode"] = (
+                "llm_decides"
+                if legacy_enabled
+                else "off"
+            )
+        migrated.pop("reply_quote_enabled", None)
+        return migrated
 
     def _load_persisted_config(self) -> dict[str, Any]:
         try:
@@ -4460,4 +4586,7 @@ _RELATIONSHIP_OFFENSE_TAG_RE = re.compile(
 )
 _RELATIONSHIP_OFFENSE_MARKER_RE = re.compile(
     r"^\s*<RELATIONSHIP_OFFENSE\s+([^>]+)>\s*", re.IGNORECASE
+)
+_REPLY_QUOTE_CONTROL_RE = re.compile(
+    r"(?:\r?\n)+\s*<REPLY_QUOTE/>\s*\Z", re.IGNORECASE
 )
