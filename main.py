@@ -109,7 +109,7 @@ from .series_diagnostics import (
     logger,
 )
 
-__version__ = "0.8.10"
+__version__ = "0.8.11"
 RELATIONSHIP_PLUGIN_NAME = "astrbot_plugin_relationship"
 RELATIONSHIP_SNAPSHOT_CONTRACT_NAME = "relationship.snapshot"
 RELATIONSHIP_SNAPSHOT_CONTRACT_MAJOR = "1"
@@ -1833,7 +1833,8 @@ class ConversationalFlowPlugin(Star):
             f"- 引用消息: {'on' if self.config.reply_context_enabled else 'off'} "
             f"(api_fallback={self.config.reply_context_api_fallback})\n"
             f"- 概率引用回复: {'on' if self.config.reply_quote_enabled else 'off'} "
-            f"(chance={self.config.reply_quote_probability}%)\n"
+            f"(private={self.config.reply_quote_private_enabled}, "
+            f"chance={self.config.reply_quote_probability}%)\n"
             f"- 话题上下文: {'on' if self.config.topic_context_enabled else 'off'} "
             f"(max={self.config.topic_context_max_messages})\n"
             f"- 智能拦截: {'on' if self.config.intercept_enabled else 'off'}\n"
@@ -4003,10 +4004,12 @@ class ConversationalFlowPlugin(Star):
             return existing
 
         enabled = bool(self.config.reply_quote_enabled)
+        private_allowed = bool(self.config.reply_quote_private_enabled)
         probability = max(0, min(100, int(self.config.reply_quote_probability)))
         message_id = self._reply_quote_target_message_id(event)
         decision = False
-        if enabled and probability > 0 and message_id:
+        scope_allowed = not self._is_private_chat(event) or private_allowed
+        if enabled and scope_allowed and probability > 0 and message_id:
             if probability >= 100:
                 decision = True
             else:
@@ -4020,10 +4023,12 @@ class ConversationalFlowPlugin(Star):
         self._set_extra(event, self.REPLY_QUOTE_DECISION_KEY, decision)
         if enabled:
             self.logger.debug(
-                "[conv-flow] reply quote decision=%s probability=%s has_message_id=%s",
+                "[conv-flow] reply quote decision=%s probability=%s "
+                "has_message_id=%s private_scope_allowed=%s",
                 decision,
                 probability,
                 bool(message_id),
+                scope_allowed,
             )
         return decision
 

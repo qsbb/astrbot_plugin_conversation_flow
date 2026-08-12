@@ -3408,6 +3408,7 @@ class ReplyConfigTests(unittest.TestCase):
         self.assertTrue(cfg.reply_context_enabled)
         self.assertTrue(cfg.reply_context_api_fallback)
         self.assertFalse(cfg.reply_quote_enabled)
+        self.assertFalse(cfg.reply_quote_private_enabled)
         self.assertEqual(cfg.reply_quote_probability, 30)
 
     def test_can_be_disabled(self) -> None:
@@ -3417,6 +3418,7 @@ class ReplyConfigTests(unittest.TestCase):
                 "reply_context_enabled": False,
                 "reply_context_api_fallback": False,
                 "reply_quote_enabled": True,
+                "reply_quote_private_enabled": True,
                 "reply_quote_probability": 80,
             }
         )
@@ -3424,6 +3426,7 @@ class ReplyConfigTests(unittest.TestCase):
         self.assertFalse(cfg.reply_context_enabled)
         self.assertFalse(cfg.reply_context_api_fallback)
         self.assertTrue(cfg.reply_quote_enabled)
+        self.assertTrue(cfg.reply_quote_private_enabled)
         self.assertEqual(cfg.reply_quote_probability, 80)
 
     def test_reply_quote_probability_is_clamped(self) -> None:
@@ -3463,6 +3466,7 @@ class ReplyConfigTests(unittest.TestCase):
             "reply_context_enabled",
             "reply_context_api_fallback",
             "reply_quote_enabled",
+            "reply_quote_private_enabled",
             "reply_quote_probability",
         ):
             self.assertIn(key, DEFAULTS)
@@ -3479,7 +3483,7 @@ class ReplyQuoteTests(unittest.TestCase):
         return plugin
 
     @staticmethod
-    def _event(message_id="message-1"):
+    def _event(message_id="message-1", *, private=False):
         class Event:
             def __init__(self):
                 self._extra = {}
@@ -3494,6 +3498,9 @@ class ReplyQuoteTests(unittest.TestCase):
 
             def get_result(self):
                 return self._result
+
+            def is_private_chat(self):
+                return private
 
         return Event()
 
@@ -3520,6 +3527,31 @@ class ReplyQuoteTests(unittest.TestCase):
         self.assertIsInstance(chain[0], Reply)
         self.assertEqual(chain[0].id, "source-42")
         self.assertEqual(chain[1].text, "回复")
+
+    def test_private_quote_requires_explicit_private_opt_in(self) -> None:
+        plugin = self._plugin(
+            {"reply_quote_enabled": True, "reply_quote_probability": 100}
+        )
+        event = self._event("private-source", private=True)
+        self.assertFalse(plugin._decide_reply_quote(event))
+        self.assertEqual(
+            plugin._build_reply_quote_chain(event, [_MockPlain("普通私聊回复")])[0].text,
+            "普通私聊回复",
+        )
+
+    def test_private_quote_can_be_explicitly_enabled(self) -> None:
+        plugin = self._plugin(
+            {
+                "reply_quote_enabled": True,
+                "reply_quote_private_enabled": True,
+                "reply_quote_probability": 100,
+            }
+        )
+        event = self._event("private-source", private=True)
+        self.assertTrue(plugin._decide_reply_quote(event))
+        chain = plugin._build_reply_quote_chain(event, [_MockPlain("私聊引用回复")])
+        self.assertIsInstance(chain[0], Reply)
+        self.assertEqual(chain[0].id, "private-source")
 
     def test_probability_miss_keeps_plain_chain(self) -> None:
         from unittest.mock import patch
