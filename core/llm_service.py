@@ -13,6 +13,7 @@ import json
 from typing import Any
 
 from ..series_diagnostics import logger
+from .model_router import resolve_provider_id as resolve_routed_provider_id
 
 
 class LLMService:
@@ -69,7 +70,11 @@ class LLMService:
             self._cfg_llm_provider_id
         ):
             return self._cfg_llm_provider_id
-        # 3. 事件 scope 默认
+        # 3. 核统一模型路由（核不可用时透明回退）
+        core_provider = await resolve_routed_provider_id(self.context, "conversation")
+        if core_provider:
+            return core_provider
+        # 4. 事件 scope 默认
         method = getattr(self.context, "get_current_chat_provider_id", None)
         if callable(method):
             try:
@@ -78,7 +83,7 @@ class LLMService:
                     return pid
             except Exception:
                 pass
-        # 4. 同步兜底
+        # 5. 同步兜底
         return self._resolve_default_provider_id()
 
     def _get_provider(self, provider_id: str) -> Any:

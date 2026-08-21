@@ -2798,6 +2798,27 @@ class ReverseWakeTests(unittest.IsolatedAsyncioTestCase):
         plugin.silence_judge = types.SimpleNamespace(should_inject=lambda: False)
         self.assertTrue(plugin._should_check_silence_marker(event))
 
+    async def test_group_context_anchors_current_sender_and_blocks_history_at_leak(
+        self,
+    ) -> None:
+        plugin = self._plugin()
+        plugin.group_context.record("group1", "old-user", "小心夏", "七夕去哪约会")
+        event = _ReverseWakeEvent(sender_id="opaque-current-user")
+        event.message_obj.sender.nickname = "x"
+        req = types.SimpleNamespace(extra_user_content_parts=[], system_prompt="")
+
+        plugin._inject_group_context(event, req, seq=1, is_wake=True)
+        combined = "\n".join(
+            getattr(part, "text", None) or part.get("text", "")
+            for part in req.extra_user_content_parts
+        )
+
+        self.assertIn("当前发言者锚点", combined)
+        self.assertIn('"display_name":"x"', combined)
+        self.assertIn("默认只回应当前发送者", combined)
+        self.assertIn("历史 @对象自动带入", combined)
+        self.assertNotIn("opaque-current-user", combined)
+
     async def test_records_only_unhandled_plain_text_as_reverse_wake_source(
         self,
     ) -> None:
