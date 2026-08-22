@@ -2,17 +2,18 @@
 
 > 凝心溯溪系列对话模块：让 AstrBot 像真人一样判断何时沉默、何时分段、被插话时如何自然衔接。
 
-> **凝心溯溪系列** 当前完整插件清单为知、言、序、情、境、声、核：各插件职责独立、互不冲突，可按需组合使用，覆盖知识学习、对话调节、身份管理、关系状态、环境感知、语音与更新管理。
+> **凝心溯溪系列** 当前完整插件清单为知、言、序、情、境、声、核、临：各插件职责独立、互不冲突，可按需组合使用，覆盖知识学习、对话调节、身份管理、关系状态、环境感知、语音、更新管理与具身桥接。
 
 | 字 | 模块 | 说明 |
 |----|------|------|
 | [知](https://github.com/qsbb/astrbot_plugin_active_learner) | 知识学习 | 自动检索注入、多源学习、交叉验证 |
-| [言](https://github.com/qsbb/astrbot_plugin_conversation_flow) | 对话调节 | 沉默判断、智能分段、上下文承接（本插件） |
+| [言](https://github.com/qsbb/astrbot_plugin_conversation_flow) | 对话调节 | 沉默判断、智能分段、插话衔接（本插件） |
 | [序](https://github.com/qsbb/astrbot_plugin_identity_guardian) | 身份管理 | 关系感知、权限边界、群组行动 |
 | [情](https://github.com/qsbb/astrbot_plugin_relationship) | 关系状态 | 情绪、好感、信任、熟悉度状态记录与只读建议 |
 | [境](https://github.com/qsbb/astrbot_plugin_environment_awareness) | 环境感知 | 时间、天气、空气质量、预警与环境关心候选 |
 | [声](https://github.com/qsbb/astrbot_plugin_voice_hub) | 语音合成 | 双 TTS 后端、多音色管理、AI 导演 |
 | [核](https://github.com/qsbb/astrbot_plugin_update_manager) | 更新管理 | 安全检查、计划、串行更新与回滚 |
+| [临](https://github.com/qsbb/astrbot_plugin_embodiment_bridge) | 具身桥接 | Quest 客户端桥接、实时对话与空间感知 |
 
 ## 当前实现信息
 
@@ -460,7 +461,7 @@ prejudge 粗筛 + inject 兜底。prejudge 判定非沉默时仍注入指令，�
 发送策略：
 - **不分段或单段**：直接 in-place 修改 `result.chain`，不调用 `stop_event()`，让框架正常发送，避免与 TTS 等结果装饰插件冲突；
 - **多段文本**：未请求语音时使用 `clear_result()` + `stop_event()` + 循环 `await event.send()`；全部发送失败时回退原始文本；
-- **多段语音**：言通过 `conversation_flow.delivery_plan@1` 把逻辑分段和中断令牌交给声，声逐段合成，言不提前抢占发送权；
+- **多段语音**：言通过 `conversation_flow.delivery_plan@1.0` 把逻辑分段和中断令牌交给声，声逐段合成，言不提前抢占发送权；
 - **含非文本组件**（图片/语音/文件等）：只处理相邻纯文本，非文本组件保持原对象和相对顺序；无需拆成多个气泡时保留默认发送链路。
 
 默认推荐 `per_char` 模式：每个有效字符 35ms，单段延迟限制在 500ms～4000ms；也可切换为 `fixed` 模式使用固定 800ms 延迟。
@@ -532,14 +533,21 @@ astrbot_plugin_conversation_flow/
 ├── __init__.py
 ├── docs/
 │   ├── implementation-plan.md              # 历史设计归档
+│   ├── proactive-message-contract.md       # conversation.proactive_message@1.0 契约细节
 │   └── recent-activity-context-design.md   # 跨会话近期感知现行设计与验收边界
+├── series_control.py           # series.control@1.0 接管适配（覆盖快照 + revision 乐观锁）
+├── series_diagnostics.py       # series.diagnostics@1.0 内存环形缓冲与脱敏
 └── core/
     ├── __init__.py
     ├── config.py                 # 配置规范化与 dataclass
     ├── prompts.py                # 集中管理 prompt 模板
-    ├── llm_service.py            # 4 层 provider fallback
+    ├── llm_service.py            # 多层 provider fallback（含可选核路由）
+    ├── model_router.py           # series.model_router@1.0 可选核路由适配
     ├── silence_judge.py          # 沉默判断（inject/prejudge/both）
     ├── chunker.py                # 智能分段切分（双空行优先 + 句末标点）
+    ├── delay.py                  # 分段发送延迟计算
+    ├── component_delivery.py     # 混合组件交付计划
+    ├── request_context.py        # 系列请求上下文与提示片段编排
     ├── plain_text.py             # Markdown 格式剥离（纯文本模式）
     ├── image_intent.py           # 图片检测 + 可见性判断（图片意图判断）
     ├── intercept.py              # 智能拦截（注入式，融入主思维链）
@@ -552,6 +560,23 @@ astrbot_plugin_conversation_flow/
     ├── message_meta.py           # 消息元信息：message_id / 引用目标 / @ 目标 / 纯文本正文
     └── interrupt_tracker.py      # 会话级 in-flight 状态与最近完成轮次（含作用域）
 ```
+
+## 系列控制与统一模型路由
+
+言提供 `series.control@1.0`，供凝心溯溪“核”统一管理少量非秘密运行策略。可接管字段为
+`silence_enabled`、`interrupt_enabled`、`chunking_enabled`、`chunking_min_length`（1–10000）
+和 `chunking_max_segments`（1–20），其余配置项不属于该契约。
+
+- 覆盖快照由言在插件数据目录的 `series-control.json` 中原子保存，携带 revision 乐观锁；契约声明
+  读取快照、校验补丁、应用补丁和重置覆盖能力，补丁只接受上述字段并通过类型与范围校验。
+- 默认 `native` 模式下覆盖层保留但不生效；切换为 `managed` 后覆盖值即时合并进运行配置，
+  关闭接管后无需重启即恢复言自身配置。核不可用、契约不兼容、revision 冲突或快照损坏时，
+  言继续使用自身配置。
+
+插件内部 LLM 调用（沉默预判断、LLM 辅助分段、主动消息决策等）的 Provider 解析顺序为：
+配置项 `llm_provider_id` → 核的只读路由 `series.model_router@1.0` → 当前对话模型 → 全局默认
+模型。言自身配置始终优先；核未安装、契约不兼容或路由结果不可用时透明回退原 AstrBot 解析链路，
+路由只返回 Provider 引用与可用状态，不接触密钥。
 
 ## 兼容性
 
@@ -575,7 +600,7 @@ astrbot_plugin_conversation_flow/
 日志前缀统一为 `[conv-flow]`，关键事件：
 
 ```
-[conv-flow] plugin loaded: version=0.4.0, silence=True/inject, chunking=True, interrupt=True/append(scope=sender,window=30000ms), group_context=True, intercept=False
+[conv-flow] plugin loaded: version=<见 metadata.yaml>, silence=True/inject, chunking=True, interrupt=True/append(scope=sender,window=30000ms), group_context=True, intercept=False
 [conv-flow] seq=1 silenced by prejudge, user_text='好的'
 [conv-flow] seq=2 interrupt detected, merged context injected
 [conv-flow] seq=1 response discarded (interrupted)
@@ -586,7 +611,7 @@ astrbot_plugin_conversation_flow/
 
 ## 开发设计文档
 
-[docs/recent-activity-context-design.md](docs/recent-activity-context-design.md) 是“同一自然人跨会话近期弱感知”的现行设计，记录匿名身份、逐轮授权、群聊隐私、动态相关性、Memory Companion 迁移和发布前验收场景。当前代码已在 `0.8.0` 实现，功能默认关闭。
+[docs/recent-activity-context-design.md](docs/recent-activity-context-design.md) 是“同一自然人跨会话近期弱感知”的现行设计，记录匿名身份、逐轮授权、群聊隐私、动态相关性、Memory Companion 迁移和发布前验收场景。当前代码已实现该设计，功能默认关闭。
 
 ## 历史设计文档
 

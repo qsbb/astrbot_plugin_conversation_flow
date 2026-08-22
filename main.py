@@ -4629,6 +4629,7 @@ class ConversationalFlowPlugin(Star):
         if self._series_control._mode == "managed":
             merged.update(self._series_control._overlay)
         self.config = build_plugin_config(normalize_config(merged))
+        self._refresh_modules()
         return {"success": True, "mode": self._series_control._mode}
 
     def validate_series_control_patch(self, patch, *, expected_revision: int):
