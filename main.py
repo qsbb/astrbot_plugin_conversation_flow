@@ -225,6 +225,13 @@ class ConversationalFlowPlugin(Star):
     # 场景/情绪指令允许模型输出 silence_marker，响应阶段需据此检测 marker。
     SCENE_INJECTED_KEY = "conv_flow_scene_injected"
     MOOD_INJECTED_KEY = "conv_flow_mood_injected"
+    # 具身桥接（凝心溯溪-临）创建的 EventBus 事件标记。
+    # 契约来源：astrbot_plugin_embodiment_bridge/core/plugin_identity.py 的
+    # BRIDGE_EVENT_MARKER / LEGACY_BRIDGE_EVENT_MARKER。跨插件只经 event extras
+    # 字符串传递，不引入 import 依赖；Quest/伴夏会话没有群聊与引用 UI，
+    # 语音交付时分段结果只用于发布 delivery plan，不逐段发送。
+    EMBODIMENT_EVENT_MARKER = "embodiment_bridge"
+    LEGACY_EMBODIMENT_EVENT_MARKER = "quest_avatar_bridge"
 
     def __init__(self, context: Context, config: Any = None) -> None:
         super().__init__(context)
@@ -1422,6 +1429,9 @@ class ConversationalFlowPlugin(Star):
             self._strip_relationship_offense_from_result(event)
 
         voice_requested = await self._voice_delivery_requested(event, result)
+        # Quest/伴夏具身会话：无群聊与引用 UI；语音交付时分段仅用于发布
+        # delivery plan，不逐段发送，因此可跳过 QQ 导向的引用与分段开销。
+        embodiment_session = self._is_embodiment_event(event)
 
         text = ""
         try:
@@ -1465,8 +1475,10 @@ class ConversationalFlowPlugin(Star):
             self._clear_result(event)
             self.tracker.finish_response(event)
             return
-        should_quote_reply = self._decide_reply_quote(
-            event, llm_requested=quote_requested
+        should_quote_reply = (
+            False
+            if embodiment_session
+            else self._decide_reply_quote(event, llm_requested=quote_requested)
         )
 
         # 3) 沉默标记二次校验（注入模式、拦截命中、场景指令注入时都需检测）
@@ -1574,7 +1586,14 @@ class ConversationalFlowPlugin(Star):
 
         try:
             umo = self.tracker._get_umo(event)
-            segments = await self.chunker.split_smart(text, umo=umo)
+            if embodiment_session or voice_requested:
+                # 具身/语音链路的分段结果不会逐段发送（voice_requested 分支只
+                # 发布 delivery plan 后直接返回），split_smart 内部 LLM 辅助分段
+                # 的产物会被原样丢弃，白白多一次模型调用（实测 5-8s）。
+                # 直接走本地规则分段。
+                segments = self.chunker.split(text)
+            else:
+                segments = await self.chunker.split_smart(text, umo=umo)
         except Exception as exc:
             self.logger.debug("[conv-flow] smart split failed: %s", exc)
             segments = self.chunker.split(text)
@@ -1620,7 +1639,8 @@ class ConversationalFlowPlugin(Star):
             seg = seg.strip()
             if not seg:
                 continue
-            if idx > 0:
+            if idx > 0 and not embodiment_session:
+                # 具身会话（Quest/伴夏）没有气泡打字节奏，跳过拟人分段延迟。
                 delay_ms = calculate_segment_delay_ms(seg, self.config)
                 if delay_ms > 0:
                     try:
@@ -3627,6 +3647,16 @@ class ConversationalFlowPlugin(Star):
             return
         self._contract_warnings.add(key)
         self.logger.warning("[conv-flow] incompatible contract %s: %s", name, detail)
+
+    def _is_embodiment_event(self, event: Any) -> bool:
+        """判断当前事件是否来自凝心溯溪-临创建的具身（Quest/伴夏）会话。"""
+        try:
+            return (
+                event.get_extra(self.EMBODIMENT_EVENT_MARKER) is True
+                or event.get_extra(self.LEGACY_EMBODIMENT_EVENT_MARKER) is True
+            )
+        except (AttributeError, RuntimeError, TypeError, ValueError):
+            return False
 
     async def _voice_delivery_requested(self, event: Any, result: Any) -> bool:
         provider = self._get_plugin_instance(VOICE_PLUGIN_NAME)
