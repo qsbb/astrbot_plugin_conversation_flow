@@ -13,6 +13,7 @@ from .config import PluginConfig
 from .llm_service import LLMService
 from .prompts import (
     SILENCE_INJECT_INSTRUCTION,
+    SILENCE_INJECT_INSTRUCTION_TRUSTED,
     SILENCE_PREJUDGE_SYSTEM,
     SILENCE_PREJUDGE_USER_TEMPLATE,
 )
@@ -127,6 +128,11 @@ class SilenceJudge:
     - prejudge: 在 on_llm_request 中先调用一次轻量 LLM 做独立判断，
                 输出 JSON {"silence": bool, "reason": str}。
     - both: 先 prejudge 粗筛，未通过再 inject 让主 LLM 兜底。
+
+    信任会话分级：intercept_whitelist 命中的会话由管理员显式信任，
+    prejudge 完全跳过（不经过外部过滤模型），inject 改用信任版指令
+    （保留沉默判断功能，去掉“安全/不当请求”引导措辞，避免把白名单
+    用户的亲密互动带偏成拒绝式回复）。
     """
 
     def __init__(self, cfg: PluginConfig, llm: LLMService) -> None:
@@ -134,22 +140,43 @@ class SilenceJudge:
         self.llm = llm
         self.logger = logger
 
-    def should_inject(self) -> bool:
+    def is_whitelisted(self, umo: str) -> bool:
+        """会话是否在信任白名单（intercept_whitelist）中。"""
+        if not umo:
+            return False
+        whitelist = self.cfg.intercept_whitelist or []
+        if not whitelist:
+            return False
+        return umo in whitelist
+
+    def should_inject(self, umo: str = "") -> bool:
         if not self.cfg.silence_enabled:
             return False
-        return self.cfg.silence_strategy in ("inject", "both")
+        if self.cfg.silence_strategy not in ("inject", "both"):
+            return False
+        return True
 
-    def should_prejudge(self) -> bool:
+    def should_prejudge(self, umo: str = "") -> bool:
         if not self.cfg.silence_enabled:
             return False
-        return self.cfg.silence_strategy in ("prejudge", "both")
+        if self.cfg.silence_strategy not in ("prejudge", "both"):
+            return False
+        if self.is_whitelisted(umo):
+            return False
+        return True
 
-    def inject_instruction(self, req: Any) -> bool:
+    def inject_instruction(self, req: Any, umo: str = "") -> bool:
         """把沉默判断指令注入到 req.extra_user_content_parts。
 
-        返回是否成功注入。失败时降级到 system_prompt。
+        白名单（信任）会话使用 SILENCE_INJECT_INSTRUCTION_TRUSTED 模板，
+        其余会话使用标准模板。返回是否成功注入。失败时降级到 system_prompt。
         """
-        instruction = SILENCE_INJECT_INSTRUCTION.format(marker=self.cfg.silence_marker)
+        template = (
+            SILENCE_INJECT_INSTRUCTION_TRUSTED
+            if self.is_whitelisted(umo)
+            else SILENCE_INJECT_INSTRUCTION
+        )
+        instruction = template.format(marker=self.cfg.silence_marker)
         try:
             parts = getattr(req, "extra_user_content_parts", None)
             if parts is not None:

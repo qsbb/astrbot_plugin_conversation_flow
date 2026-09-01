@@ -200,6 +200,7 @@ from astrbot_plugin_conversation_flow.core.prompts import (  # noqa: E402
     SCENE_TO_GROUP_INSTRUCTION,
     SCENE_TO_OTHER_INSTRUCTION_TEMPLATE,
     SILENCE_INJECT_INSTRUCTION,
+    SILENCE_INJECT_INSTRUCTION_TRUSTED,
     SILENCE_PREJUDGE_SYSTEM,
 )
 from astrbot_plugin_conversation_flow.core.message_meta import (  # noqa: E402
@@ -1642,6 +1643,76 @@ class SilencePromptBoundaryTests(unittest.TestCase):
         for prompt in (SILENCE_INJECT_INSTRUCTION, SILENCE_PREJUDGE_SYSTEM):
             self.assertIn("言语攻击", prompt)
             self.assertIn("安全", prompt)
+
+    def test_trusted_prompt_removes_safety_guidance_keeps_core(self) -> None:
+        """信任版指令：去掉安全/不当请求引导，保留沉默判断核心与互动承接。"""
+        # 去掉安全引导措辞（白名单用户不应被带偏成拒绝式回复）
+        self.assertNotIn("安全", SILENCE_INJECT_INSTRUCTION_TRUSTED)
+        self.assertNotIn("不当请求", SILENCE_INJECT_INSTRUCTION_TRUSTED)
+        # 保留沉默判断核心（三类允许沉默的情况）
+        self.assertIn("沉默是高门槛行为", SILENCE_INJECT_INSTRUCTION_TRUSTED)
+        self.assertIn("随机字符或重复刷屏", SILENCE_INJECT_INSTRUCTION_TRUSTED)
+        self.assertIn("{marker}", SILENCE_INJECT_INSTRUCTION_TRUSTED)
+        # 亲密/玩笑互动按人设承接（这正是白名单要保护的场景）
+        self.assertIn("亲密", SILENCE_INJECT_INSTRUCTION_TRUSTED)
+        self.assertIn("玩笑", SILENCE_INJECT_INSTRUCTION_TRUSTED)
+        self.assertIn("自然承接", SILENCE_INJECT_INSTRUCTION_TRUSTED)
+
+
+class SilenceWhitelistTieringTests(unittest.TestCase):
+    """信任白名单分级注入：白名单切换信任版模板并跳过 prejudge。"""
+
+    def _judge(self, whitelist=None):
+        from astrbot_plugin_conversation_flow.core.silence_judge import SilenceJudge
+
+        cfg = build_plugin_config(
+            {
+                "silence_enabled": True,
+                "silence_strategy": "both",
+                "intercept_whitelist": whitelist or [],
+            }
+        )
+        return SilenceJudge(cfg, _StubLLM())
+
+    def test_whitelisted_session_gets_trusted_instruction(self) -> None:
+        judge = self._judge(["aiocqhttp:FriendMessage:123"])
+        req = _ProviderRequest(prompt="消息")
+        self.assertTrue(judge.inject_instruction(req, "aiocqhttp:FriendMessage:123"))
+        injected = str(req.extra_user_content_parts[0])
+        self.assertIn("亲密", injected)  # 信任版特征
+        self.assertNotIn("安全", injected)  # 不再注入安全引导
+
+    def test_non_whitelisted_session_gets_standard_instruction(self) -> None:
+        judge = self._judge(["aiocqhttp:FriendMessage:123"])
+        req = _ProviderRequest(prompt="消息")
+        self.assertTrue(judge.inject_instruction(req, "aiocqhttp:GroupMessage:456"))
+        injected = str(req.extra_user_content_parts[0])
+        self.assertIn("安全", injected)  # 标准版保留安全兜底
+        self.assertIn("不当请求", injected)
+        self.assertNotIn("暧昧", injected)  # 信任版特有的亲密承接措辞
+
+    def test_prejudge_skipped_for_whitelisted_session(self) -> None:
+        judge = self._judge(["aiocqhttp:FriendMessage:123"])
+        self.assertFalse(judge.should_prejudge("aiocqhttp:FriendMessage:123"))
+        self.assertTrue(judge.should_prejudge("aiocqhttp:GroupMessage:456"))
+
+    def test_inject_still_enabled_for_whitelisted_session(self) -> None:
+        """白名单不跳过 inject（保留沉默判断功能，仅切换模板）。"""
+        judge = self._judge(["aiocqhttp:FriendMessage:123"])
+        self.assertTrue(judge.should_inject("aiocqhttp:FriendMessage:123"))
+        self.assertTrue(judge.should_inject("aiocqhttp:GroupMessage:456"))
+
+    def test_empty_whitelist_disables_tiering(self) -> None:
+        judge = self._judge([])
+        req = _ProviderRequest(prompt="消息")
+        self.assertTrue(judge.inject_instruction(req, "aiocqhttp:FriendMessage:1"))
+        injected = str(req.extra_user_content_parts[0])
+        self.assertIn("安全", injected)
+
+    def test_marker_detection_unaffected_by_whitelist(self) -> None:
+        """白名单会话同样注入指令，marker 检测必须继续工作。"""
+        judge = self._judge(["aiocqhttp:FriendMessage:123"])
+        self.assertTrue(judge.is_silence_response("<SILENCE/>"))
 
 
 class SilenceMarkerParsingTests(unittest.TestCase):
@@ -4377,8 +4448,8 @@ class AgentTerminalFrameTests(unittest.IsolatedAsyncioTestCase):
         plugin.tracker = ConversationTracker(max_history_turns=1)
         plugin.chunker = Chunker(plugin.config, types.SimpleNamespace())
         plugin.silence_judge = types.SimpleNamespace(
-            should_inject=lambda: False,
-            should_prejudge=lambda: False,
+            should_inject=lambda _umo="": False,
+            should_prejudge=lambda _umo="": False,
             is_silence_response=lambda _text: False,
             parse_silence_response=lambda _text: types.SimpleNamespace(
                 matched=False, kind="no_match", reason="test"
@@ -4680,8 +4751,8 @@ class RelationshipOffenseMarkerTests(unittest.IsolatedAsyncioTestCase):
             is_whitelisted=lambda _umo: False
         )
         plugin.silence_judge = types.SimpleNamespace(
-            should_inject=lambda: False,
-            should_prejudge=lambda: False,
+            should_inject=lambda _umo="": False,
+            should_prejudge=lambda _umo="": False,
             is_silence_response=lambda _text: False,
             parse_silence_response=lambda _text: types.SimpleNamespace(
                 matched=False, kind="no_match", reason="test"

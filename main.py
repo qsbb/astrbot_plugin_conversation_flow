@@ -111,7 +111,7 @@ from .series_diagnostics import (
     logger,
 )
 
-__version__ = "0.8.12"
+__version__ = "0.8.13"
 RELATIONSHIP_PLUGIN_NAME = "astrbot_plugin_relationship"
 RELATIONSHIP_SNAPSHOT_CONTRACT_NAME = "relationship.snapshot"
 RELATIONSHIP_SNAPSHOT_CONTRACT_MAJOR = "1"
@@ -1209,8 +1209,8 @@ class ConversationalFlowPlugin(Star):
             else:
                 self.logger.warning("[conv-flow] seq=%s intercept inject failed", seq)
 
-        # prejudge 模式：先独立判断
-        if self.silence_judge.should_prejudge():
+        # prejudge 模式：先独立判断（信任白名单会话跳过外部过滤）
+        if self.silence_judge.should_prejudge(umo):
             try:
                 should_silence = await self.silence_judge.prejudge(user_text, umo)
                 if should_silence:
@@ -1226,9 +1226,9 @@ class ConversationalFlowPlugin(Star):
             except Exception as exc:
                 self.logger.warning("[conv-flow] prejudge failed: %s", exc)
 
-        # inject 模式：注入指令到 req
-        if self.silence_judge.should_inject():
-            ok = self.silence_judge.inject_instruction(req)
+        # inject 模式：注入指令到 req（白名单会话自动切换信任版模板）
+        if self.silence_judge.should_inject(umo):
+            ok = self.silence_judge.inject_instruction(req, umo)
             if not ok:
                 self.logger.warning("[conv-flow] seq=%s silence inject failed", seq)
 
@@ -1983,13 +1983,18 @@ class ConversationalFlowPlugin(Star):
         if not text:
             yield event.plain_result("请输入要测试的文本。")
             return
-        if not self.silence_judge.should_prejudge():
+        umo = self.tracker._get_umo(event)
+        if not self.silence_judge.should_prejudge(umo):
+            if self.silence_judge.is_whitelisted(umo):
+                yield event.plain_result(
+                    "当前会话在信任白名单中，预判断被跳过（白名单会话不经过外部过滤模型）。"
+                )
+                return
             yield event.plain_result(
                 f"当前策略为 {self.config.silence_strategy}，未启用预判断。"
                 "切换到 prejudge 或 both 后可用此命令。"
             )
             return
-        umo = self.tracker._get_umo(event)
         try:
             should_silence = await self.silence_judge.prejudge(text, umo)
         except Exception as exc:
