@@ -1,4 +1,4 @@
-"""时间标注（规范 3.7 注入即标注）的单元测试。"""
+"""时间标注（注入即标注）的单元测试。"""
 
 from __future__ import annotations
 
@@ -23,7 +23,6 @@ for _name in (
 from astrbot_plugin_conversation_flow.core.time_labels import (  # noqa: E402
     BURST_SPAN_SECONDS,
     burst_note,
-    clock_label,
     labeled_line,
     relative_label,
 )
@@ -47,13 +46,18 @@ class RelativeLabelTests(unittest.TestCase):
     def test_hours_bucket(self) -> None:
         self.assertEqual(relative_label(NOW - 3 * 3600, NOW), "3小时前")
 
-    def test_yesterday_uses_absolute_clock(self) -> None:
+    def test_yesterday_uses_daypart_word(self) -> None:
+        """隔夜标签用「昨天 + 时段词」，不出现 HH:MM 机器时刻。"""
         label = relative_label(NOW - 30 * 3600, NOW)
-        self.assertTrue(label.startswith("昨天 "), label)
+        self.assertRegex(label, r"^昨天 (凌晨|早上|上午|中午|下午|晚上|深夜)$", label)
 
-    def test_older_than_a_week_uses_date(self) -> None:
+    def test_older_uses_date_and_daypart(self) -> None:
         label = relative_label(NOW - 30 * 86400, NOW)
-        self.assertRegex(label, r"^\d{2}-\d{2} \d{2}:\d{2}$|^\d{4}-\d{2}-\d{2} \d{2}:\d{2}$")
+        self.assertRegex(
+            label,
+            r"^(\d{2}-\d{2}|\d{4}-\d{2}-\d{2}) (凌晨|早上|上午|中午|下午|晚上|深夜)$",
+            label,
+        )
 
     def test_invalid_timestamp_returns_empty(self) -> None:
         self.assertEqual(relative_label(0, NOW), "")
@@ -66,21 +70,13 @@ class RelativeLabelTests(unittest.TestCase):
         self.assertEqual(relative_label(NOW + 60, NOW), "刚刚")
 
 
-class ClockLabelTests(unittest.TestCase):
-    def test_format(self) -> None:
-        self.assertRegex(clock_label(NOW), r"^\d{2}:\d{2}:\d{2}$")
-
-    def test_invalid_returns_empty(self) -> None:
-        self.assertEqual(clock_label(0), "")
-        self.assertEqual(clock_label("bad"), "")
-
-
 class BurstNoteTests(unittest.TestCase):
     def test_burst_within_threshold(self) -> None:
         note = burst_note(3, NOW - 4, NOW)
         self.assertIn("3 条消息", note)
         self.assertIn("4 秒内连续发出", note)
         self.assertIn("同一时刻的连续表达", note)
+        self.assertNotIn("–", note)  # 不再附带精确起止时刻
         self.assertTrue(note.endswith("\n"))
 
     def test_span_over_threshold_returns_empty(self) -> None:

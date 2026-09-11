@@ -113,7 +113,7 @@ from .series_diagnostics import (
     logger,
 )
 
-__version__ = "0.8.14"
+__version__ = "0.8.15"
 RELATIONSHIP_PLUGIN_NAME = "astrbot_plugin_relationship"
 RELATIONSHIP_SNAPSHOT_CONTRACT_NAME = "relationship.snapshot"
 RELATIONSHIP_SNAPSHOT_CONTRACT_MAJOR = "1"
@@ -2136,7 +2136,7 @@ class ConversationalFlowPlugin(Star):
         old_text = " / ".join(old_texts)
         display_old_text = old_text or "（较早消息包含图片、音频或图片描述）"
         display_new_text = new_text or "（当前消息包含图片或其他媒体）"
-        # 时间标注（规范 3.7 注入即标注）：相对换算由代码完成，
+        # 时间标注（注入即标注）：相对换算由代码完成，
         # 秒级连发追加结论句，不让模型对裸时间戳自行心算。
         now_ts = time.time()
         old_lines = "\n".join(
@@ -3271,7 +3271,7 @@ class ConversationalFlowPlugin(Star):
         now_ts = time.time()
         lines: list[str] = []
         for turn in turns:
-            # 每轮标注距现在的真实时间（规范 3.7），模型不再自行猜测间隔。
+            # 每轮标注距现在的真实时间，模型不再自行猜测间隔。
             turn_label = relative_label(turn.completed_at, now_ts)
             turn_prefix = f"（{turn_label}）" if turn_label else ""
             for text in turn.user_texts:
@@ -3348,7 +3348,7 @@ class ConversationalFlowPlugin(Star):
             block = "\n".join(lines).strip()
             if not block:
                 continue
-            # 时间标注属于结构元数据，不占用内容字符预算（规范 3.7）。
+            # 时间标注属于结构元数据，不占用内容字符预算。
             content_len = len(block) - len(turn_prefix) * len(lines)
             separator = 2 if blocks else 0
             remaining = budget - used - separator
