@@ -17,6 +17,7 @@ import math
 import pathlib
 import re
 import secrets
+import time
 from sys import maxsize
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -103,6 +104,7 @@ from .core.request_context import (
     set_flag,
 )
 from .core.silence_judge import SilenceJudge
+from .core.time_labels import burst_note, labeled_line, relative_label
 from .series_control import SeriesControlAdapter
 from .series_diagnostics import (
     diagnostic_clear as clear_diagnostic_events,
@@ -111,7 +113,7 @@ from .series_diagnostics import (
     logger,
 )
 
-__version__ = "0.8.13"
+__version__ = "0.8.14"
 RELATIONSHIP_PLUGIN_NAME = "astrbot_plugin_relationship"
 RELATIONSHIP_SNAPSHOT_CONTRACT_NAME = "relationship.snapshot"
 RELATIONSHIP_SNAPSHOT_CONTRACT_MAJOR = "1"
@@ -324,6 +326,7 @@ class ConversationalFlowPlugin(Star):
             "mood_hinted": 0,
             "private_context_bridged": 0,
             "dynamic_context_injected": 0,
+            "time_annotated_injections": 0,
             "recent_activity_recorded": 0,
             "recent_activity_selected": 0,
             "total_requests": 0,
@@ -1919,6 +1922,7 @@ class ConversationalFlowPlugin(Star):
             f"- 插话合并: {self._stats['interrupted']}\n"
             f"- 私聊上下文承接: {self._stats['private_context_bridged']}\n"
             f"- 动态话题续接: {self._stats['dynamic_context_injected']}\n"
+            f"- 时间标注注入: {self._stats['time_annotated_injections']}\n"
             f"- 跨会话片段: 选中 {self._stats['recent_activity_selected']} 次, "
             f"记录 {self._stats['recent_activity_recorded']} 条\n"
             f"- 拦截命中: {self._stats['intercepted']}\n"
@@ -2018,6 +2022,7 @@ class ConversationalFlowPlugin(Star):
             "mood_hinted": 0,
             "private_context_bridged": 0,
             "dynamic_context_injected": 0,
+            "time_annotated_injections": 0,
             "recent_activity_recorded": 0,
             "recent_activity_selected": 0,
             "total_requests": 0,
@@ -2100,11 +2105,24 @@ class ConversationalFlowPlugin(Star):
             return
 
         raw_old_texts = raw_hint.get("old_texts", [])
-        old_texts = (
-            [str(item).strip() for item in raw_old_texts if str(item).strip()]
-            if isinstance(raw_old_texts, list)
-            else []
-        )
+        raw_old_times = raw_hint.get("old_times", [])
+        # 文本与到达时间平行对齐；时间缺失/非法时置 0，渲染层据此省略标注。
+        old_pairs: list[tuple[str, float]] = []
+        if isinstance(raw_old_texts, list):
+            for index, item in enumerate(raw_old_texts):
+                text = str(item).strip()
+                if not text:
+                    continue
+                text_ts = 0.0
+                if isinstance(raw_old_times, (list, tuple)) and index < len(
+                    raw_old_times
+                ):
+                    try:
+                        text_ts = float(raw_old_times[index])
+                    except (TypeError, ValueError):
+                        text_ts = 0.0
+                old_pairs.append((text, text_ts))
+        old_texts = [text for text, _ in old_pairs]
         old_media_present = any(
             isinstance(raw_hint.get(key), (list, tuple)) and raw_hint.get(key)
             for key in ("old_image_urls", "old_audio_urls", "old_captions")
@@ -2118,6 +2136,26 @@ class ConversationalFlowPlugin(Star):
         old_text = " / ".join(old_texts)
         display_old_text = old_text or "（较早消息包含图片、音频或图片描述）"
         display_new_text = new_text or "（当前消息包含图片或其他媒体）"
+        # 时间标注（规范 3.7 注入即标注）：相对换算由代码完成，
+        # 秒级连发追加结论句，不让模型对裸时间戳自行心算。
+        now_ts = time.time()
+        old_lines = "\n".join(
+            labeled_line(text_ts, text, now_ts) for text, text_ts in old_pairs
+        )
+        time_note = ""
+        if old_pairs and all(text_ts > 0 for _, text_ts in old_pairs):
+            time_note = burst_note(len(old_pairs) + 1, old_pairs[0][1], now_ts)
+        try:
+            hint_ts_value = float(raw_hint.get("hint_ts"))
+        except (TypeError, ValueError):
+            hint_ts_value = now_ts
+        new_label = relative_label(hint_ts_value, now_ts) or "刚刚"
+        old_time_note = (
+            f"（{relative_label(old_pairs[-1][1], now_ts)}发出）"
+            if old_pairs and old_pairs[-1][1] > 0
+            else ""
+        )
+        annotated = False
         previous_state = str(raw_hint.get("previous_state", "response_started"))
         strategy = self.config.interrupt_merge_strategy
         history_contains_old = self._request_context_contains(req, old_texts)
@@ -2132,18 +2170,27 @@ class ConversationalFlowPlugin(Star):
             and self.config.experimental_thinking_merge_enabled
         ):
             if context_count > 0:
-                recent = old_texts[-context_count:]
-                if recent:
-                    context_text = "\n".join(f"- {text}" for text in recent)
+                recent_pairs = old_pairs[-context_count:]
+                if recent_pairs:
+                    context_text = "\n".join(
+                        labeled_line(text_ts, text, now_ts)
+                        for text, text_ts in recent_pairs
+                    )
                     injection = INTERRUPT_THINKING_HISTORY_WITH_CONTEXT_TEMPLATE.format(
                         context=context_text,
                         new_text=display_new_text,
+                        new_label=new_label,
+                        time_note=time_note,
                     )
+                    annotated = True
                     thinking_handled = True
             elif history_contains_old:
                 injection = INTERRUPT_THINKING_HISTORY_TEMPLATE.format(
-                    new_text=display_new_text
+                    new_text=display_new_text,
+                    new_label=new_label,
+                    old_time_note=old_time_note,
                 )
+                annotated = True
                 thinking_handled = True
 
         if not thinking_handled:
@@ -2167,19 +2214,27 @@ class ConversationalFlowPlugin(Star):
                         pass
                 else:
                     injection = INTERRUPT_MERGE_APPEND_TEMPLATE.format(
-                        old_text=display_old_text,
+                        time_note=time_note,
+                        old_lines=old_lines or f"「{display_old_text}」",
+                        new_label=new_label,
                         new_text=display_new_text,
                     )
+                    annotated = True
             else:  # append (默认)
                 injection = INTERRUPT_MERGE_APPEND_TEMPLATE.format(
-                    old_text=display_old_text,
+                    time_note=time_note,
+                    old_lines=old_lines or f"「{display_old_text}」",
+                    new_label=new_label,
                     new_text=display_new_text,
                 )
+                annotated = True
 
         if strategy != "discard_old":
             self._prepend_interrupt_media(req, raw_hint)
         if not injection:
             return
+        if annotated:
+            self._bump_time_annotation_stat()
 
         try:
             parts = getattr(req, "extra_user_content_parts", None)
@@ -2300,6 +2355,16 @@ class ConversationalFlowPlugin(Star):
         self._inject_instruction(
             req, NATURAL_TOOL_CALL_INSTRUCTION, "natural tool call"
         )
+
+    def _bump_time_annotation_stat(self) -> None:
+        """时间标注注入计数（可观测性）：fail-safe，绝不影响注入主路径。"""
+        try:
+            stats = self._stats
+            stats["time_annotated_injections"] = (
+                stats.get("time_annotated_injections", 0) + 1
+            )
+        except Exception:
+            pass
 
     def _inject_instruction(self, req: Any, instruction: str, label: str) -> bool:
         """通用指令注入：优先 extra_user_content_parts，降级到 system_prompt。"""
@@ -2699,6 +2764,7 @@ class ConversationalFlowPlugin(Star):
                 )
         if injected:
             self._set_extra(event, self.GROUP_CONTEXT_INJECTED_KEY, True)
+            self._bump_time_annotation_stat()
             self.logger.info(
                 "[conv-flow] seq=%s group context injected (group=%s, is_wake=%s)",
                 seq,
@@ -3202,15 +3268,19 @@ class ConversationalFlowPlugin(Star):
         if not is_short_followup and self._request_context_contains(req, history_texts):
             return
 
+        now_ts = time.time()
         lines: list[str] = []
         for turn in turns:
+            # 每轮标注距现在的真实时间（规范 3.7），模型不再自行猜测间隔。
+            turn_label = relative_label(turn.completed_at, now_ts)
+            turn_prefix = f"（{turn_label}）" if turn_label else ""
             for text in turn.user_texts:
                 preview = self._context_bridge_preview(text)
                 if preview:
-                    lines.append(f"用户: {preview}")
+                    lines.append(f"{turn_prefix}用户: {preview}")
             bot_preview = self._context_bridge_preview(turn.bot_text)
             if bot_preview:
-                lines.append(f"你: {bot_preview}")
+                lines.append(f"{turn_prefix}你: {bot_preview}")
         if not lines:
             return
 
@@ -3221,6 +3291,7 @@ class ConversationalFlowPlugin(Star):
         self._inject_instruction(req, instruction, "private context bridge")
         self._set_extra(event, self.PRIVATE_CONTEXT_INJECTED_KEY, True)
         self._stats["private_context_bridged"] += 1
+        self._bump_time_annotation_stat()
         self.logger.info(
             "[conv-flow] seq=%s private context bridged (turns=%s, short=%s)",
             seq,
@@ -3262,28 +3333,33 @@ class ConversationalFlowPlugin(Star):
         budget = self.config.dynamic_context_max_chars
         blocks: list[str] = []
         used = 0
+        now_ts = time.time()
         for turn in reversed(missing_turns):
+            turn_label = relative_label(turn.completed_at, now_ts)
+            turn_prefix = f"（{turn_label}）" if turn_label else ""
             lines = [
-                f"用户: {self._context_bridge_preview(text, 360)}"
+                f"{turn_prefix}用户: {self._context_bridge_preview(text, 360)}"
                 for text in turn.user_texts
                 if self._context_bridge_preview(text, 360)
             ]
             bot_preview = self._context_bridge_preview(turn.bot_text, 480)
             if bot_preview:
-                lines.append(f"你: {bot_preview}")
+                lines.append(f"{turn_prefix}你: {bot_preview}")
             block = "\n".join(lines).strip()
             if not block:
                 continue
+            # 时间标注属于结构元数据，不占用内容字符预算（规范 3.7）。
+            content_len = len(block) - len(turn_prefix) * len(lines)
             separator = 2 if blocks else 0
             remaining = budget - used - separator
             if remaining <= 0:
                 break
-            if len(block) > remaining:
+            if content_len > remaining:
                 if blocks:
                     break
                 block = block[: max(1, remaining - 1)].rstrip() + "…"
             blocks.append(block)
-            used += separator + len(block)
+            used += separator + content_len
         if not blocks:
             return
 
@@ -3295,6 +3371,7 @@ class ConversationalFlowPlugin(Star):
             return
         self._set_extra(event, self.DYNAMIC_CONTEXT_INJECTED_KEY, True)
         self._stats["dynamic_context_injected"] += 1
+        self._bump_time_annotation_stat()
         self.logger.info(
             "[conv-flow] seq=%s dynamic context injected (missing_turns=%s)",
             seq,

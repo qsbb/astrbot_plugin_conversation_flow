@@ -16,6 +16,8 @@ import time
 from collections import deque
 from dataclasses import dataclass, field
 
+from .time_labels import relative_label
+
 
 @dataclass
 class GroupMessageRecord:
@@ -190,15 +192,17 @@ class GroupContextManager:
         n: int = 0,
         bot_label: str = "你",
         exclude_message_id: str = "",
+        now: float | None = None,
     ) -> str:
         """返回最近 n 条群聊消息的格式化文本。n<=0 时用配置上限。
 
-        格式：
-          {昵称}: {消息}
-          {昵称}（回复 {对象}「{预览}」）: {消息}
+        格式（规范 3.7：每条携带距现在的真实时间标注）：
+          （N分钟前）{昵称}: {消息}
+          （N分钟前）{昵称}（回复 {对象}「{预览}」）: {消息}
 
         ``exclude_message_id`` 用于排除"当前正在处理的这条消息"，
         避免它既作为 prompt 主体又出现在背景记录里造成重复。
+        ``now`` 供测试注入固定时刻；缺省取当前时间。
         """
         if not group_id:
             return ""
@@ -217,11 +221,14 @@ class GroupContextManager:
         count = n if n > 0 else self._max
         selected = visible[-count:]
 
+        current = time.time() if now is None else float(now)
         lines: list[str] = []
         for rec in selected:
             name = bot_label if rec.is_bot else rec.sender_name
             annotation = self._format_reply_annotation(rec, all_records, bot_label)
-            lines.append(f"{name}{annotation}: {rec.text}")
+            label = relative_label(rec.timestamp, current)
+            prefix = f"（{label}）" if label else ""
+            lines.append(f"{prefix}{name}{annotation}: {rec.text}")
         return "\n".join(lines)
 
     @staticmethod

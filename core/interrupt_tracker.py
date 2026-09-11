@@ -17,6 +17,8 @@ class PendingRequest:
     finished: bool = False
     response_started: bool = False
     user_texts: list[str] = field(default_factory=list)
+    # 与 user_texts 平行的逐条到达时间；继承旧文本时连同各自时间一起继承。
+    user_text_times: list[float] = field(default_factory=list)
     history_recorded: bool = False
     interrupt_token: dict[str, Any] = field(
         default_factory=lambda: {"cancelled": False, "completed": False}
@@ -214,12 +216,14 @@ class ConversationTracker:
                 for pending in active_pending
                 if pending.user_texts or pending.media.has_content()
             ]
-            old_texts = [
-                text
+            old_pairs = [
+                (text, text_ts)
                 for pending in merge_candidates
-                for text in pending.user_texts
+                for text, text_ts in self._pending_text_times(pending)
                 if text.strip() and not self._is_placeholder_text(text)
             ]
+            old_texts = [text for text, _ in old_pairs]
+            old_times = [text_ts for _, text_ts in old_pairs]
             old_image_urls = [
                 url
                 for pending in merge_candidates
@@ -248,6 +252,7 @@ class ConversationTracker:
                 merge_hint = self._build_merge_hint(
                     old_texts,
                     meaningful_user_text,
+                    old_times=old_times,
                     previous_state=(
                         "thinking"
                         if any(
@@ -261,6 +266,7 @@ class ConversationTracker:
                 )
 
         inherited_texts = old_texts if merge_hint else []
+        inherited_times = old_times if merge_hint else []
         inherited_media = PendingMedia()
         if merge_hint:
             inherited_media.image_urls = list(merge_hint.get("old_image_urls", []))
@@ -274,6 +280,11 @@ class ConversationTracker:
                 [*inherited_texts, meaningful_user_text]
                 if meaningful_user_text
                 else inherited_texts
+            ),
+            user_text_times=(
+                [*inherited_times, now]
+                if meaningful_user_text
+                else inherited_times
             ),
             media=inherited_media,
         )
@@ -478,6 +489,7 @@ class ConversationTracker:
         old_image_urls: list[str] | None = None,
         old_audio_urls: list[str] | None = None,
         old_captions: list[str] | None = None,
+        old_times: list[float] | None = None,
     ) -> dict[str, Any]:
         return {
             "old_texts": old_texts,
@@ -486,7 +498,20 @@ class ConversationTracker:
             "old_image_urls": list(old_image_urls or []),
             "old_audio_urls": list(old_audio_urls or []),
             "old_captions": list(old_captions or []),
+            # 逐条到达时间（与 old_texts 平行）和提示生成时刻，供渲染时间标注。
+            "old_times": list(old_times or []),
+            "hint_ts": time.time(),
         }
+
+    @staticmethod
+    def _pending_text_times(pending: PendingRequest) -> list[tuple[str, float]]:
+        """取出 pending 的（文本, 到达时间）对；时间缺失时回退到请求开始时间。"""
+        times = pending.user_text_times
+        pairs: list[tuple[str, float]] = []
+        for index, text in enumerate(pending.user_texts):
+            text_ts = times[index] if index < len(times) else pending.started_at
+            pairs.append((text, text_ts))
+        return pairs
 
     def _get_umo(self, event: Any) -> str:
         """读取已缓存的 UMO（由 begin_request 计算）。未缓存时用兜底逻辑。"""

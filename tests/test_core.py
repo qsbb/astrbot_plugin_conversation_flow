@@ -1108,10 +1108,20 @@ class ThinkingMergeContextPromptTests(unittest.TestCase):
     def test_with_context_template_format_succeeds(self) -> None:
         """模板应能被正确格式化。"""
         result = INTERRUPT_THINKING_HISTORY_WITH_CONTEXT_TEMPLATE.format(
-            context="- 第一句\n- 第二句", new_text="最新消息"
+            context="- 第一句\n- 第二句",
+            new_text="最新消息",
+            new_label="刚刚",
+            time_note="",
         )
         self.assertIn("第一句", result)
         self.assertIn("最新消息", result)
+
+    def test_with_context_template_marks_real_send_time(self) -> None:
+        """模板需说明括号是真实发送时间，禁止模型自行假设时间流逝。"""
+        self.assertIn("{time_note}", INTERRUPT_THINKING_HISTORY_WITH_CONTEXT_TEMPLATE)
+        self.assertIn("{new_label}", INTERRUPT_THINKING_HISTORY_WITH_CONTEXT_TEMPLATE)
+        self.assertIn("真实发送时间", INTERRUPT_THINKING_HISTORY_WITH_CONTEXT_TEMPLATE)
+        self.assertIn("不要自行假设更多时间流逝", INTERRUPT_THINKING_HISTORY_WITH_CONTEXT_TEMPLATE)
 
 
 class PrivateContextBridgePromptTests(unittest.TestCase):
@@ -3079,7 +3089,8 @@ class InterruptMediaInjectionTests(unittest.TestCase):
             if isinstance(merge_part, dict)
             else getattr(merge_part, "text", "")
         )
-        self.assertIn("把两条消息视作连续的语境一起回应", merge_text)
+        self.assertIn("把它们视作连续的语境一起回应", merge_text)
+        self.assertIn("同一时刻的连续表达", merge_text)
         self.assertNotEqual(req.image_urls, ["image-placeholder"])
 
 
@@ -3470,7 +3481,9 @@ class GroupContextMessageIdTests(unittest.TestCase):
     def test_no_annotation_without_reply(self) -> None:
         mgr = GroupContextManager()
         mgr.record("g", "u1", "A", "普通消息", message_id="1")
-        self.assertEqual(mgr.get_recent_context("g"), "A: 普通消息")
+        context = mgr.get_recent_context("g")
+        self.assertTrue(context.endswith("A: 普通消息"), context)
+        self.assertTrue(context.startswith("（"), context)
 
     def test_update_max_rebuilds_index(self) -> None:
         mgr = GroupContextManager(max_messages=5)
