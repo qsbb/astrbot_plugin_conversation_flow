@@ -193,6 +193,7 @@ from astrbot_plugin_conversation_flow.core.prompts import (  # noqa: E402
     build_followup_guard_instruction,
     PRIVATE_CONTEXT_BRIDGE_TEMPLATE,
     CHUNKING_INSTRUCTION,
+    CHUNK_LLM_ASSIST_SYSTEM,
     REPLY_QUOTE_DECISION_INSTRUCTION,
     DYNAMIC_CONTEXT_TEMPLATE,
     SCENE_TARGET_HINT_NAMED,
@@ -851,13 +852,29 @@ class LLMChunkingAssistTests(unittest.IsolatedAsyncioTestCase):
         values.update(overrides)
         return build_plugin_config(values)
 
-    async def test_llm_can_keep_reply_whole_before_local_candidate_limit(self) -> None:
+    async def test_llm_cannot_collapse_local_multi_segments_to_single(self) -> None:
+        """本地已能看到多段时，辅助模型不得把结果压回单段。"""
         text = "第一句话已经足够长。第二句话同样足够长。"
         llm = _RecordingChunkLLM(json.dumps([text], ensure_ascii=False))
         chunker = Chunker(self._config(), llm)
 
-        self.assertGreater(len(chunker.split(text)), 1)
-        self.assertEqual(await chunker.split_smart(text), [text])
+        local = chunker.split(text)
+        self.assertGreater(len(local), 1)
+        self.assertEqual(await chunker.split_smart(text), local)
+        self.assertEqual(llm.calls, 1)
+
+    async def test_question_then_followup_keeps_local_split(self) -> None:
+        """用户实测句子：问候+关心被辅助模型返回单段时，仍按本地规则断开。"""
+        text = "晚上好呀凌溪，这一觉补回来点没？精神好些了吧。"
+        llm = _RecordingChunkLLM(json.dumps([text], ensure_ascii=False))
+        chunker = Chunker(self._config(), llm)
+
+        local = chunker.split(text)
+        self.assertEqual(len(local), 2)
+        self.assertEqual(
+            await chunker.split_smart(text),
+            ["晚上好呀凌溪，这一觉补回来点没？", "精神好些了吧。"],
+        )
         self.assertEqual(llm.calls, 1)
 
     async def test_llm_can_split_single_local_candidate_by_semantics(self) -> None:
@@ -944,6 +961,16 @@ class ChunkingPromptTests(unittest.TestCase):
     def test_chunking_instruction_instructs_no_numbering(self) -> None:
         """分段引导应禁止人为编号。"""
         self.assertIn("编号", CHUNKING_INSTRUCTION)
+
+    def test_chunking_instruction_requires_multi_sentence_split(self) -> None:
+        """只有单句极简回应可不分段；多句回复应按句分条。"""
+        self.assertIn("只有单句", CHUNKING_INSTRUCTION)
+        self.assertIn("两个及以上完整句子", CHUNKING_INSTRUCTION)
+
+    def test_llm_assist_prompt_enforces_sentence_boundary(self) -> None:
+        """切分助手提示词应有句界硬判据，不能随意合并为单段。"""
+        self.assertIn("句末标点", CHUNK_LLM_ASSIST_SYSTEM)
+        self.assertIn("不可拆分的单句", CHUNK_LLM_ASSIST_SYSTEM)
 
     def test_long_paragraph_threshold_default_is_20(self) -> None:
         """默认阈值应为 20（保底策略）。"""

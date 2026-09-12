@@ -139,6 +139,14 @@ class Chunker:
                 # 只接受能逐字映射回原文的边界，绝不发送 LLM 改写后的文本。
                 matched = self._match_to_original(text, segments)
                 if matched:
+                    # 本地确定性规则已经能看到多个自然段时，辅助模型不得
+                    # 把它们压回单段；否则“辅助”会反向覆盖用户设定的
+                    # 分段灵敏度（chunking_min_length），把该切的不该切的
+                    # 一起吞掉。辅助模型仍可切得更细，或把多段并成至少两段。
+                    if len(matched) <= 1:
+                        local = self.split(text)
+                        if len(local) > 1:
+                            return local
                     return matched
         except Exception as exc:
             self.logger.debug("[conv-flow] LLM assist split failed: %s", exc)
@@ -251,13 +259,22 @@ class Chunker:
         return [text]
 
     def _merge_short(self, segments: list[str]) -> list[str]:
-        """合并过短片段到前一段。"""
+        """合并过短片段到前一段；完整短句保留为独立消息。
+
+        像「精神好些了吧。」这样的完整小句，是真人会单独发出的
+        一条消息，不应为了凑够 min_length 而被吞回上一段；只合并没有
+        句末标点的破碎片段。
+        """
         if len(segments) <= 1:
             return segments
         threshold = max(10, self._chunk_cfg.min_length // 3)
         merged: list[str] = []
         for seg in segments:
-            if merged and len(seg) < threshold:
+            if (
+                merged
+                and len(seg) < threshold
+                and not _COMPLETE_SENTENCE_END.search(seg)
+            ):
                 merged[-1] = merged[-1] + "\n" + seg
             else:
                 merged.append(seg)

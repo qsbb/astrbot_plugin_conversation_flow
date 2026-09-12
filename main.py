@@ -113,7 +113,7 @@ from .series_diagnostics import (
     logger,
 )
 
-__version__ = "0.8.15"
+__version__ = "0.8.16"
 RELATIONSHIP_PLUGIN_NAME = "astrbot_plugin_relationship"
 RELATIONSHIP_SNAPSHOT_CONTRACT_NAME = "relationship.snapshot"
 RELATIONSHIP_SNAPSHOT_CONTRACT_MAJOR = "1"
