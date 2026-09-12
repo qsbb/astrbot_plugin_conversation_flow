@@ -25,7 +25,10 @@ function render(data) {
     .join("");
   const features = data.features || {};
   document.getElementById("features").innerHTML = Object.entries(featureLabels)
-    .map(([key, label]) => `<div class="feature"><span>${label}</span><strong>${features[key] ? "开启" : "关闭"}</strong></div>`)
+    .map(([key, label]) => {
+      const enabled = Boolean(features[key]);
+      return `<div class="feature"><span>${label}</span><strong class="feature-state ${enabled ? "is-on" : "is-off"}">${enabled ? "开启" : "关闭"}</strong></div>`;
+    })
     .join("");
 }
 
@@ -34,8 +37,14 @@ async function load() {
   try {
     render(await bridge.apiGet("status"));
   } catch (error) {
-    errorNode.textContent = `状态读取失败：${error.message || error}`;
-    errorNode.hidden = false;
+    const message = `状态读取失败：${error.message || error}`;
+    if (window.SeriesUI && typeof window.SeriesUI.toast === "function") {
+      errorNode.hidden = true;
+      window.SeriesUI.toast(message, "error");
+    } else {
+      errorNode.textContent = message;
+      errorNode.hidden = false;
+    }
   }
 }
 

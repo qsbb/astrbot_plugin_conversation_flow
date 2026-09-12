@@ -1,18 +1,143 @@
-:root { color-scheme: light dark; font-family: system-ui, -apple-system, "Segoe UI", sans-serif; }
-body { margin: 0; background: #f5f7fb; color: #1f2937; }
-.shell { max-width: 960px; margin: 0 auto; padding: 28px 20px 48px; }
-.hero { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; }
-.eyebrow { margin: 0 0 6px; font-size: 12px; letter-spacing: .08em; text-transform: uppercase; color: #64748b; }
-h1 { margin: 0 0 6px; font-size: 28px; }
-h2 { margin: 0 0 14px; font-size: 18px; }
-p { margin: 0; color: #475569; }
-button { border: 0; border-radius: 8px; padding: 9px 16px; background: #2563eb; color: #fff; cursor: pointer; }
-.cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; margin: 24px 0; }
-.card, .metric { background: #fff; border-radius: 12px; padding: 16px; box-shadow: 0 1px 3px rgba(15,23,42,.08); }
-.metric span { display: block; color: #64748b; font-size: 13px; }
-.metric strong { display: block; margin-top: 6px; font-size: 24px; }
-.feature-list { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 10px; }
-.feature { display: flex; justify-content: space-between; gap: 10px; padding: 10px 12px; border-radius: 8px; background: #f8fafc; }
-.note { margin-top: 20px; font-size: 13px; }
-.alert { margin: 16px 20px 0; padding: 10px 12px; border-radius: 8px; }
-.error { background: #fee2e2; color: #991b1b; }
+/* 凝心溯溪-言 Plugin Page
+ * Page-specific layout and domain visuals only.
+ * Generic controls, surfaces, status, modals and feedback live in series-ui.css.
+ */
+
+.shell {
+  max-width: 1120px;
+}
+
+.hero {
+  align-items: flex-start;
+  gap: 20px;
+}
+
+.hero > div {
+  min-width: 0;
+}
+
+.hero p:not(.eyebrow) {
+  max-width: 68ch;
+}
+
+#refresh {
+  flex: 0 0 auto;
+}
+
+.cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 12px;
+  margin: 18px 0;
+}
+
+.metric span {
+  display: block;
+}
+
+.metric strong {
+  display: block;
+  margin-top: 5px;
+}
+
+.card {
+  margin-top: 16px;
+}
+
+.feature-list {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
+  gap: 10px;
+}
+
+.feature {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-width: 0;
+  padding: 12px 14px;
+  border: 1px solid rgba(102, 112, 158, .13);
+  border-radius: var(--si-radius-sm);
+  color: var(--si-ink);
+  background:
+    linear-gradient(145deg, rgba(255, 255, 255, .72), rgba(255, 255, 255, .38));
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, .65);
+}
+
+.feature > span {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--si-muted);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.feature-state {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  min-width: 52px;
+  padding: 4px 9px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 720;
+}
+
+.feature-state.is-on {
+  color: var(--si-success);
+  background: var(--si-success-soft);
+}
+
+.feature-state.is-off {
+  color: var(--si-muted);
+  background: rgba(105, 115, 158, .11);
+}
+
+.note {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 18px;
+  padding: 12px 14px;
+  border: 1px solid rgba(102, 92, 246, .14);
+  border-radius: var(--si-radius-sm);
+  background: rgba(255, 255, 255, .42);
+}
+
+.alert {
+  width: min(1120px, calc(100% - 32px));
+  margin: 18px auto 0;
+  padding: 12px 14px;
+  border: 1px solid rgba(209, 75, 90, .22);
+  border-radius: var(--si-radius-sm);
+  color: var(--si-danger);
+  background: var(--si-danger-soft);
+  box-shadow: var(--si-shadow-sm);
+}
+
+@media (max-width: 720px) {
+  .hero {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  #refresh {
+    align-self: flex-start;
+  }
+
+  .cards {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .feature-list {
+    grid-template-columns: 1fr;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  #refresh {
+    transform: none;
+  }
+}

@@ -5,8 +5,9 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>凝心溯溪-言 · 对话流状态</title>
     <link rel="stylesheet" href="./style.css" />
+    <link rel="stylesheet" href="./series-ui.css" />
   </head>
-  <body>
+  <body data-series-ui="1">
     <p id="bridge-error" class="alert error" role="alert" hidden>
       页面通信组件没有加载，请从 AstrBot 插件详情重新打开本页。
     </p>
@@ -27,6 +28,7 @@
       <p class="note">配置修改请在 AstrBot 插件配置中进行；核安装后可在核 WebUI 统一查看本面板。</p>
     </main>
     <script src="/api/plugin/page/bridge-sdk.js"></script>
+    <script src="./series-ui.js"></script>
     <script type="module" src="./app.js"></script>
   </body>
 </html>
