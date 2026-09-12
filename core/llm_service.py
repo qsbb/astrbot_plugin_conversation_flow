@@ -105,8 +105,10 @@ class LLMService:
                     continue
         return ""
 
-    async def _resolve_provider_id(self, umo: str = "") -> str:
-        """4 层 fallback：Dashboard 设置 > schema 字段 > 事件 scope 默认 > 同步兜底。"""
+    async def _resolve_provider_id(
+        self, umo: str = "", kind: str = "conversation"
+    ) -> str:
+        """4 层 fallback：Dashboard 设置 > schema 字段 > 核路由 > 事件 scope 默认。"""
         # 1. Dashboard 设置
         pid = self._settings.get("llm_provider_id") or ""
         if pid and self._provider_exists(pid):
@@ -117,7 +119,7 @@ class LLMService:
         ):
             return self._cfg_llm_provider_id
         # 3. 核统一模型路由（核不可用时透明回退）
-        core_provider = await resolve_routed_provider_id(self.context, "conversation")
+        core_provider = await resolve_routed_provider_id(self.context, kind)
         if core_provider:
             return core_provider
         # 4. 事件 scope 默认
@@ -160,10 +162,11 @@ class LLMService:
         system_prompt: str | None = None,
         umo: str = "",
         provider_id: str = "",
+        kind: str = "conversation",
     ) -> str:
         """调用 LLM 返回纯文本。失败返回空字符串。"""
         try:
-            target_pid = provider_id or await self._resolve_provider_id(umo)
+            target_pid = provider_id or await self._resolve_provider_id(umo, kind)
             provider = None
             if target_pid:
                 provider = self._get_provider(target_pid)
@@ -194,9 +197,10 @@ class LLMService:
         system_prompt: str | None = None,
         umo: str = "",
         provider_id: str = "",
+        kind: str = "conversation",
     ) -> dict[str, Any]:
         """调用 LLM 并解析为 JSON。失败返回空 dict。"""
-        text = await self.chat(prompt, system_prompt, umo, provider_id)
+        text = await self.chat(prompt, system_prompt, umo, provider_id, kind)
         if not text:
             return {}
         # 去除可能的 markdown 代码块包裹

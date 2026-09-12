@@ -221,6 +221,7 @@ class SilenceJudge:
             system_prompt=SILENCE_PREJUDGE_SYSTEM,
             umo=umo,
             provider_id=provider_id,
+            kind="fast",
         )
         if not result:
             return False

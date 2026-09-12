@@ -1,6 +1,6 @@
 ## [Unreleased]
 
-- 开发中（未发版）：`series.module@1.0` 模块清单；新增最小 standalone `pages/manager` 状态页与 `series.webui` 只读状态面板。
+- 开发中（未发版）：`series.module@1.0` 模块清单；新增最小 standalone `pages/manager` 状态页与 `series.webui` 只读状态面板；辅助 LLM（分段裁判、静默预判、合并重写）接入核统一 `fast` 模型角色。
 
 ## 0.9.1 - 2026-09-12
 

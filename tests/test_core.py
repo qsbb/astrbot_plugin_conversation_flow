@@ -1612,7 +1612,7 @@ class ImageIntentTests(unittest.TestCase):
 class _StubLLM:
     """占位 LLM，拦截模块不再使用但构造函数需要。"""
 
-    async def chat_json(self, prompt, system_prompt=None, umo="", provider_id=""):
+    async def chat_json(self, prompt, system_prompt=None, umo="", provider_id="", **kwargs):
         return {}
 
 

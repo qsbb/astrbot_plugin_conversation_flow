@@ -2484,9 +2484,10 @@ class ConversationalFlowPlugin(Star):
                         old_text=display_old_text,
                         new_text=display_new_text,
                     ),
-                    system_prompt=INTERRUPT_MERGE_REWRITE_SYSTEM,
+                        system_prompt=INTERRUPT_MERGE_REWRITE_SYSTEM,
                     umo=umo,
                     provider_id=self.config.llm_provider_id,
+                    kind="fast",
                 )
                 rewritten = (rewritten or "").strip()
                 if rewritten:

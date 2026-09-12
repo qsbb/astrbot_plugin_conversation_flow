@@ -135,6 +135,7 @@ class Chunker:
                     system_prompt=system_prompt,
                     umo=umo,
                     provider_id=self.cfg.llm_provider_id,
+                    kind="fast",
                 ),
                 timeout=LLM_ASSIST_TIMEOUT_SECONDS,
             )
