@@ -3325,7 +3325,7 @@ class ConversationWebUIPanelTests(unittest.TestCase):
         plugin._stats = {"total_requests": 3, "silenced": 1}
 
         contract = plugin.webui_panels_contract()
-        self.assertEqual(contract["name"], "series.webui@1.0")
+        self.assertEqual(contract["name"], "series.webui@2.0")
         self.assertEqual(contract["standalone"]["entry"], "/pages/manager")
         data = plugin.webui_panel_data("status")
         self.assertTrue(data["success"])

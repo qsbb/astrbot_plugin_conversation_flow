@@ -470,10 +470,11 @@ class ConversationalFlowPlugin(Star):
         )
 
     def webui_panels_contract(self) -> dict[str, object]:
-        """series.webui@1.0：核统一接管时提供只读对话流状态。"""
+        """series.webui@2.0：核统一接管时提供只读对话流状态。"""
         return {
-            "name": "series.webui@1.0",
-            "version": "1.0",
+            "name": "series.webui@2.0",
+            "version": "2.0",
+            "capabilities": ["generic_table"],
             "plugin_id": PLUGIN_NAME,
             "series_id": "ningxin_suxi",
             "standalone": {"available": True, "entry": "/pages/manager", "pages": ["manager"]},
