@@ -34,6 +34,85 @@ _FIELDS: dict[str, dict[str, Any]] = {
     },
 }
 
+# 统一接管扩展到言的全部低风险运行开关；字符串/秘密/高风险策略仍由
+# standalone 配置维护。数值边界与 _conf_schema.json 保持一致。
+_FIELDS.update(
+    {
+        "plain_text_mode": {"type": "bool", "default": True},
+        "image_intent_mode": {"type": "bool", "default": True},
+        "private_context_bridge_enabled": {"type": "bool", "default": True},
+        "private_context_bridge_max_turns": {
+            "type": "int", "default": 3, "minimum": 1, "maximum": 10
+        },
+        "private_context_bridge_short_max_chars": {
+            "type": "int", "default": 40, "minimum": 4, "maximum": 200
+        },
+        "dynamic_context_enabled": {"type": "bool", "default": True},
+        "dynamic_context_max_turns": {
+            "type": "int", "default": 8, "minimum": 2, "maximum": 12
+        },
+        "dynamic_context_max_chars": {
+            "type": "int", "default": 1800, "minimum": 600, "maximum": 4000
+        },
+        "recent_activity_context_enabled": {"type": "bool", "default": False},
+        "recent_activity_retention_minutes": {
+            "type": "int", "default": 120, "minimum": 30, "maximum": 360
+        },
+        "group_context_enabled": {"type": "bool", "default": True},
+        "group_context_max_messages": {
+            "type": "int", "default": 10, "minimum": 1, "maximum": 50
+        },
+        "group_context_only_when_woken": {"type": "bool", "default": True},
+        "group_air_guard_enabled": {"type": "bool", "default": True},
+        "group_air_guard_window_seconds": {
+            "type": "int", "default": 120, "minimum": 10, "maximum": 600
+        },
+        "group_air_guard_max_bot_replies": {
+            "type": "int", "default": 6, "minimum": 1, "maximum": 30
+        },
+        "group_air_guard_polite_loop_limit": {
+            "type": "int", "default": 2, "minimum": 1, "maximum": 10
+        },
+        "followup_guard_enabled": {"type": "bool", "default": True},
+        "followup_streak_limit": {
+            "type": "int", "default": 2, "minimum": 1, "maximum": 10
+        },
+        "followup_window_seconds": {
+            "type": "int", "default": 900, "minimum": 60, "maximum": 7200
+        },
+        "scene_awareness_enabled": {"type": "bool", "default": True},
+        "mood_enabled": {"type": "bool", "default": True},
+        "mood_private_enabled": {"type": "bool", "default": False},
+        "mood_window_seconds": {
+            "type": "int", "default": 300, "minimum": 30, "maximum": 1800
+        },
+        "mood_frequent_after": {
+            "type": "int", "default": 6, "minimum": 1, "maximum": 50
+        },
+        "mood_streak_after": {
+            "type": "int", "default": 8, "minimum": 1, "maximum": 50
+        },
+        "mood_streak_gap_seconds": {
+            "type": "int", "default": 90, "minimum": 10, "maximum": 1800
+        },
+        "mood_lazy_score": {
+            "type": "int", "default": 72, "minimum": 0, "maximum": 100
+        },
+        "mood_annoyed_score": {
+            "type": "int", "default": 45, "minimum": 0, "maximum": 100
+        },
+        "mood_silence_score": {
+            "type": "int", "default": 25, "minimum": 0, "maximum": 100
+        },
+        "mood_silence_chance_percent": {
+            "type": "int", "default": 45, "minimum": 0, "maximum": 100
+        },
+        "mood_max_consecutive_silences": {
+            "type": "int", "default": 2, "minimum": 1, "maximum": 10
+        },
+    }
+)
+
 
 class SeriesControlAdapter:
     def __init__(self, plugin: Any) -> None:

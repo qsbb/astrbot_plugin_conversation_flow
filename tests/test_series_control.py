@@ -22,3 +22,20 @@ def test_conflict_and_reset(tmp_path):
     adapter.apply_series_control_patch({"interrupt_enabled": False}, expected_revision=0)
     assert adapter.validate_series_control_patch({"interrupt_enabled": True}, expected_revision=0)["reason"] == "REVISION_CONFLICT"
     assert adapter.reset_series_control_override(expected_revision=1)["status"] == "ok"
+
+
+def test_extended_runtime_fields_are_exposed_and_validated(tmp_path):
+    adapter = SeriesControlAdapter(_Plugin(tmp_path))
+    fields = adapter.series_control_schema()["fields"]
+    assert fields["context_budget_enforce"]["default"] is False
+    assert fields["context_budget_soft_limit"]["minimum"] == 2000
+    assert fields["mood_enabled"]["type"] == "bool"
+    result = adapter.validate_series_control_patch(
+        {"mood_enabled": False, "dynamic_context_max_turns": 10},
+        expected_revision=0,
+    )
+    assert result["status"] == "ok"
+    invalid = adapter.validate_series_control_patch(
+        {"dynamic_context_max_turns": 99}, expected_revision=0
+    )
+    assert invalid["reason"] == "INVALID_VALUE"
