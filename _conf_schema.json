@@ -544,6 +544,26 @@
     "default": 10,
     "minimum": 1
   },
+  "context_budget_enforce": {
+    "type": "bool",
+    "description": "[上下文预算] 启用严格裁剪（实验性）",
+    "hint": "默认关闭（shadow）：只统计各来源注入片段的字符数并写入诊断，不改变发给模型的 Prompt。开启后，注入总量超过软上限时按“语音风格→语义知识→环境→情节记忆”整条裁掉低优先级片段；仍超硬上限时才截断“关系情绪/人格”；身份授权与当前轮永不裁剪。",
+    "default": false
+  },
+  "context_budget_soft_limit": {
+    "type": "int",
+    "description": "[上下文预算] 软上限（字符）",
+    "hint": "所有来源提示词片段合计超过该字符数时，严格模式下优先整条裁掉低优先级片段。默认 12000；shadow 模式下只影响诊断数值。",
+    "default": 12000,
+    "minimum": 1000
+  },
+  "context_budget_hard_limit": {
+    "type": "int",
+    "description": "[上下文预算] 硬上限（字符）",
+    "hint": "软上限裁剪后仍超出该字符数时，才截断关系情绪与人格片段（按 Unicode 字符截断，不会切坏中文或 emoji）；身份授权与当前轮仍然保留。默认 14000，且不会低于软上限。",
+    "default": 14000,
+    "minimum": 1000
+  },
   "intercept_enabled": {
     "type": "bool",
     "description": "[智能拦截] 启用智能拦截（实验性）",

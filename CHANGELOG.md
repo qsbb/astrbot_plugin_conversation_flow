@@ -1,5 +1,6 @@
 ## [Unreleased]
 
+- 开发中（未发版）：新增统一上下文预算 `core/context_budget.py`——按 P0 身份授权 / P1 当前轮 / P2 人格 / P3 关系情绪 / P4 情节记忆 / P5 环境 / P6 语义知识 / P7 语音风格分层统计注入片段；默认 shadow 只写诊断（`prompt.context_budget.shadow`）不改写 Prompt，显式开启严格模式后超软上限按 P7→P6→P5→P4 整条裁剪、仍超硬上限才按 Unicode 码点截断 P3/P2，P0/P1 永不裁剪。新增 `context_budget_enforce` / `context_budget_soft_limit`（默认 12000）/ `context_budget_hard_limit`（默认 14000）配置与 `/convflow status`、状态面板观测项。
 - 开发中（未发版）：`series.module@1.0` 模块清单；新增最小 standalone `pages/manager` 状态页与 `series.webui` 只读状态面板；辅助 LLM（分段裁判、静默预判、合并重写）接入核统一 `fast` 模型角色。
 
 ## 0.9.1 - 2026-09-12

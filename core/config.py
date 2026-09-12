@@ -98,6 +98,11 @@ DEFAULTS: dict[str, Any] = {
     "reply_quote_probability": 30,
     "topic_context_enabled": False,
     "topic_context_max_messages": 10,
+    # 统一上下文预算：默认 shadow（只统计与诊断、不改写 Prompt），
+    # 只在显式开启严格模式后才按层级裁剪，保证既有对话行为不变。
+    "context_budget_enforce": False,
+    "context_budget_soft_limit": 12000,
+    "context_budget_hard_limit": 14000,
     "intercept_enabled": False,
     "intercept_whitelist": [],
     "llm_provider_id": "",
@@ -600,6 +605,24 @@ def normalize_config(raw: dict[str, Any] | None) -> dict[str, Any]:
         ),
     )
 
+    out["context_budget_enforce"] = _coerce_bool(
+        raw.get("context_budget_enforce"), DEFAULTS["context_budget_enforce"]
+    )
+    out["context_budget_soft_limit"] = max(
+        1000,
+        _coerce_int(
+            raw.get("context_budget_soft_limit"),
+            DEFAULTS["context_budget_soft_limit"],
+        ),
+    )
+    # 硬上限不得低于软上限，避免出现“先裁到软上限再被判超硬上限”的矛盾配置。
+    out["context_budget_hard_limit"] = max(
+        out["context_budget_soft_limit"],
+        _coerce_int(
+            raw.get("context_budget_hard_limit"),
+            DEFAULTS["context_budget_hard_limit"],
+        ),
+    )
     out["intercept_enabled"] = _coerce_bool(
         raw.get("intercept_enabled"), DEFAULTS["intercept_enabled"]
     )
@@ -709,10 +732,17 @@ class PluginConfig:
     reply_quote_probability: int = 30
     topic_context_enabled: bool = False
     topic_context_max_messages: int = 10
+    context_budget_enforce: bool = False
+    context_budget_soft_limit: int = 12000
+    context_budget_hard_limit: int = 14000
     intercept_enabled: bool = False
     intercept_whitelist: list[str] = field(default_factory=list)
     llm_provider_id: str = ""
     log_level: str = "INFO"
+
+    def context_budget_mode_label(self) -> str:
+        """给状态面板用的一行模式名：enforce 或 shadow。"""
+        return "enforce" if self.context_budget_enforce else "shadow"
 
     @classmethod
     def from_dict(cls, raw: dict[str, Any] | None) -> "PluginConfig":

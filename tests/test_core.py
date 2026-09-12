@@ -5221,6 +5221,205 @@ class PromptCompositionTests(unittest.TestCase):
         self.assertEqual(len(req.extra_user_content_parts), 1)
 
 
+class ContextBudgetCompositionTests(unittest.TestCase):
+    """统一上下文预算接入 _compose_series_prompt_fragments 的回归测试。"""
+
+    @staticmethod
+    def _plugin(**overrides):
+        from astrbot_plugin_conversation_flow.main import ConversationalFlowPlugin
+
+        plugin = ConversationalFlowPlugin.__new__(ConversationalFlowPlugin)
+        plugin.logger = _Logger()
+        config = {
+            "context_budget_enforce": False,
+            "context_budget_soft_limit": 12000,
+            "context_budget_hard_limit": 14000,
+        }
+        config.update(overrides)
+        plugin.config = types.SimpleNamespace(**config)
+        plugin._stats = {}
+        return plugin
+
+    @staticmethod
+    def _composed_text(req):
+        part = req.extra_user_content_parts[-1]
+        return part.get("text") if isinstance(part, dict) else part.text
+
+    @staticmethod
+    def _budget_events():
+        from astrbot_plugin_conversation_flow import series_diagnostics
+
+        return [
+            event
+            for event in series_diagnostics.diagnostic_events(limit=50)["events"]
+            if event["code"].startswith("prompt.context_budget")
+        ]
+
+    def _context_with_fragments(self, identity, relationship, knowledge=""):
+        context = request_context.new_context()
+        request_context.add_prompt_fragment(
+            context,
+            request_context.OWNER_IDENTITY_GUARDIAN,
+            "identity.boundary",
+            identity,
+            priority=100,
+        )
+        request_context.add_prompt_fragment(
+            context,
+            request_context.OWNER_RELATIONSHIP,
+            "relationship.expression",
+            relationship,
+            priority=300,
+        )
+        if knowledge:
+            request_context.add_prompt_fragment(
+                context,
+                request_context.OWNER_ACTIVE_LEARNER,
+                "knowledge.context",
+                knowledge,
+                priority=200,
+            )
+        return context
+
+    def test_shadow_mode_keeps_request_and_emits_diagnostic(self) -> None:
+        from astrbot_plugin_conversation_flow import series_diagnostics
+
+        series_diagnostics.diagnostic_clear()
+        plugin = self._plugin(context_budget_soft_limit=200, context_budget_hard_limit=300)
+        identity = "身份授权正文"
+        relationship = "关系表达" * 200
+        context = self._context_with_fragments(identity, relationship)
+        req = types.SimpleNamespace(extra_user_content_parts=[], system_prompt="base")
+
+        self.assertTrue(plugin._compose_series_prompt_fragments(context, req))
+
+        composed = self._composed_text(req)
+        self.assertIn(identity, composed)
+        self.assertIn(relationship, composed)
+
+        events = self._budget_events()
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0]["code"], "prompt.context_budget.shadow")
+        payload = json.dumps(events[0], ensure_ascii=False)
+        self.assertNotIn(identity, payload)
+        self.assertNotIn(relationship, payload)
+        self.assertEqual(plugin._stats.get("context_budget_shadow"), 1)
+        self.assertEqual(plugin._stats.get("context_budget_trimmed"), None)
+
+        artifact = request_context.get_artifact(
+            context, request_context.OWNER_CONVERSATION_FLOW, "prompt_composition"
+        )
+        self.assertFalse(artifact["context_budget"]["applied"])
+        self.assertTrue(artifact["context_budget"]["over_soft_before"])
+        self.assertNotIn("text", artifact["context_budget"])
+
+    def test_enforce_mode_trims_low_priority_and_keeps_protected(self) -> None:
+        from astrbot_plugin_conversation_flow import series_diagnostics
+
+        series_diagnostics.diagnostic_clear()
+        plugin = self._plugin(
+            context_budget_enforce=True,
+            context_budget_soft_limit=200,
+            context_budget_hard_limit=300,
+        )
+        identity = "身份授权正文"
+        knowledge = "知识片段" * 200
+        context = self._context_with_fragments(identity, "关系表达", knowledge)
+        req = types.SimpleNamespace(extra_user_content_parts=[], system_prompt="base")
+
+        self.assertTrue(plugin._compose_series_prompt_fragments(context, req))
+
+        composed = self._composed_text(req)
+        self.assertIn(identity, composed)
+        self.assertNotIn(knowledge, composed)
+
+        events = self._budget_events()
+        self.assertEqual(events[-1]["code"], "prompt.context_budget.enforced")
+        self.assertTrue(events[-1]["details"]["applied"])
+        self.assertEqual(plugin._stats.get("context_budget_trimmed"), 1)
+
+        artifact = request_context.get_artifact(
+            context, request_context.OWNER_CONVERSATION_FLOW, "prompt_composition"
+        )
+        self.assertTrue(artifact["context_budget"]["applied"])
+        self.assertEqual(
+            [item["layer"] for item in artifact["context_budget"]["dropped"]], ["P6"]
+        )
+        # artifact 的 chars 只统计片段正文（不含协同上下文标记行）。
+        self.assertEqual(artifact["chars"], len(composed.split("\n", 1)[1]))
+
+    def test_method_parameter_overrides_configured_enforce(self) -> None:
+        from astrbot_plugin_conversation_flow import series_diagnostics
+
+        series_diagnostics.diagnostic_clear()
+        plugin = self._plugin(
+            context_budget_enforce=True,
+            context_budget_soft_limit=200,
+            context_budget_hard_limit=300,
+        )
+        identity = "身份授权正文"
+        relationship = "关系表达" * 200
+        context = self._context_with_fragments(identity, relationship)
+        req = types.SimpleNamespace(extra_user_content_parts=[], system_prompt="base")
+
+        self.assertTrue(
+            plugin._compose_series_prompt_fragments(context, req, enforce=False)
+        )
+        self.assertIn(relationship, self._composed_text(req))
+        self.assertEqual(self._budget_events()[-1]["code"], "prompt.context_budget.shadow")
+
+    def test_enforce_skips_composition_when_everything_is_trimmed(self) -> None:
+        from astrbot_plugin_conversation_flow import series_diagnostics
+
+        series_diagnostics.diagnostic_clear()
+        plugin = self._plugin(
+            context_budget_enforce=True,
+            context_budget_soft_limit=100,
+            context_budget_hard_limit=120,
+        )
+        context = request_context.new_context()
+        request_context.add_prompt_fragment(
+            context,
+            request_context.OWNER_RELATIONSHIP,
+            "relationship.cross_platform_memory",
+            "情节记忆" * 100,
+            priority=260,
+        )
+        req = types.SimpleNamespace(extra_user_content_parts=[], system_prompt="base")
+
+        self.assertFalse(plugin._compose_series_prompt_fragments(context, req))
+        self.assertEqual(req.extra_user_content_parts, [])
+        self.assertEqual(req.system_prompt, "base")
+        self.assertIn(
+            "PROMPT_BUDGET_EMPTY",
+            request_context.get_reasons(
+                context, request_context.OWNER_CONVERSATION_FLOW
+            ),
+        )
+        self.assertEqual(
+            self._budget_events()[-1]["code"], "prompt.context_budget.enforced"
+        )
+
+    def test_budget_failure_never_blocks_composition(self) -> None:
+        plugin = self._plugin()
+        identity = "身份授权正文"
+        context = self._context_with_fragments(identity, "关系表达")
+        req = types.SimpleNamespace(extra_user_content_parts=[], system_prompt="base")
+
+        def _boom(*args, **kwargs):
+            raise RuntimeError("budget exploded")
+
+        from astrbot_plugin_conversation_flow import main as plugin_main
+
+        original = plugin_main.analyze_context_budget
+        plugin_main.analyze_context_budget = _boom
+        try:
+            self.assertTrue(plugin._compose_series_prompt_fragments(context, req))
+        finally:
+            plugin_main.analyze_context_budget = original
+        self.assertIn(identity, self._composed_text(req))
+
+
 class PrivateContextBridgeFinalizerTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:

@@ -30,6 +30,15 @@ from .core.air_guard import AirGuard
 from .core.chunker import Chunker
 from .core.component_delivery import build_component_delivery_plan
 from .core.config import PluginConfig, build_plugin_config, normalize_config
+from .core.context_budget import (
+    DEFAULT_HARD_LIMIT,
+    DEFAULT_SOFT_LIMIT,
+    analyze_context_budget,
+    budget_diagnostic_code,
+    budget_diagnostic_details,
+    budget_public_view,
+    budget_summary,
+)
 from .core.delay import calculate_segment_delay_ms
 from .core.group_context import GroupContextManager
 from .core.followup_guard import FollowupGuard, is_followup_offer
@@ -100,6 +109,7 @@ from .core.request_context import (
     add_reason,
     ensure_context,
     get_artifact,
+    get_prompt_fragments,
     render_prompt_fragments,
     set_artifact,
     set_flag,
@@ -350,6 +360,8 @@ class ConversationalFlowPlugin(Star):
             "private_context_bridged": 0,
             "dynamic_context_injected": 0,
             "time_annotated_injections": 0,
+            "context_budget_shadow": 0,
+            "context_budget_trimmed": 0,
             "recent_activity_recorded": 0,
             "recent_activity_selected": 0,
             "total_requests": 0,
@@ -487,6 +499,15 @@ class ConversationalFlowPlugin(Star):
             {"item": "插话中断", "value": "开启" if features.get("interrupt") else "关闭"},
             {"item": "steering", "value": "开启" if features.get("steering") else "关闭"},
             {"item": "群聊上下文", "value": "开启" if features.get("group_context") else "关闭"},
+            {
+                "item": "上下文预算",
+                "value": (
+                    f"{self.config.context_budget_mode_label()} "
+                    f"(软 {self.config.context_budget_soft_limit} / "
+                    f"硬 {self.config.context_budget_hard_limit})"
+                ),
+            },
+            {"item": "预算裁剪", "value": stats.get("context_budget_trimmed", 0)},
             {"item": "总请求", "value": stats.get("total_requests", 0)},
             {"item": "沉默", "value": stats.get("silenced", 0)},
             {"item": "分段", "value": stats.get("chunked", 0)},
@@ -2200,6 +2221,10 @@ class ConversationalFlowPlugin(Star):
             f"- 私聊上下文承接: {self._stats['private_context_bridged']}\n"
             f"- 动态话题续接: {self._stats['dynamic_context_injected']}\n"
             f"- 时间标注注入: {self._stats['time_annotated_injections']}\n"
+            f"- 上下文预算: {self.config.context_budget_mode_label()} "
+            f"(软 {self.config.context_budget_soft_limit} / 硬 {self.config.context_budget_hard_limit} 字符, "
+            f"shadow {self._stats.get('context_budget_shadow', 0)} 次, "
+            f"裁剪 {self._stats.get('context_budget_trimmed', 0)} 次)\n"
             f"- 跨会话片段: 选中 {self._stats['recent_activity_selected']} 次, "
             f"记录 {self._stats['recent_activity_recorded']} 条\n"
             f"- 拦截命中: {self._stats['intercepted']}\n"
@@ -2300,6 +2325,8 @@ class ConversationalFlowPlugin(Star):
             "private_context_bridged": 0,
             "dynamic_context_injected": 0,
             "time_annotated_injections": 0,
+            "context_budget_shadow": 0,
+            "context_budget_trimmed": 0,
             "recent_activity_recorded": 0,
             "recent_activity_selected": 0,
             "total_requests": 0,
@@ -2683,14 +2710,93 @@ class ConversationalFlowPlugin(Star):
             )
             return False
 
+    def _context_budget_settings(
+        self, enforce: bool | None = None
+    ) -> tuple[int, int, bool]:
+        """读取统一上下文预算配置：软上限、硬上限、是否严格裁剪。
+
+        默认 shadow（enforce=False），保证既有对话行为不变；显式传入 enforce
+        时优先级高于配置。配置缺失或类型异常时回落到内置默认值。
+        """
+        config = getattr(self, "config", None)
+        soft = getattr(config, "context_budget_soft_limit", None)
+        if not isinstance(soft, int) or isinstance(soft, bool):
+            soft = DEFAULT_SOFT_LIMIT
+        hard = getattr(config, "context_budget_hard_limit", None)
+        if not isinstance(hard, int) or isinstance(hard, bool):
+            hard = DEFAULT_HARD_LIMIT
+        if enforce is None:
+            configured = getattr(config, "context_budget_enforce", None)
+            enforce = configured if isinstance(configured, bool) else False
+        return soft, hard, bool(enforce)
+
+    def _record_context_budget(self, report: dict[str, Any]) -> None:
+        """记录一次预算观测：诊断事件只含计数/字符数/owner/原因，不含正文。"""
+        try:
+            diagnostic_event(
+                budget_diagnostic_code(report),
+                budget_summary(report),
+                level="WARNING" if report.get("protected_overflow") else "INFO",
+                details=budget_diagnostic_details(report),
+            )
+        except Exception:
+            pass
+        try:
+            stats = getattr(self, "_stats", None)
+            if isinstance(stats, dict):
+                if report.get("applied"):
+                    stats["context_budget_trimmed"] = (
+                        stats.get("context_budget_trimmed", 0) + 1
+                    )
+                elif report.get("mode") == "shadow":
+                    stats["context_budget_shadow"] = (
+                        stats.get("context_budget_shadow", 0) + 1
+                    )
+        except Exception:
+            pass
+
     def _compose_series_prompt_fragments(
-        self, request_context: dict[str, Any], req: Any
+        self,
+        request_context: dict[str, Any],
+        req: Any,
+        *,
+        enforce: bool | None = None,
     ) -> bool:
         rendered = render_prompt_fragments(request_context, SERIES_PROMPT_OWNERS)
         text = str(rendered.get("text") or "").strip()
         fragments = rendered.get("fragments")
         if not text or not isinstance(fragments, list):
             return False
+
+        # 统一上下文预算：默认 shadow 只诊断不改写；显式严格模式才真正裁剪。
+        # 预算失败绝不阻断注入主路径，出错时按原有行为继续。
+        soft_limit, hard_limit, strict = self._context_budget_settings(enforce)
+        budget: dict[str, Any] = {}
+        try:
+            budget = analyze_context_budget(
+                get_prompt_fragments(request_context, SERIES_PROMPT_OWNERS),
+                soft_limit=soft_limit,
+                hard_limit=hard_limit,
+                enforce=strict,
+            )
+            self._record_context_budget(budget)
+        except Exception as exc:
+            budget = {}
+            logger.debug(
+                "[conv-flow] context budget failed: %s", type(exc).__name__
+            )
+        if strict and budget:
+            trimmed = str(budget.get("text") or "").strip()
+            if not trimmed:
+                # 全部分片都被预算裁掉：不动宿主请求，保持原始上下文原样。
+                add_reason(
+                    request_context,
+                    OWNER_CONVERSATION_FLOW,
+                    "PROMPT_BUDGET_EMPTY",
+                )
+                return False
+            text = trimmed
+            fragments = budget.get("fragments") or fragments
 
         contents: set[str] = set()
         artifacts = request_context.get("artifacts")
@@ -2774,9 +2880,10 @@ class ConversationalFlowPlugin(Star):
             "prompt_composition",
             {
                 "fragment_count": len(fragments),
-                "chars": int(rendered.get("chars") or 0),
+                "chars": len(text),
                 "removed_direct_injections": removed,
                 "fragments": fragments,
+                "context_budget": budget_public_view(budget) if budget else {},
             },
         )
         add_reason(
