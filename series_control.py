@@ -15,10 +15,29 @@ SERIES_ID = "ningxin_suxi"
 
 _FIELDS: dict[str, dict[str, Any]] = {
     "chunking_enabled": {"type": "bool", "default": True},
+    "chunking_delay_mode": {
+        "type": "str", "default": "per_char", "options": ("fixed", "per_char")
+    },
     "chunking_min_length": {"type": "int", "default": 60, "minimum": 1, "maximum": 10000},
     "chunking_max_segments": {"type": "int", "default": 5, "minimum": 1, "maximum": 20},
     "silence_enabled": {"type": "bool", "default": True},
+    "silence_strategy": {
+        "type": "str", "default": "inject", "options": ("inject", "prejudge", "both")
+    },
     "interrupt_enabled": {"type": "bool", "default": True},
+    "interrupt_mode": {
+        "type": "str", "default": "steering", "options": ("steering", "window")
+    },
+    "interrupt_scope": {
+        "type": "str",
+        "default": "sender",
+        "options": ("room", "sender", "mention_or_sender"),
+    },
+    "interrupt_merge_strategy": {
+        "type": "str",
+        "default": "append",
+        "options": ("append", "rewrite", "discard_old"),
+    },
     "context_budget_enforce": {"type": "bool", "default": False},
     "context_budget_soft_limit": {
         "type": "int",
@@ -160,6 +179,8 @@ class SeriesControlAdapter:
             item = {"type": spec["type"], "default": spec["default"], "control": "overrideable", "secret": False, "restart_required": False}
             if "minimum" in spec:
                 item["minimum"], item["maximum"] = spec["minimum"], spec["maximum"]
+            if "options" in spec:
+                item["options"] = list(spec["options"])
             fields[name] = item
         return {"contract_name": CONTRACT_NAME, "contract_version": "1.0", "plugin_id": PLUGIN_ID,
                 "revision": self._revision, "fields": fields}
@@ -190,6 +211,10 @@ class SeriesControlAdapter:
             if spec["type"] == "bool":
                 if not isinstance(value, bool):
                     return {"status": "error", "reason": "INVALID_TYPE", "field": name}
+                clean[name] = value
+            elif spec["type"] == "str":
+                if not isinstance(value, str) or value not in spec.get("options", ()):
+                    return {"status": "error", "reason": "INVALID_VALUE", "field": name}
                 clean[name] = value
             elif isinstance(value, int) and not isinstance(value, bool) and spec["minimum"] <= value <= spec["maximum"]:
                 clean[name] = value

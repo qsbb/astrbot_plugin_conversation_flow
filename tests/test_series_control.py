@@ -30,6 +30,10 @@ def test_extended_runtime_fields_are_exposed_and_validated(tmp_path):
     assert fields["context_budget_enforce"]["default"] is False
     assert fields["context_budget_soft_limit"]["minimum"] == 2000
     assert fields["mood_enabled"]["type"] == "bool"
+    assert fields["interrupt_mode"]["options"] == ["steering", "window"]
+    assert adapter.validate_series_control_patch(
+        {"interrupt_mode": "invalid"}, expected_revision=0
+    )["reason"] == "INVALID_VALUE"
     result = adapter.validate_series_control_patch(
         {"mood_enabled": False, "dynamic_context_max_turns": 10},
         expected_revision=0,
