@@ -3062,6 +3062,55 @@ class NativeFollowupDebounceTests(unittest.TestCase):
 
         self.assertEqual(calls, [])
 
+    def test_new_task_does_not_stop_old_run(self) -> None:
+        plugin = self._plugin()
+        first = self._private_event("晚上好呀。")
+        second = self._private_event("帮我查下明天天气")
+        plugin.tracker.begin_request(first)
+        # 把旧请求时间整体拨回 5 秒，模拟超过新任务间隔的新话题。
+        state = plugin.tracker.get_state(first.unified_msg_origin)
+        for pending in state.pending.values():
+            pending.started_at -= 5
+            pending.user_text_times = [ts - 5 for ts in pending.user_text_times]
+        calls = []
+        plugin._request_native_followup_stop = lambda event: calls.append(event) or True
+
+        asyncio.run(plugin.preempt_native_follow_up(second))
+
+        self.assertEqual(calls, [])
+        self.assertFalse(second.get_extra(plugin.NATIVE_FOLLOWUP_BYPASSED_KEY))
+
+    def test_correction_after_gap_still_stops_old_run(self) -> None:
+        plugin = self._plugin()
+        first = self._private_event("我想吃火锅")
+        second = self._private_event("不是，我是说想吃烤肉")
+        plugin.tracker.begin_request(first)
+        state = plugin.tracker.get_state(first.unified_msg_origin)
+        for pending in state.pending.values():
+            pending.started_at -= 5
+            pending.user_text_times = [ts - 5 for ts in pending.user_text_times]
+        calls = []
+        plugin._request_native_followup_stop = lambda event: calls.append(event) or True
+
+        asyncio.run(plugin.preempt_native_follow_up(second))
+
+        self.assertEqual(calls, [second])
+        self.assertTrue(second.get_extra(plugin.NATIVE_FOLLOWUP_BYPASSED_KEY))
+
+    def test_tool_loop_same_task_left_to_native_capture(self) -> None:
+        plugin = self._plugin()
+        first = self._private_event("我点个美式吧")
+        second = self._private_event("看看有没有效果")
+        plugin.tracker.begin_request(first)
+        plugin._active_runner_uses_tools = lambda event: True
+        calls = []
+        plugin._request_native_followup_stop = lambda event: calls.append(event) or True
+
+        asyncio.run(plugin.preempt_native_follow_up(second))
+
+        self.assertEqual(calls, [])
+        self.assertFalse(second.get_extra(plugin.NATIVE_FOLLOWUP_BYPASSED_KEY))
+
     def test_decorator_uses_max_priority(self) -> None:
         import astrbot_plugin_conversation_flow.main  # noqa: F401
 
@@ -3119,6 +3168,49 @@ class InterruptMediaInjectionTests(unittest.TestCase):
         self.assertIn("把它们视作连续的语境一起回应", merge_text)
         self.assertIn("同一时刻的连续表达", merge_text)
         self.assertNotEqual(req.image_urls, ["image-placeholder"])
+
+
+class SteeringMergeStrategyTests(unittest.TestCase):
+    def test_steering_rewrite_is_downgraded_to_append_without_llm_call(self) -> None:
+        """steering 模式必须用 append 合并，不能再调用 rewrite LLM。"""
+        from astrbot_plugin_conversation_flow.main import ConversationalFlowPlugin
+
+        plugin = object.__new__(ConversationalFlowPlugin)
+        plugin.config = build_plugin_config(
+            {
+                "interrupt_mode": "steering",
+                "interrupt_merge_strategy": "rewrite",
+            }
+        )
+        plugin.logger = _Logger()
+        plugin.tracker = ConversationTracker()
+
+        calls: list[int] = []
+
+        class _RewriteLLM:
+            async def chat(self, *args, **kwargs):
+                calls.append(1)
+                return "rewritten"
+
+        plugin.llm = _RewriteLLM()
+
+        old = _Event("session", "我想吃火锅")
+        current = _Event("session", "不是，我是说想吃烤肉")
+        plugin.tracker.begin_request(old)
+        plugin.tracker.begin_request(current)
+        req = _ProviderRequest(extra_user_content_parts=[])
+
+        asyncio.run(plugin._apply_merge(current, req, "session"))
+
+        self.assertEqual(calls, [])
+        texts = []
+        for part in req.extra_user_content_parts:
+            value = part.get("text", "") if isinstance(part, dict) else getattr(part, "text", "")
+            texts.append(str(value))
+        self.assertTrue(
+            any("把它们视作连续的语境一起回应" in text for text in texts),
+            texts,
+        )
 
 
 class InterruptScopeTests(unittest.TestCase):

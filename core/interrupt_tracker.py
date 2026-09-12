@@ -6,6 +6,8 @@ import time
 from dataclasses import dataclass, field
 from typing import Any
 
+from .task_relation import task_relation, text_completeness
+
 
 @dataclass
 class PendingRequest:
@@ -16,6 +18,11 @@ class PendingRequest:
     started_at: float
     finished: bool = False
     response_started: bool = False
+    # 这条消息是否像"还没说完"（前导语/逗号结尾/很短裸句），
+    # 决定回复发出前是否留一个很短的提交缓冲。
+    burst_open: bool = False
+    # 新消息与上一条 pending 的关系：same_task / new_task / uncertain。
+    task_relation: str = "new_task"
     user_texts: list[str] = field(default_factory=list)
     # 与 user_texts 平行的逐条到达时间；继承旧文本时连同各自时间一起继承。
     user_text_times: list[float] = field(default_factory=list)
@@ -100,11 +107,33 @@ class ConversationTracker:
         self._max_history_turns = max(1, int(max_history_turns))
         self._interrupt_window_ms: int = 30000
         self._scope: str = "sender"
+        # 运行中插话（steering）配置：默认开启，群聊 sender 作用域仍走旧窗口逻辑。
+        self._steering_mode: bool = True
+        self._steering_new_turn_gap_ms: int = 3500
+        self._steering_uncertain_gap_ms: int = 1500
+        self._steering_open_hold_ms: int = 600
 
-    def update_interrupt_config(self, window_ms: int, scope: str) -> None:
-        """更新插话检测时间窗和群聊中断作用域（运行时配置变更后调用）。"""
+    def update_interrupt_config(
+        self,
+        window_ms: int,
+        scope: str,
+        *,
+        steering_mode: bool | None = None,
+        new_turn_gap_ms: int | None = None,
+        uncertain_gap_ms: int | None = None,
+        open_hold_ms: int | None = None,
+    ) -> None:
+        """更新插话检测时间窗和运行中插话（steering）参数。"""
         self._interrupt_window_ms = max(0, window_ms)
         self._scope = scope
+        if steering_mode is not None:
+            self._steering_mode = bool(steering_mode)
+        if new_turn_gap_ms is not None:
+            self._steering_new_turn_gap_ms = max(0, int(new_turn_gap_ms))
+        if uncertain_gap_ms is not None:
+            self._steering_uncertain_gap_ms = max(0, int(uncertain_gap_ms))
+        if open_hold_ms is not None:
+            self._steering_open_hold_ms = max(0, int(open_hold_ms))
 
     def update_history_limit(self, max_history_turns: int) -> None:
         """更新短期对话轮次上限，并立即收缩已有会话。"""
@@ -132,6 +161,155 @@ class ConversationTracker:
             and (window_s <= 0 or (now - pending.started_at) <= window_s)
             for pending in state.pending.values()
         )
+
+    def steering_applies(self, event: Any) -> bool:
+        """公开只读判断：steering 是否适用于该事件。"""
+        return self._steering_applies(event)
+
+    def _steering_applies(self, event: Any) -> bool:
+        """steering 是否适用于该事件：私聊/room 开启；群聊 sender 保持旧逻辑。"""
+        if not self._steering_mode:
+            return False
+        base = str(getattr(event, "unified_msg_origin", "") or "")
+        is_group = "GroupMessage" in base or "GROUP" in base.upper()
+        if not is_group:
+            return True
+        return self._scope == "room"
+
+    def _classify_task_relation(
+        self,
+        pending: PendingRequest,
+        new_text: str,
+        now: float,
+        event: Any,
+    ) -> str:
+        """判断新消息相对 pending 的任务归属。"""
+        old_texts = [
+            str(item).strip()
+            for item in pending.user_texts
+            if str(item).strip() and not self._is_placeholder_text(str(item))
+        ]
+        last_ts = (
+            pending.user_text_times[-1]
+            if pending.user_text_times
+            else pending.started_at
+        )
+        gap_ms = max(0.0, (now - last_ts) * 1000.0)
+        hard_gap_ms = (
+            float(self._interrupt_window_ms)
+            if self._interrupt_window_ms > 0
+            else 86_400_000.0
+        )
+        relation = task_relation(
+            old_texts,
+            new_text,
+            gap_ms,
+            has_old_media=pending.media.has_content(),
+            has_new_media=self._event_has_media(event),
+            new_turn_gap_ms=float(self._steering_new_turn_gap_ms),
+            uncertain_gap_ms=float(self._steering_uncertain_gap_ms),
+            hard_gap_ms=hard_gap_ms,
+        )
+        # Phase 1：不确定时倾向合并，保证"只回一条"的连贯性；
+        # 超过不确定窗口且没有强信号时，规则已返回 new_task。
+        if relation == "uncertain" and gap_ms <= self._steering_uncertain_gap_ms:
+            return "same_task"
+        return relation
+
+    def classify_event_relation(self, event: Any, is_wake: bool = False) -> str:
+        """在会话锁外预判新消息与活动任务的关系（不修改状态）。"""
+        if not self._steering_applies(event):
+            return "same_task"
+        state = self.get_state(self._compute_scoped_umo(event, is_wake=is_wake))
+        state.cleanup_finished()
+        now = time.time()
+        window_s = self._interrupt_window_ms / 1000.0
+        active = [
+            pending
+            for pending in state.pending.values()
+            if not pending.finished
+            and pending.seq not in state.discarded
+            and (window_s <= 0 or (now - pending.started_at) <= window_s)
+        ]
+        if not active:
+            return "new_task"
+        primary = max(active, key=lambda item: item.started_at)
+        return self._classify_task_relation(
+            primary, self._get_user_text(event) or "", now, event
+        )
+
+    def _select_merge_candidates(
+        self,
+        state: ConversationState,
+        active_pending: list[PendingRequest],
+        event: Any,
+        new_text: str,
+        now: float,
+    ) -> tuple[list[PendingRequest], str]:
+        """按 steering 规则选出要合并的 pending；new_task 不打断旧回复。"""
+        if not self._steering_applies(event):
+            for pending in active_pending:
+                state.discarded.add(pending.seq)
+                pending.interrupt_token["cancelled"] = True
+            return (
+                [
+                    pending
+                    for pending in active_pending
+                    if pending.user_texts or pending.media.has_content()
+                ],
+                "same_task",
+            )
+        primary = max(active_pending, key=lambda item: item.started_at)
+        relation = self._classify_task_relation(primary, new_text, now, event)
+        if relation == "new_task":
+            # 不标记 discarded，不生成 merge hint：旧回复正常发出，
+            # 新消息在会话锁释放后作为下一轮独立处理。
+            return [], relation
+        state.discarded.add(primary.seq)
+        primary.interrupt_token["cancelled"] = True
+        return (
+            [primary]
+            if (primary.user_texts or primary.media.has_content())
+            else [],
+            relation,
+        )
+
+    def get_commit_hold_ms(self, event: Any) -> int:
+        """返回回复发出前的提交缓冲毫秒数；只对"像没说完"的消息生效。"""
+        if not self._steering_applies(event):
+            return 0
+        seq = self._get_extra(event, self.SEQ_EXTRA_KEY)
+        if seq is None:
+            return 0
+        state = self._states.get(self._get_umo(event))
+        pending = state.pending.get(seq) if state else None
+        if pending is None or pending.finished:
+            return 0
+        if seq in state.discarded:
+            return 0
+        return self._steering_open_hold_ms if pending.burst_open else 0
+
+    @staticmethod
+    def _event_has_media(event: Any) -> bool:
+        """只读判断事件消息链里是否含图片/语音/文件等非文本组件。"""
+        try:
+            chain = getattr(getattr(event, "message_obj", None), "message", None)
+            if not isinstance(chain, (list, tuple)):
+                return False
+            for comp in chain:
+                if isinstance(comp, dict):
+                    name = str(comp.get("type", ""))
+                else:
+                    name = type(comp).__name__
+                lowered = name.lower()
+                if any(
+                    key in lowered
+                    for key in ("image", "record", "audio", "video", "file", "music")
+                ):
+                    return True
+            return False
+        except Exception:
+            return False
 
     def cleanup_stale(self) -> int:
         """清理过期会话状态，返回清理数量。"""
@@ -207,15 +385,12 @@ class ConversationTracker:
                     ):
                         other_state.discarded.add(p.seq)
                         p.interrupt_token["cancelled"] = True
+        merge_candidates: list[PendingRequest] = []
+        relation = "new_task"
         if detect_interrupt and active_pending:
-            for pending in active_pending:
-                state.discarded.add(pending.seq)
-                pending.interrupt_token["cancelled"] = True
-            merge_candidates = [
-                pending
-                for pending in active_pending
-                if pending.user_texts or pending.media.has_content()
-            ]
+            merge_candidates, relation = self._select_merge_candidates(
+                state, active_pending, event, meaningful_user_text, now
+            )
             old_pairs = [
                 (text, text_ts)
                 for pending in merge_candidates
@@ -276,6 +451,8 @@ class ConversationTracker:
             seq=seq,
             user_text=user_text,
             started_at=time.time(),
+            burst_open=text_completeness(meaningful_user_text) == "open",
+            task_relation=relation,
             user_texts=(
                 [*inherited_texts, meaningful_user_text]
                 if meaningful_user_text

@@ -136,6 +136,34 @@
     "hint": "开启后，bot 还在思考时用户追加消息，旧回复会被抑制或合并到新请求。",
     "default": true
   },
+  "interrupt_mode": {
+    "type": "string",
+    "description": "[插话中断] 处理模式（steering=运行中插话的任务归属判定 / window=旧的固定时间窗）",
+    "options": ["steering", "window"],
+    "hint": "steering：单条消息不额外等待，生成中的补充/纠正/媒体延续按同一任务合并，新话题不硬合并；window：保持旧的固定时间窗逻辑。默认 steering。",
+    "default": "steering"
+  },
+  "steering_new_turn_gap_ms": {
+    "type": "int",
+    "description": "[插话中断] steering 新任务间隔（毫秒）",
+    "hint": "超过此间隔且没有补充、纠正、媒体等连续信号时，视为新任务，旧回复正常发出。默认 3500ms。",
+    "default": 3500,
+    "minimum": 0
+  },
+  "steering_uncertain_gap_ms": {
+    "type": "int",
+    "description": "[插话中断] steering 不确定窗口（毫秒）",
+    "hint": "规则无法明确判断时，此窗口内倾向按同一任务合并，保证只回一条；默认 1500ms。",
+    "default": 1500,
+    "minimum": 0
+  },
+  "steering_open_hold_ms": {
+    "type": "int",
+    "description": "[插话中断] steering 提交缓冲（毫秒）",
+    "hint": "只对“像没说完”的消息（在吗、逗号结尾、很短裸句）在发送前短暂等待补充；完整单句不增加额外等待。默认 600ms。",
+    "default": 600,
+    "minimum": 0
+  },
   "interrupt_scope": {
     "type": "string",
     "description": "[插话中断] 群聊中断作用域（room=本群任何新消息 / sender=仅同一发送者 / mention_or_sender=同一发送者或明确@Bot）",

@@ -32,6 +32,12 @@ DEFAULTS: dict[str, Any] = {
     "experimental_thinking_merge_enabled": False,
     "interrupt_thinking_merge_context_count": 5,
     "interrupt_merge_strategy": "append",
+    # steering：运行中插话（生成先行、任务归属判定、延迟提交）；
+    # window：兼容旧的固定时间窗逻辑。
+    "interrupt_mode": "steering",
+    "steering_new_turn_gap_ms": 3500,
+    "steering_uncertain_gap_ms": 1500,
+    "steering_open_hold_ms": 600,
     "interrupt_window_ms": 30000,
     "interrupt_state_ttl_ms": 600000,
     "interrupt_scope": "sender",
@@ -98,6 +104,7 @@ DEFAULTS: dict[str, Any] = {
 
 _VALID_STRATEGIES = {"inject", "prejudge", "both"}
 _VALID_MERGE = {"append", "rewrite", "discard_old"}
+_VALID_INTERRUPT_MODES = {"steering", "window"}
 _VALID_DELAY_MODES = {"fixed", "per_char"}
 _VALID_SCOPES = {"room", "sender", "mention_or_sender"}
 _VALID_REPLY_QUOTE_MODES = {"off", "probability", "llm_decides"}
@@ -259,6 +266,31 @@ def normalize_config(raw: dict[str, Any] | None) -> dict[str, Any]:
     )
     out["interrupt_merge_strategy"] = (
         merge if merge in _VALID_MERGE else DEFAULTS["interrupt_merge_strategy"]
+    )
+    mode = _coerce_str(raw.get("interrupt_mode"), DEFAULTS["interrupt_mode"])
+    out["interrupt_mode"] = (
+        mode if mode in _VALID_INTERRUPT_MODES else DEFAULTS["interrupt_mode"]
+    )
+    out["steering_new_turn_gap_ms"] = max(
+        0,
+        _coerce_int(
+            raw.get("steering_new_turn_gap_ms"),
+            DEFAULTS["steering_new_turn_gap_ms"],
+        ),
+    )
+    out["steering_uncertain_gap_ms"] = max(
+        0,
+        _coerce_int(
+            raw.get("steering_uncertain_gap_ms"),
+            DEFAULTS["steering_uncertain_gap_ms"],
+        ),
+    )
+    out["steering_open_hold_ms"] = max(
+        0,
+        _coerce_int(
+            raw.get("steering_open_hold_ms"),
+            DEFAULTS["steering_open_hold_ms"],
+        ),
     )
     out["interrupt_window_ms"] = max(
         0, _coerce_int(raw.get("interrupt_window_ms"), DEFAULTS["interrupt_window_ms"])
@@ -610,6 +642,10 @@ class PluginConfig:
     experimental_thinking_merge_enabled: bool = False
     interrupt_thinking_merge_context_count: int = 5
     interrupt_merge_strategy: str = "append"
+    interrupt_mode: str = "steering"
+    steering_new_turn_gap_ms: int = 3500
+    steering_uncertain_gap_ms: int = 1500
+    steering_open_hold_ms: int = 600
     interrupt_window_ms: int = 30000
     interrupt_state_ttl_ms: int = 600000
     interrupt_scope: str = "sender"
