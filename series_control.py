@@ -19,6 +19,19 @@ _FIELDS: dict[str, dict[str, Any]] = {
     "chunking_max_segments": {"type": "int", "default": 5, "minimum": 1, "maximum": 20},
     "silence_enabled": {"type": "bool", "default": True},
     "interrupt_enabled": {"type": "bool", "default": True},
+    "context_budget_enforce": {"type": "bool", "default": False},
+    "context_budget_soft_limit": {
+        "type": "int",
+        "default": 12000,
+        "minimum": 2000,
+        "maximum": 100000,
+    },
+    "context_budget_hard_limit": {
+        "type": "int",
+        "default": 14000,
+        "minimum": 2000,
+        "maximum": 120000,
+    },
 }
 
 
