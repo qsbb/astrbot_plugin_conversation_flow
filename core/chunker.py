@@ -24,6 +24,7 @@ class ChunkConfig:
     preserve_paragraphs: bool = True
     long_paragraph_threshold: int = 240
     llm_assist: bool = False
+    llm_assist_min_length: int = 120
 
 
 # 强句末标点。省略号表示停顿/延续，不应在“嘛……不太行”中间断开。
@@ -52,6 +53,7 @@ class Chunker:
             preserve_paragraphs=cfg.chunking_preserve_paragraphs,
             long_paragraph_threshold=cfg.chunking_long_paragraph_threshold,
             llm_assist=cfg.chunking_llm_assist,
+            llm_assist_min_length=cfg.chunking_llm_assist_min_length,
         )
 
     def sync_config(self) -> None:
@@ -63,6 +65,7 @@ class Chunker:
             preserve_paragraphs=self.cfg.chunking_preserve_paragraphs,
             long_paragraph_threshold=self.cfg.chunking_long_paragraph_threshold,
             llm_assist=self.cfg.chunking_llm_assist,
+            llm_assist_min_length=self.cfg.chunking_llm_assist_min_length,
         )
 
     def split_candidates(self, text: str) -> list[str]:
@@ -98,10 +101,11 @@ class Chunker:
         if not self._chunk_cfg.llm_assist or not text:
             return False
         normalized = text.rstrip()
-        if (
-            len(normalized) < self._chunk_cfg.min_length
-            or self._chunk_cfg.max_segments <= 1
-        ):
+        assist_min = max(
+            self._chunk_cfg.min_length,
+            self._chunk_cfg.llm_assist_min_length,
+        )
+        if len(normalized) < assist_min or self._chunk_cfg.max_segments <= 1:
             return False
         return _PARAGRAPH_SPLIT.search(normalized) is None
 

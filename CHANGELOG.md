@@ -4,6 +4,16 @@
 
 ## [Unreleased]
 
+## 0.9.1 - 2026-09-12
+
+- 修复辅助 LLM 的 Provider 解析：兼容 AstrBot 4.26+ 的 `provider_insts` / `inst_map` 与 `provider_config["id"]`，显式的 `llm_provider_id`、`silence_prejudge_provider_id` 和核模型路由不再被静默忽略；辅助调用统一加 30 秒硬超时。
+- 切分助手增加最短文本阈值 `chunking_llm_assist_min_length=120`：短回复交给确定性规则，不再每条回复多调用一次切分模型（线上 `min_length=10 + llm_assist=true` 的额外调用被消除）。
+- steering 的生成后提交缓冲改为生成前宽限：只对“在吗/逗号结尾/很短裸句”等未完成态等待，默认从 600ms 降为 400ms，完整单句立即生成；生成后不再人为等待。
+- 被插话取代的事件在 `on_waiting_llm_request` / `on_llm_request` 中真正 `cancel_request()` + `stop_event()`，不再让旧事件完整跑完一次主模型。
+- 工具循环改用公开生命周期 hook（`on_agent_begin` / `on_using_llm_tool` / `on_llm_tool_respond` / `on_agent_done`）精确维护 `tool_inflight`；不再用“历史出现过工具消息”猜测。纯文本同任务走原生 follow-up，媒体延续和普通生成走 stop+merge，新任务遇到工具循环则停止旧 run 保任务边界。
+- room 作用域拆分 `preempt_only`：允许其他发送者抢占停止旧回复，但不继承/合并对方文本。
+- steering 模式不再走 experimental thinking 模板；旧文本已存在于公开历史时只注入同轮短提示，避免重复注入和 `response_started` 时序误判。
+
 ## 0.9.0 - 2026-09-12
 
 - 新增运行中插话（steering）：生成过程中到达的同任务消息，用官方 stop 中止旧 run，再把原话与时间标注合并成一次新请求重新生成，最终只发一条连贯回复。

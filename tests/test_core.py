@@ -245,6 +245,12 @@ class _Event:
     def get_extra(self, key):
         return self._extra.get(key)
 
+    def stop_event(self) -> None:
+        self._stopped = True
+
+    def is_stopped(self) -> bool:
+        return bool(getattr(self, "_stopped", False))
+
 
 class ProactiveEnvironmentDeliveryTests(unittest.TestCase):
     @staticmethod
@@ -646,6 +652,40 @@ class _LLM:
         return ""
 
 
+class LLMServiceProviderTests(unittest.IsolatedAsyncioTestCase):
+    async def test_explicit_provider_uses_provider_config_id(self) -> None:
+        """AstrBot 4.26+ 的 Provider id 在 provider_config，而不是 .id。"""
+        from astrbot_plugin_conversation_flow.core.llm_service import LLMService
+
+        class _Provider:
+            def __init__(self, provider_id: str) -> None:
+                self.provider_config = {"id": provider_id}
+                self.calls = 0
+
+            async def text_chat(self, **kwargs):
+                self.calls += 1
+                return types.SimpleNamespace(completion_text=f"{self.provider_config['id']}-ok")
+
+        fast = _Provider("fast")
+        main = _Provider("main")
+
+        class _ProviderManager:
+            provider_insts = [main, fast]
+            inst_map = {"main": main, "fast": fast}
+
+        class _Context:
+            provider_manager = _ProviderManager()
+
+            @staticmethod
+            def get_using_provider():
+                return main
+
+        service = LLMService(_Context(), cfg_llm_provider_id="fast")
+        self.assertEqual(await service.chat("hi"), "fast-ok")
+        self.assertEqual(fast.calls, 1)
+        self.assertEqual(main.calls, 0)
+
+
 class ChunkerTests(unittest.TestCase):
     def test_preserves_complete_paragraph_under_threshold(self) -> None:
         cfg = build_plugin_config(
@@ -848,9 +888,21 @@ class LLMChunkingAssistTests(unittest.IsolatedAsyncioTestCase):
             "chunking_max_segments": 5,
             "chunking_preserve_paragraphs": False,
             "chunking_llm_assist": True,
+            "chunking_llm_assist_min_length": 10,
         }
         values.update(overrides)
         return build_plugin_config(values)
+
+    async def test_short_reply_skips_llm_assist_even_when_enabled(self) -> None:
+        """生产默认阈值下，短回复不应触发切分助手模型调用。"""
+        text = "先确认今天要处理的主要事情，然后再安排晚上的休息时间。"
+        llm = _RecordingChunkLLM(json.dumps([text], ensure_ascii=False))
+        chunker = Chunker(
+            self._config(chunking_llm_assist_min_length=120),
+            llm,
+        )
+        self.assertEqual(await chunker.split_smart(text), chunker.split(text))
+        self.assertEqual(llm.calls, 0)
 
     async def test_llm_cannot_collapse_local_multi_segments_to_single(self) -> None:
         """本地已能看到多段时，辅助模型不得把结果压回单段。"""
@@ -3111,6 +3163,29 @@ class NativeFollowupDebounceTests(unittest.TestCase):
         self.assertEqual(calls, [])
         self.assertFalse(second.get_extra(plugin.NATIVE_FOLLOWUP_BYPASSED_KEY))
 
+    def test_tool_lifecycle_tracks_inflight(self) -> None:
+        plugin = self._plugin()
+        event = self._private_event("工具测试")
+
+        asyncio.run(plugin.on_agent_begin_tool_state(event))
+        self.assertFalse(plugin._active_runner_uses_tools(event))
+        asyncio.run(plugin.on_using_llm_tool_state(event))
+        self.assertTrue(plugin._active_runner_uses_tools(event))
+        asyncio.run(plugin.on_llm_tool_respond_state(event))
+        self.assertFalse(plugin._active_runner_uses_tools(event))
+        asyncio.run(plugin.on_agent_done_tool_state(event))
+
+    def test_discarded_event_stops_before_generation(self) -> None:
+        plugin = self._plugin()
+        first = self._private_event("旧消息")
+        second = self._private_event("新消息")
+        plugin.tracker.begin_request(first)
+        plugin.tracker.begin_request(second)
+
+        asyncio.run(plugin.on_waiting_llm_request(first))
+
+        self.assertTrue(first.is_stopped())
+
     def test_decorator_uses_max_priority(self) -> None:
         import astrbot_plugin_conversation_flow.main  # noqa: F401
 
@@ -3211,6 +3286,34 @@ class SteeringMergeStrategyTests(unittest.TestCase):
             any("把它们视作连续的语境一起回应" in text for text in texts),
             texts,
         )
+
+
+    def test_steering_uses_short_hint_when_old_text_in_history(self) -> None:
+        from astrbot_plugin_conversation_flow.main import ConversationalFlowPlugin
+
+        plugin = object.__new__(ConversationalFlowPlugin)
+        plugin.config = build_plugin_config({"interrupt_mode": "steering"})
+        plugin.logger = _Logger()
+        plugin.tracker = ConversationTracker()
+
+        old = _Event("session", "我想吃火锅")
+        current = _Event("session", "不是，我是说想吃烤肉")
+        plugin.tracker.begin_request(old)
+        plugin.tracker.begin_request(current)
+        req = _ProviderRequest(
+            contexts=["我想吃火锅"],
+            extra_user_content_parts=[],
+        )
+
+        asyncio.run(plugin._apply_merge(current, req, "session"))
+
+        texts = []
+        for part in req.extra_user_content_parts:
+            value = part.get("text", "") if isinstance(part, dict) else getattr(part, "text", "")
+            texts.append(str(value))
+        joined = "\n".join(texts)
+        self.assertIn("同轮补充", joined)
+        self.assertNotIn("我想吃火锅", joined)
 
 
 class InterruptScopeTests(unittest.TestCase):

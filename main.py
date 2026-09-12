@@ -73,6 +73,7 @@ from .core.prompts import (
     INTERRUPT_MERGE_DISCARD_HINT,
     INTERRUPT_MERGE_REWRITE_SYSTEM,
     INTERRUPT_MERGE_REWRITE_USER_TEMPLATE,
+    INTERRUPT_MERGE_SAME_TURN_HINT,
     INTERRUPT_THINKING_HISTORY_TEMPLATE,
     INTERRUPT_THINKING_HISTORY_WITH_CONTEXT_TEMPLATE,
     NATURAL_TOOL_CALL_INSTRUCTION,
@@ -113,7 +114,7 @@ from .series_diagnostics import (
     logger,
 )
 
-__version__ = "0.9.0"
+__version__ = "0.9.1"
 RELATIONSHIP_PLUGIN_NAME = "astrbot_plugin_relationship"
 RELATIONSHIP_SNAPSHOT_CONTRACT_NAME = "relationship.snapshot"
 RELATIONSHIP_SNAPSHOT_CONTRACT_MAJOR = "1"
@@ -184,6 +185,21 @@ SERIES_PROMPT_OWNERS = (
     OWNER_ACTIVE_LEARNER,
     OWNER_RELATIONSHIP,
 )
+
+
+def _optional_event_filter(name: str):
+    """在旧版 AstrBot 上安全跳过不存在的生命周期 hook。"""
+    decorator = getattr(filter, name, None)
+    if callable(decorator):
+        try:
+            return decorator()
+        except Exception:
+            pass
+
+    def _noop(func):
+        return func
+
+    return _noop
 
 
 @register(
@@ -283,6 +299,7 @@ class ConversationalFlowPlugin(Star):
             uncertain_gap_ms=self.config.steering_uncertain_gap_ms,
             open_hold_ms=self.config.steering_open_hold_ms,
         )
+        self._tool_inflight: dict[str, int] = {}
         self.recent_activity = RecentActivityStore(
             retention_seconds=self.config.recent_activity_retention_minutes * 60
         )
@@ -1055,15 +1072,37 @@ class ConversationalFlowPlugin(Star):
         # 运行中插话（steering）：语义判定优先于固定时间窗。
         if self.tracker.steering_applies(event):
             relation = self.tracker.classify_event_relation(event, is_wake=is_wake)
-            if relation == "new_task":
-                self.logger.debug(
-                    "[conv-flow] steering: new task, left old run and follow-up to core"
+            tool_inflight = self._active_runner_uses_tools(event)
+            if relation == "preempt_only":
+                # room 作用域：允许他人抢占停止旧 run，但不合并文本。
+                if not self._request_native_followup_stop(event):
+                    return
+                self._set_extra(event, self.NATIVE_FOLLOWUP_BYPASSED_KEY, True)
+                request_context = ensure_context(event, PHASE_MESSAGE)
+                add_reason(
+                    request_context,
+                    OWNER_CONVERSATION_FLOW,
+                    "ROOM_PREEMPT_ONLY",
+                )
+                self.logger.info(
+                    "[conv-flow] steering: room message preempts without merge"
                 )
                 return
-            # 工具循环中的 Agent 可以原生吸收 follow-up，不必停掉重跑。
-            if self._active_runner_uses_tools(event):
+            if relation == "new_task":
+                if tool_inflight:
+                    # 新任务不能被旧工具循环吞并：停止旧 run，保任务边界。
+                    self._request_native_followup_stop(event)
+                    self.logger.info(
+                        "[conv-flow] steering: new task stops tool-loop run"
+                    )
+                else:
+                    self.logger.debug("[conv-flow] steering: new task left to core")
+                return
+            # 同任务：纯文本且工具真正执行中 → 官方 follow-up；
+            # 媒体延续或普通生成 → stop+merge（媒体不能被 follow-up 文本化）。
+            if tool_inflight and not self.tracker.event_has_media(event):
                 self.logger.info(
-                    "[conv-flow] steering: tool-loop follow-up left to native capture"
+                    "[conv-flow] steering: tool-loop text follow-up left to native capture"
                 )
                 return
             if not self._request_native_followup_stop(event):
@@ -1122,6 +1161,32 @@ class ConversationalFlowPlugin(Star):
             self.tracker._get_user_text(event)[:80],
         )
 
+        # 生成前宽限（steering）：只对像没说完的消息等一个很短窗口。
+        # 期间被新消息取代则直接取消本事件，避免浪费一次主模型调用。
+        if self.tracker.is_discarded(event):
+            self.tracker.cancel_request(event)
+            try:
+                event.stop_event()
+            except Exception:
+                pass
+            self.logger.info(
+                "[conv-flow] seq=%s superseded before generation, stopped", seq
+            )
+            return
+        hold_ms = self.tracker.get_commit_hold_ms(event)
+        if hold_ms > 0:
+            await asyncio.sleep(hold_ms / 1000.0)
+            if self.tracker.is_discarded(event):
+                self.tracker.cancel_request(event)
+                try:
+                    event.stop_event()
+                except Exception:
+                    pass
+                self.logger.info(
+                    "[conv-flow] seq=%s superseded during pre-generation grace", seq
+                )
+                return
+
     # priority=500：凝心溯溪系列 on_llm_request 区间为 200-800，数值越大越先执行。
     # 顺序为 序 800（身份安全边界）> 知 700（知识事实）> 情 600（表达约束）>
     # 言 500。本钩子可能触发沉默并截断整轮，必须排在最后，否则前序模块的
@@ -1178,10 +1243,16 @@ class ConversationalFlowPlugin(Star):
             )
 
         # 3) 沉默判断
-        # 注意：被插话取代的旧请求不需要再做沉默判断（反正要丢弃）
+        # 注意：被插话取代的旧请求不需要再做沉默判断（反正要丢弃）。
+        # 必须在这里真正停止事件，否则旧事件可能仍然注册 runner 并完整生成一次。
         if self.tracker.is_discarded(event):
-            self.logger.debug(
-                "[conv-flow] seq=%s already discarded, skip silence judge", seq
+            self.tracker.cancel_request(event)
+            try:
+                event.stop_event()
+            except Exception:
+                pass
+            self.logger.info(
+                "[conv-flow] seq=%s discarded before runner start, stopped", seq
             )
             return
 
@@ -1401,6 +1472,45 @@ class ConversationalFlowPlugin(Star):
                 return
 
     # ------------------------------------------------------------------
+    # 工具生命周期（公开 hook）：精确维护 tool_inflight
+    # ------------------------------------------------------------------
+
+    @_optional_event_filter("on_agent_begin")
+    async def on_agent_begin_tool_state(
+        self, event: AstrMessageEvent, *args: Any, **kwargs: Any
+    ) -> None:
+        if not isinstance(getattr(self, "_tool_inflight", None), dict):
+            self._tool_inflight = {}
+        self._tool_inflight[self._tool_scope_key(event)] = 0
+
+    @_optional_event_filter("on_using_llm_tool")
+    async def on_using_llm_tool_state(
+        self, event: AstrMessageEvent, *args: Any, **kwargs: Any
+    ) -> None:
+        if not isinstance(getattr(self, "_tool_inflight", None), dict):
+            self._tool_inflight = {}
+        key = self._tool_scope_key(event)
+        self._tool_inflight[key] = self._tool_inflight.get(key, 0) + 1
+
+    @_optional_event_filter("on_llm_tool_respond")
+    async def on_llm_tool_respond_state(
+        self, event: AstrMessageEvent, *args: Any, **kwargs: Any
+    ) -> None:
+        inflight = getattr(self, "_tool_inflight", None)
+        if not isinstance(inflight, dict):
+            return
+        key = self._tool_scope_key(event)
+        inflight[key] = max(0, inflight.get(key, 0) - 1)
+
+    @_optional_event_filter("on_agent_done")
+    async def on_agent_done_tool_state(
+        self, event: AstrMessageEvent, *args: Any, **kwargs: Any
+    ) -> None:
+        inflight = getattr(self, "_tool_inflight", None)
+        if isinstance(inflight, dict):
+            inflight.pop(self._tool_scope_key(event), None)
+
+    # ------------------------------------------------------------------
     # 主钩子：on_decorating_result
     # ------------------------------------------------------------------
 
@@ -1434,21 +1544,8 @@ class ConversationalFlowPlugin(Star):
             self.tracker.finish_response(event)
             return
 
-        # 1.5) steering 提交缓冲：只对"像没说完"的消息（在吗、逗号结尾、
-        # 很短裸句等）等一个很短窗口；期间若被新消息取代，丢弃本次回复，
-        # 让新请求合并生成。完整单句的 hold=0，单条消息不会被拖慢。
-        if self.config.interrupt_enabled:
-            hold_ms = self.tracker.get_commit_hold_ms(event)
-            if hold_ms > 0:
-                await asyncio.sleep(hold_ms / 1000.0)
-                if self.tracker.is_discarded(event):
-                    self.logger.info(
-                        "[conv-flow] seq=%s discarded during steering hold", seq
-                    )
-                    await self._silence_event(event, send_notify=False)
-                    self.tracker.finish_response(event)
-                    return
-
+        # 1.5) 生成前宽限已在 on_waiting_llm_request 完成；这里不再做生成后
+        # hold，避免主模型已经跑完、切分助手也跑完之后再人为等待。
         # 2) 获取结果文本
         result = self._get_result(event)
         if result is None:
@@ -2228,6 +2325,7 @@ class ConversationalFlowPlugin(Star):
         if (
             previous_state == "thinking"
             and self.config.experimental_thinking_merge_enabled
+            and self.config.interrupt_mode != "steering"
         ):
             if context_count > 0:
                 recent_pairs = old_pairs[-context_count:]
@@ -2281,12 +2379,20 @@ class ConversationalFlowPlugin(Star):
                     )
                     annotated = True
             else:  # append (默认)
-                injection = INTERRUPT_MERGE_APPEND_TEMPLATE.format(
-                    time_note=time_note,
-                    old_lines=old_lines or f"「{display_old_text}」",
-                    new_label=new_label,
-                    new_text=display_new_text,
-                )
+                if self.config.interrupt_mode == "steering" and history_contains_old:
+                    # 旧文本已在公开历史里：只给同轮提示，不重复注入旧文本，
+                    # 避免 abort 历史与旧内容叠加造成重复。
+                    injection = INTERRUPT_MERGE_SAME_TURN_HINT.format(
+                        new_label=new_label,
+                        new_text=display_new_text,
+                    )
+                else:
+                    injection = INTERRUPT_MERGE_APPEND_TEMPLATE.format(
+                        time_note=time_note,
+                        old_lines=old_lines or f"「{display_old_text}」",
+                        new_label=new_label,
+                        new_text=display_new_text,
+                    )
                 annotated = True
 
         if strategy != "discard_old":
@@ -2647,41 +2753,29 @@ class ConversationalFlowPlugin(Star):
         except Exception:
             return False
 
-    def _active_runner_uses_tools(self, event: AstrMessageEvent) -> bool:
-        """只读判断当前会话的活跃 runner 是否已进入工具调用循环。
+    def _tool_scope_key(self, event: AstrMessageEvent) -> str:
+        """工具生命周期状态按会话/发送者作用域隔离。"""
+        try:
+            umo = self.tracker._get_umo(event)
+            if umo:
+                return str(umo)
+        except Exception:
+            pass
+        return str(getattr(event, "unified_msg_origin", "") or "")
 
-        工具循环中官方 follow_up 会把新消息注入下一个 tool result；
-        普通单步生成没有下一步，只能 stop + merge。检测失败一律返回
-        False，退回确定性的 stop+merge 路径。
+    def _active_runner_uses_tools(self, event: AstrMessageEvent) -> bool:
+        """基于公开工具生命周期 hook 的精确 tool_inflight 判断。
+
+        只有 on_using_llm_tool 已触发且 on_llm_tool_respond 尚未返回时
+        tool_inflight > 0；不再扫描历史消息（历史里有工具调用不代表
+        当前正在执行工具）。
         """
         try:
-            from astrbot.core.pipeline.process_stage.follow_up import (
-                _ACTIVE_AGENT_RUNNERS,
-            )
-
-            runner = _ACTIVE_AGENT_RUNNERS.get(event.unified_msg_origin)
-            if runner is None:
+            inflight = getattr(self, "_tool_inflight", None)
+            if not isinstance(inflight, dict):
                 return False
-            run_context = getattr(runner, "run_context", None)
-            messages = getattr(run_context, "messages", None)
-            if not isinstance(messages, (list, tuple)):
-                return False
-            for message in messages:
-                if str(getattr(message, "role", "") or "").lower() == "tool":
-                    return True
-                content = getattr(message, "content", None)
-                if isinstance(content, (list, tuple)):
-                    for part in content:
-                        if "tool" in type(part).__name__.lower():
-                            return True
-                if getattr(message, "tool_calls", None):
-                    return True
-            return False
-        except Exception as exc:
-            self.logger.debug(
-                "[conv-flow] tool-loop detection unavailable: %s",
-                type(exc).__name__,
-            )
+            return inflight.get(self._tool_scope_key(event), 0) > 0
+        except Exception:
             return False
 
     def _request_native_followup_stop(self, event: AstrMessageEvent) -> bool:

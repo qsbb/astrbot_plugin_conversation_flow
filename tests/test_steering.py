@@ -35,6 +35,12 @@ class _Event:
         return self._extra.get(key)
 
 
+class _SenderEvent(_Event):
+    def __init__(self, umo: str, text: str, sender_id: str) -> None:
+        super().__init__(umo, text)
+        self.message_obj = types.SimpleNamespace(sender_id=sender_id)
+
+
 class _Image:
     """类型名含 Image，供 tracker 的只读媒体检测使用。"""
 
@@ -130,7 +136,7 @@ class SteeringTrackerTests(unittest.TestCase):
         _begin_at(tracker, preamble, 100.0)
         _begin_at(tracker, complete, 100.0)
 
-        self.assertEqual(tracker.get_commit_hold_ms(preamble), 600)
+        self.assertEqual(tracker.get_commit_hold_ms(preamble), 400)
         self.assertEqual(tracker.get_commit_hold_ms(complete), 0)
 
     def test_media_message_merges_with_previous_text(self) -> None:
@@ -144,6 +150,18 @@ class SteeringTrackerTests(unittest.TestCase):
         hint = tracker.get_merge_hint(media)
         self.assertEqual(hint["old_texts"], ["你看这个"])
         self.assertEqual(hint["new_text"], "")
+
+    def test_room_cross_sender_preempts_without_merge(self) -> None:
+        tracker = ConversationTracker()
+        tracker.update_interrupt_config(30000, "room", steering_mode=True)
+        first = _SenderEvent("default:GroupMessage:1:2", "我先说一句。", "u1")
+        second = _SenderEvent("default:GroupMessage:1:2", "我也来说一句。", "u2")
+        _begin_at(tracker, first, 100.0)
+        _begin_at(tracker, second, 101.0)
+
+        # room 允许抢占停止，但不允许继承/合并另一个人的文本。
+        self.assertTrue(tracker.is_discarded(first))
+        self.assertFalse(tracker.has_merge_hint(second))
 
     def test_group_sender_scope_keeps_legacy_window(self) -> None:
         tracker = ConversationTracker()

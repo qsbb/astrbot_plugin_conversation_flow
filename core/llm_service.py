@@ -9,6 +9,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from typing import Any
 
@@ -19,11 +20,17 @@ from .model_router import resolve_provider_id as resolve_routed_provider_id
 class LLMService:
     """封装 LLM 调用，提供 4 层 provider fallback。"""
 
-    def __init__(self, context: Any, cfg_llm_provider_id: str = "") -> None:
+    def __init__(
+        self,
+        context: Any,
+        cfg_llm_provider_id: str = "",
+        timeout_seconds: float = 30.0,
+    ) -> None:
         self.context = context
         self._cfg_llm_provider_id = cfg_llm_provider_id or ""
         # Dashboard 运行时设置（由 main.py 的 settings_store 维护，目前留空）
         self._settings: dict[str, Any] = {}
+        self._timeout_seconds = max(1.0, float(timeout_seconds))
         self.logger = logger
 
     def update_settings(self, settings: dict[str, Any]) -> None:
@@ -32,16 +39,55 @@ class LLMService:
     def set_cfg_provider_id(self, provider_id: str) -> None:
         self._cfg_llm_provider_id = provider_id or ""
 
+    @staticmethod
+    def _provider_id_of(provider: Any) -> str:
+        """兼容不同 AstrBot 版本：Provider.id 或 provider_config['id']。"""
+        try:
+            value = getattr(provider, "id", None)
+            if isinstance(value, str) and value:
+                return value
+        except Exception:
+            pass
+        try:
+            config = getattr(provider, "provider_config", None)
+            if isinstance(config, dict):
+                value = config.get("id")
+                if isinstance(value, str) and value:
+                    return value
+        except Exception:
+            pass
+        return ""
+
+    def _provider_instances(self) -> list[Any]:
+        """返回当前已加载的 chat provider 实例（去重）。"""
+        pm = getattr(self.context, "provider_manager", None)
+        if pm is None:
+            return []
+        found: list[Any] = []
+        seen: set[int] = set()
+        candidates: list[Any] = []
+        for attr in ("provider_insts", "providers"):
+            value = getattr(pm, attr, None)
+            if isinstance(value, (list, tuple)):
+                candidates.extend(value)
+        inst_map = getattr(pm, "inst_map", None)
+        if isinstance(inst_map, dict):
+            candidates.extend(inst_map.values())
+        for provider in candidates:
+            if provider is None or id(provider) in seen:
+                continue
+            if not callable(getattr(provider, "text_chat", None)):
+                continue
+            seen.add(id(provider))
+            found.append(provider)
+        return found
+
     def _provider_exists(self, provider_id: str) -> bool:
         if not provider_id:
             return False
         try:
-            pm = getattr(self.context, "provider_manager", None)
-            if pm is None:
-                return False
-            providers = getattr(pm, "providers", None) or []
-            for p in providers:
-                if getattr(p, "id", None) == provider_id:
+            for provider in self._provider_instances():
+                if self._provider_id_of(provider) == provider_id:
                     return True
         except Exception:
             pass
@@ -90,13 +136,9 @@ class LLMService:
         if not provider_id:
             return None
         try:
-            pm = getattr(self.context, "provider_manager", None)
-            if pm is None:
-                return None
-            providers = getattr(pm, "providers", None) or []
-            for p in providers:
-                if getattr(p, "id", None) == provider_id:
-                    return p
+            for provider in self._provider_instances():
+                if self._provider_id_of(provider) == provider_id:
+                    return provider
         except Exception:
             pass
         return None
@@ -134,7 +176,10 @@ class LLMService:
             kwargs: dict[str, Any] = {"prompt": prompt, "context": []}
             if system_prompt:
                 kwargs["system_prompt"] = system_prompt
-            resp = await provider.text_chat(**kwargs)
+            resp = await asyncio.wait_for(
+                provider.text_chat(**kwargs),
+                timeout=self._timeout_seconds,
+            )
             text = (
                 getattr(resp, "completion_text", "") or getattr(resp, "text", "") or ""
             )

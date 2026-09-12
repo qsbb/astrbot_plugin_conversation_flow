@@ -16,6 +16,8 @@ class PendingRequest:
     seq: int
     user_text: str
     started_at: float
+    # 发送者 ID：room 作用域下不同发送者不得合并文本。
+    sender_id: str = ""
     finished: bool = False
     response_started: bool = False
     # 这条消息是否像"还没说完"（前导语/逗号结尾/很短裸句），
@@ -111,7 +113,7 @@ class ConversationTracker:
         self._steering_mode: bool = True
         self._steering_new_turn_gap_ms: int = 3500
         self._steering_uncertain_gap_ms: int = 1500
-        self._steering_open_hold_ms: int = 600
+        self._steering_open_hold_ms: int = 400
 
     def update_interrupt_config(
         self,
@@ -184,6 +186,15 @@ class ConversationTracker:
         event: Any,
     ) -> str:
         """判断新消息相对 pending 的任务归属。"""
+        current_sender = self._get_sender_id(event)
+        if (
+            pending.sender_id
+            and current_sender
+            and pending.sender_id != current_sender
+        ):
+            # room 作用域只共享会话 key；不同发送者允许抢占停止，
+            # 但绝不能继承/合并对方的文本。
+            return "preempt_only"
         old_texts = [
             str(item).strip()
             for item in pending.user_texts
@@ -265,6 +276,11 @@ class ConversationTracker:
             # 不标记 discarded，不生成 merge hint：旧回复正常发出，
             # 新消息在会话锁释放后作为下一轮独立处理。
             return [], relation
+        if relation == "preempt_only":
+            # room 作用域：允许新发送者抢占停止旧 run，但不继承文本。
+            state.discarded.add(primary.seq)
+            primary.interrupt_token["cancelled"] = True
+            return [], relation
         state.discarded.add(primary.seq)
         primary.interrupt_token["cancelled"] = True
         return (
@@ -274,8 +290,12 @@ class ConversationTracker:
             relation,
         )
 
+    def event_has_media(self, event: Any) -> bool:
+        """公开只读媒体判断，供 steering 路由使用。"""
+        return self._event_has_media(event)
+
     def get_commit_hold_ms(self, event: Any) -> int:
-        """返回回复发出前的提交缓冲毫秒数；只对"像没说完"的消息生效。"""
+        """返回生成前宽限毫秒数；只对"像没说完"的消息生效。"""
         if not self._steering_applies(event):
             return 0
         seq = self._get_extra(event, self.SEQ_EXTRA_KEY)
@@ -451,6 +471,7 @@ class ConversationTracker:
             seq=seq,
             user_text=user_text,
             started_at=time.time(),
+            sender_id=self._get_sender_id(event),
             burst_open=text_completeness(meaningful_user_text) == "open",
             task_relation=relation,
             user_texts=(

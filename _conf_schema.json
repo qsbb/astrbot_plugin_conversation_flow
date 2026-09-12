@@ -89,6 +89,13 @@
     "hint": "开启后包含 ``` 代码块的回复会标记代码块为不可切分单元。",
     "default": true
   },
+  "chunking_llm_assist_min_length": {
+    "type": "int",
+    "description": "[智能分段] LLM 辅助分段的最短文本长度",
+    "hint": "只有超过该长度的回复才调用切分助手模型；短回复使用本地确定性规则，避免每条回复都多一次模型调用。默认 120。",
+    "default": 120,
+    "minimum": 1
+  },
   "chunking_llm_assist": {
     "type": "bool",
     "description": "[智能分段] 让 LLM 判断长回复怎么分段",
@@ -159,9 +166,9 @@
   },
   "steering_open_hold_ms": {
     "type": "int",
-    "description": "[插话中断] steering 提交缓冲（毫秒）",
-    "hint": "只对“像没说完”的消息（在吗、逗号结尾、很短裸句）在发送前短暂等待补充；完整单句不增加额外等待。默认 600ms。",
-    "default": 600,
+    "description": "[插话中断] steering 生成前宽限（毫秒）",
+    "hint": "只对“像没说完”的消息（在吗、逗号结尾、很短裸句）在开始生成前短暂等待补充；完整单句立即生成。默认 400ms。",
+    "default": 400,
     "minimum": 0
   },
   "interrupt_scope": {

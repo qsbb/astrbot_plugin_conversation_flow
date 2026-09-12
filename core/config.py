@@ -26,6 +26,8 @@ DEFAULTS: dict[str, Any] = {
     "chunking_preserve_paragraphs": True,
     "chunking_long_paragraph_threshold": 20,
     "chunking_llm_assist": False,
+    # LLM 辅助分段只对长文启用；短回复交给确定性规则，避免每条都多一次模型调用。
+    "chunking_llm_assist_min_length": 120,
     "plain_text_mode": True,
     "image_intent_mode": True,
     "interrupt_enabled": True,
@@ -37,7 +39,7 @@ DEFAULTS: dict[str, Any] = {
     "interrupt_mode": "steering",
     "steering_new_turn_gap_ms": 3500,
     "steering_uncertain_gap_ms": 1500,
-    "steering_open_hold_ms": 600,
+    "steering_open_hold_ms": 400,
     "interrupt_window_ms": 30000,
     "interrupt_state_ttl_ms": 600000,
     "interrupt_scope": "sender",
@@ -239,6 +241,13 @@ def normalize_config(raw: dict[str, Any] | None) -> dict[str, Any]:
     )
     out["chunking_llm_assist"] = _coerce_bool(
         raw.get("chunking_llm_assist"), DEFAULTS["chunking_llm_assist"]
+    )
+    out["chunking_llm_assist_min_length"] = max(
+        1,
+        _coerce_int(
+            raw.get("chunking_llm_assist_min_length"),
+            DEFAULTS["chunking_llm_assist_min_length"],
+        ),
     )
 
     out["plain_text_mode"] = _coerce_bool(
@@ -636,6 +645,7 @@ class PluginConfig:
     chunking_preserve_paragraphs: bool = True
     chunking_long_paragraph_threshold: int = 20
     chunking_llm_assist: bool = False
+    chunking_llm_assist_min_length: int = 120
     plain_text_mode: bool = True
     image_intent_mode: bool = True
     interrupt_enabled: bool = True
@@ -645,7 +655,7 @@ class PluginConfig:
     interrupt_mode: str = "steering"
     steering_new_turn_gap_ms: int = 3500
     steering_uncertain_gap_ms: int = 1500
-    steering_open_hold_ms: int = 600
+    steering_open_hold_ms: int = 400
     interrupt_window_ms: int = 30000
     interrupt_state_ttl_ms: int = 600000
     interrupt_scope: str = "sender"
