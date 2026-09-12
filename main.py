@@ -124,7 +124,7 @@ from .series_diagnostics import (
     logger,
 )
 
-__version__ = "0.9.1"
+__version__ = "0.10.0"
 PLUGIN_NAME = "astrbot_plugin_conversation_flow"
 RELATIONSHIP_PLUGIN_NAME = "astrbot_plugin_relationship"
 RELATIONSHIP_SNAPSHOT_CONTRACT_NAME = "relationship.snapshot"
