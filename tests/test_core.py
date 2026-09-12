@@ -3316,6 +3316,23 @@ class SteeringMergeStrategyTests(unittest.TestCase):
         self.assertNotIn("我想吃火锅", joined)
 
 
+class ConversationWebUIPanelTests(unittest.TestCase):
+    def test_status_panel_contract_and_data(self) -> None:
+        from astrbot_plugin_conversation_flow.main import ConversationalFlowPlugin
+
+        plugin = object.__new__(ConversationalFlowPlugin)
+        plugin.config = build_plugin_config({})
+        plugin._stats = {"total_requests": 3, "silenced": 1}
+
+        contract = plugin.webui_panels_contract()
+        self.assertEqual(contract["name"], "series.webui@1.0")
+        self.assertEqual(contract["standalone"]["entry"], "/pages/manager")
+        data = plugin.webui_panel_data("status")
+        self.assertTrue(data["success"])
+        self.assertIn("总请求", str(data["rows"]))
+        self.assertEqual(plugin.webui_panel_action("status", "x", {})["success"], False)
+
+
 class InterruptScopeTests(unittest.TestCase):
     def test_sender_scope_isolates_different_users(self) -> None:
         tracker = ConversationTracker()

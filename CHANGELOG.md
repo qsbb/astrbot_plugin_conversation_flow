@@ -1,6 +1,6 @@
 ## [Unreleased]
 
-- 开发中（未发版）：`series.module@1.0` 模块清单。
+- 开发中（未发版）：`series.module@1.0` 模块清单；新增最小 standalone `pages/manager` 状态页与 `series.webui` 只读状态面板。
 
 ## 0.9.1 - 2026-09-12
 

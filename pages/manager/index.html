@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>凝心溯溪-言 · 对话流状态</title>
+    <link rel="stylesheet" href="./style.css" />
+  </head>
+  <body>
+    <p id="bridge-error" class="alert error" role="alert" hidden>
+      页面通信组件没有加载，请从 AstrBot 插件详情重新打开本页。
+    </p>
+    <main class="shell">
+      <header class="hero">
+        <div>
+          <p class="eyebrow">AstrBot 插件管理页</p>
+          <h1>凝心溯溪-言</h1>
+          <p>沉默判断、智能分段、插话 steering 与群聊上下文状态</p>
+        </div>
+        <button id="refresh" type="button">刷新</button>
+      </header>
+      <section class="cards" id="stats"></section>
+      <section class="card">
+        <h2>功能开关</h2>
+        <div id="features" class="feature-list"></div>
+      </section>
+      <p class="note">配置修改请在 AstrBot 插件配置中进行；核安装后可在核 WebUI 统一查看本面板。</p>
+    </main>
+    <script src="/api/plugin/page/bridge-sdk.js"></script>
+    <script type="module" src="./app.js"></script>
+  </body>
+</html>

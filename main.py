@@ -115,6 +115,7 @@ from .series_diagnostics import (
 )
 
 __version__ = "0.9.1"
+PLUGIN_NAME = "astrbot_plugin_conversation_flow"
 RELATIONSHIP_PLUGIN_NAME = "astrbot_plugin_relationship"
 RELATIONSHIP_SNAPSHOT_CONTRACT_NAME = "relationship.snapshot"
 RELATIONSHIP_SNAPSHOT_CONTRACT_MAJOR = "1"
@@ -354,6 +355,8 @@ class ConversationalFlowPlugin(Star):
             "total_requests": 0,
         }
 
+        self.pages_api_available = self._register_pages_web_api()
+
         self.logger.info(
             "[conv-flow] plugin loaded: version=%s, silence=%s/%s, "
             "chunking=%s, image_intent=%s, interrupt=%s/%s(scope=%s,window=%sms), "
@@ -397,6 +400,109 @@ class ConversationalFlowPlugin(Star):
             "version": __version__,
         }
 
+    def _status_payload(self) -> dict[str, object]:
+        """standalone Page 与 managed 面板共用的只读状态载荷。"""
+        return {
+            "success": True,
+            "plugin": {"name": PLUGIN_NAME, "version": __version__},
+            "features": {
+                "silence": bool(self.config.silence_enabled),
+                "chunking": bool(self.config.chunking_enabled),
+                "image_intent": bool(self.config.image_intent_mode),
+                "interrupt": bool(self.config.interrupt_enabled),
+                "group_context": bool(self.config.group_context_enabled),
+                "steering": self.config.interrupt_mode == "steering",
+            },
+            "stats": dict(self._stats),
+            "pages_api_available": bool(getattr(self, "pages_api_available", False)),
+        }
+
+    @staticmethod
+    def _json_response(payload: dict[str, object], status: int = 200):
+        try:
+            from astrbot.api.web import json_response
+
+            return json_response(payload, status_code=status)
+        except Exception:
+            return payload if status == 200 else (payload, status)
+
+    def _register_pages_web_api(self) -> bool:
+        register = getattr(self.context, "register_web_api", None)
+        if not callable(register):
+            return False
+        try:
+            register(f"/{PLUGIN_NAME}/status", self._pages_status, ["GET"], "对话流运行状态")
+            register(f"/{PLUGIN_NAME}/config", self._pages_config, ["GET"], "对话流只读配置")
+            return True
+        except Exception:
+            return False
+
+    async def _pages_status(self):
+        return self._json_response(self._status_payload())
+
+    async def _pages_config(self):
+        return self._json_response(
+            {
+                "success": True,
+                "config": {
+                    "silence_enabled": bool(self.config.silence_enabled),
+                    "silence_strategy": self.config.silence_strategy,
+                    "chunking_enabled": bool(self.config.chunking_enabled),
+                    "chunking_min_length": self.config.chunking_min_length,
+                    "interrupt_enabled": bool(self.config.interrupt_enabled),
+                    "interrupt_mode": self.config.interrupt_mode,
+                    "interrupt_scope": self.config.interrupt_scope,
+                    "group_context_enabled": bool(self.config.group_context_enabled),
+                },
+            }
+        )
+
+    def webui_panels_contract(self) -> dict[str, object]:
+        """series.webui@1.0：核统一接管时提供只读对话流状态。"""
+        return {
+            "name": "series.webui@1.0",
+            "version": "1.0",
+            "plugin_id": PLUGIN_NAME,
+            "series_id": "ningxin_suxi",
+            "standalone": {"available": True, "entry": "/pages/manager", "pages": ["manager"]},
+            "panels": [
+                {
+                    "id": "status",
+                    "title": "对话流状态",
+                    "description": "只读查看沉默、分段、steering 与群聊上下文状态",
+                }
+            ],
+        }
+
+    def webui_panel_data(self, panel: str) -> dict[str, object]:
+        if panel != "status":
+            return {"success": False, "error": "UNKNOWN_PANEL"}
+        payload = self._status_payload()
+        features = payload.get("features") if isinstance(payload.get("features"), dict) else {}
+        stats = payload.get("stats") if isinstance(payload.get("stats"), dict) else {}
+        rows = [
+            {"item": "沉默判断", "value": "开启" if features.get("silence") else "关闭"},
+            {"item": "智能分段", "value": "开启" if features.get("chunking") else "关闭"},
+            {"item": "图片意图", "value": "开启" if features.get("image_intent") else "关闭"},
+            {"item": "插话中断", "value": "开启" if features.get("interrupt") else "关闭"},
+            {"item": "steering", "value": "开启" if features.get("steering") else "关闭"},
+            {"item": "群聊上下文", "value": "开启" if features.get("group_context") else "关闭"},
+            {"item": "总请求", "value": stats.get("total_requests", 0)},
+            {"item": "沉默", "value": stats.get("silenced", 0)},
+            {"item": "分段", "value": stats.get("chunked", 0)},
+            {"item": "插话", "value": stats.get("interrupted", 0)},
+        ]
+        return {
+            "success": True,
+            "title": "对话流状态",
+            "columns": [{"key": "item", "label": "项目"}, {"key": "value", "label": "状态"}],
+            "rows": rows,
+            "actions": [],
+        }
+
+    def webui_panel_action(self, panel: str, action: str, payload: dict) -> dict[str, object]:
+        return {"success": False, "error": "UNKNOWN_ACTION"}
+
     def series_module_contract(self) -> dict[str, object]:
         """series.module@1.0：声明模块身份、独立入口与统一接管能力。"""
         return {
@@ -407,12 +513,12 @@ class ConversationalFlowPlugin(Star):
             "display_name": "言",
             "role": "conversation",
             "standalone": {
-                "available": false,
-                "entry": "",
-                "pages": [],
+                "available": True,
+                "entry": "/pages/manager",
+                "pages": ["manager"],
             },
-            "capabilities": ["control", "diagnostics", "proactive_delivery", "steering"],
-            "panels": [],
+            "capabilities": ["control", "diagnostics", "proactive_delivery", "steering", "webui"],
+            "panels": ["status"],
         }
 
     def diagnostic_log_contract(self) -> dict[str, object]:

@@ -1,0 +1,18 @@
+:root { color-scheme: light dark; font-family: system-ui, -apple-system, "Segoe UI", sans-serif; }
+body { margin: 0; background: #f5f7fb; color: #1f2937; }
+.shell { max-width: 960px; margin: 0 auto; padding: 28px 20px 48px; }
+.hero { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; }
+.eyebrow { margin: 0 0 6px; font-size: 12px; letter-spacing: .08em; text-transform: uppercase; color: #64748b; }
+h1 { margin: 0 0 6px; font-size: 28px; }
+h2 { margin: 0 0 14px; font-size: 18px; }
+p { margin: 0; color: #475569; }
+button { border: 0; border-radius: 8px; padding: 9px 16px; background: #2563eb; color: #fff; cursor: pointer; }
+.cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; margin: 24px 0; }
+.card, .metric { background: #fff; border-radius: 12px; padding: 16px; box-shadow: 0 1px 3px rgba(15,23,42,.08); }
+.metric span { display: block; color: #64748b; font-size: 13px; }
+.metric strong { display: block; margin-top: 6px; font-size: 24px; }
+.feature-list { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 10px; }
+.feature { display: flex; justify-content: space-between; gap: 10px; padding: 10px 12px; border-radius: 8px; background: #f8fafc; }
+.note { margin-top: 20px; font-size: 13px; }
+.alert { margin: 16px 20px 0; padding: 10px 12px; border-radius: 8px; }
+.error { background: #fee2e2; color: #991b1b; }
