@@ -1,5 +1,13 @@
 ## [Unreleased]
 
+## 0.12.6 - 2026-09-14
+
+### 变更
+
+- 接入联动健康生产者：identity / relationship / environment 契约检查写入 record_link_state（METHOD_MISSING / DECLARE_FAILED / CONTRACT_VERSION_UNSUPPORTED / ready）。
+- 诊断契约升级到 series.diagnostics@1.1：新增只读 diagnostic_state()。
+- 字段级 i18n（选项 labels + en-US）与页面未保存守卫。
+
 ## 0.12.5 - 2026-09-14
 
 ### 变更

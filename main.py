@@ -123,10 +123,17 @@ from .series_diagnostics import (
     diagnostic_event,
     diagnostic_events as read_diagnostic_events,
     logger,
+    record_link_state as record_diagnostic_link,
 )
 
-__version__ = "0.12.5"
+__version__ = "0.12.6"
 PLUGIN_NAME = "astrbot_plugin_conversation_flow"
+# 契约前缀 -> 对端插件 id（用于联动健康链路标识）
+_LINK_PEER_BY_CONTRACT_PREFIX = {
+    "identity": "astrbot_plugin_identity_guardian",
+    "relationship": "astrbot_plugin_relationship",
+    "environment": "astrbot_plugin_environment_awareness",
+}
 _SCHEMA_FILE_PATH = pathlib.Path(__file__).with_name("_conf_schema.json")
 _PAGE_FIELD_TYPES = frozenset({"bool", "int", "float", "string", "list"})
 
@@ -838,15 +845,20 @@ class ConversationalFlowPlugin(Star):
     def diagnostic_log_contract(self) -> dict[str, object]:
         return {
             "name": "series.diagnostics",
-            "version": "1.0",
+            "version": "1.1",
             "series_id": "ningxin_suxi",
             "plugin_id": "astrbot_plugin_conversation_flow",
             "plugin_name": "言",
-            "capabilities": ("read", "clear", "read_events", "clear_events"),
+            "capabilities": ("read", "clear", "read_state", "read_events", "clear_events"),
             "storage": "memory_only",
             "astrbot_log_propagation": False,
         }
 
+    def diagnostic_state(self) -> dict[str, Any]:
+        """series.diagnostics@1.1 可选能力：返回当前联动状态（纯读，不产生事件）。"""
+        from .series_diagnostics import diagnostic_state_payload
+
+        return diagnostic_state_payload()
     def diagnostic_events(self, after_seq: int = 0, limit: int = 200) -> dict[str, Any]:
         return read_diagnostic_events(after_seq=after_seq, limit=limit)
 
@@ -4301,20 +4313,56 @@ class ConversationalFlowPlugin(Star):
             )
             return None
 
+    def _record_contract_link(
+        self,
+        name: str,
+        method: str,
+        state: str,
+        reason_code: str = "",
+        *,
+        version: str = "",
+        fallback: str = "",
+    ) -> None:
+        """把一条联动契约的健康状态写入 series.diagnostics@1.1（纯本地缓存）。"""
+        record_diagnostic_link(
+            f"conversation_flow->{name}",
+            state=state,
+            peer_plugin_id=_LINK_PEER_BY_CONTRACT_PREFIX.get(
+                str(name).split(".", 1)[0], ""
+            ),
+            contract=str(name),
+            contract_version=str(version),
+            method=str(method),
+            reason_code=reason_code,
+            fallback=fallback,
+        )
+
     def _contract_compatible(
         self, provider: Any, declaration_method: str, name: str, major: str
     ) -> bool:
         declare = getattr(provider, declaration_method, None)
         if not callable(declare):
             self._warn_contract_once(name, f"missing {declaration_method}()")
+            self._record_contract_link(
+                name, declaration_method, "unavailable", "METHOD_MISSING",
+                fallback="该联动不可用，已跳过",
+            )
             return False
         try:
             contract = declare()
         except Exception as exc:
             self._warn_contract_once(name, f"declaration failed: {type(exc).__name__}")
+            self._record_contract_link(
+                name, declaration_method, "unavailable", "DECLARE_FAILED",
+                fallback="该联动不可用，已跳过",
+            )
             return False
         if not isinstance(contract, dict):
             self._warn_contract_once(name, "declaration is not a mapping")
+            self._record_contract_link(
+                name, declaration_method, "unavailable", "INVALID_DECLARATION",
+                fallback="该联动不可用，已跳过",
+            )
             return False
         version = str(contract.get("version") or "")
         compatible = contract.get("name") == name and version.split(".", 1)[0] == major
@@ -4323,6 +4371,19 @@ class ConversationalFlowPlugin(Star):
                 name,
                 f"got name={contract.get('name')!r} version={version!r}",
             )
+            reason = (
+                "CONTRACT_VERSION_UNSUPPORTED"
+                if contract.get("name") == name
+                else "CONTRACT_UNSUPPORTED"
+            )
+            self._record_contract_link(
+                name, declaration_method, "unavailable", reason,
+                version=version, fallback="该联动不可用，已跳过",
+            )
+            return False
+        self._record_contract_link(
+            name, declaration_method, "ready", "OK", version=version
+        )
         return compatible
 
     def _relationship_offense_provider(self) -> Any | None:

@@ -1,0 +1,68 @@
+{
+  "config": {
+    "沉默判断": {
+      "silence_strategy": {
+        "labels": [
+          "Instruction injection",
+          "Independent prejudgment",
+          "Both"
+        ]
+      }
+    },
+    "分段延迟": {
+      "chunking_delay_mode": {
+        "labels": [
+          "Fixed delay",
+          "Per character"
+        ]
+      }
+    },
+    "插话中断": {
+      "interrupt_mode": {
+        "labels": [
+          "Task steering",
+          "Fixed time window"
+        ]
+      },
+      "interrupt_scope": {
+        "labels": [
+          "Any message in room",
+          "Same sender only",
+          "Same sender or explicit @Bot"
+        ]
+      },
+      "interrupt_merge_strategy": {
+        "labels": [
+          "Append context",
+          "Rewrite and merge",
+          "Discard old response"
+        ]
+      }
+    },
+    "引用回复": {
+      "reply_quote_mode": {
+        "labels": [
+          "Off",
+          "Probability",
+          "LLM decides"
+        ]
+      }
+    },
+    "通用": {
+      "log_level": {
+        "labels": [
+          "Debug",
+          "Info",
+          "Warning",
+          "Error"
+        ]
+      }
+    }
+  },
+  "pages": {
+    "manager": {
+      "title": "Conversation Flow",
+      "description": "Configure silence handling, chunked delivery, interruption, quoting, and logging"
+    }
+  }
+}

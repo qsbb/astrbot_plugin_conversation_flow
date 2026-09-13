@@ -230,6 +230,22 @@ const settingsDirtyNode = document.getElementById("settings-dirty");
 const settingsNoticeNode = document.getElementById("settings-notice");
 const settingsSaveButton = document.getElementById("settings-save");
 const settingsResetButton = document.getElementById("settings-reset");
+const showUnsavedConfirm = window.SeriesUI.confirm;
+
+function hasUnsavedChanges() {
+  return dirtyKeys.size > 0;
+}
+
+async function confirmDiscardChanges() {
+  if (!hasUnsavedChanges()) return true;
+  return (await showUnsavedConfirm({
+    title: "未保存的修改",
+    message: "当前页面还有未保存的改动，离开将放弃这些改动。",
+    confirmText: "放弃修改",
+    cancelText: "继续编辑",
+    danger: true,
+  })) === true;
+}
 
 function settingsControl(field, value) {
   const key = escapeHtml(field.key);
@@ -426,6 +442,16 @@ settingsGroupsNode?.addEventListener("change", (event) => {
 settingsSaveButton?.addEventListener("click", saveSettings);
 settingsResetButton?.addEventListener("click", resetSettings);
 
-document.getElementById("refresh")?.addEventListener("click", load);
+document.getElementById("refresh")?.addEventListener("click", async () => {
+  if (!await confirmDiscardChanges()) return;
+  await load();
+});
+
+window.addEventListener("beforeunload", (event) => {
+  if (!hasUnsavedChanges()) return;
+  event.preventDefault();
+  event.returnValue = "";
+});
+
 renderLoading();
 load();
