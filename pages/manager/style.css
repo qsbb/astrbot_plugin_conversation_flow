@@ -378,11 +378,6 @@
   min-width: 0;
 }
 
-.settings-control input[type="checkbox"] {
-  width: 18px;
-  height: 18px;
-}
-
 @media (max-width: 760px) {
   .settings-grid {
     grid-template-columns: 1fr;

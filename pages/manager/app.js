@@ -250,7 +250,7 @@ async function confirmDiscardChanges() {
 function settingsControl(field, value) {
   const key = escapeHtml(field.key);
   if (field.type === "bool") {
-    return `<input type="checkbox" data-key="${key}" ${value ? "checked" : ""} aria-label="${escapeHtml(field.description)}" />`;
+    return `<input type="checkbox" class="si-toggle" data-key="${key}" ${value ? "checked" : ""} aria-label="${escapeHtml(field.description)}" />`;
   }
   if (Array.isArray(field.options) && field.options.length) {
     const options = field.options
