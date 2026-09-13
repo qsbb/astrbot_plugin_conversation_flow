@@ -25,7 +25,7 @@ def test_conversation_page_surfaces_grouped_stats_and_stale_state() -> None:
     ):
         assert key in js
     assert "当前显示的是" in js
-    assert "插话引导（steering）" in js
+    assert 'steering: "插话引导"' in js
     assert "scene_hinted" in js
     assert "mood_hinted" in js
     assert 'id="config-summary"' in html
@@ -67,7 +67,10 @@ def test_conversation_page_puts_ratio_kpis_first_and_lists_full_config() -> None
     assert ".ratio-grid" in css
     assert ".ratio-metric strong" in css
     # 加载骨架与最终结构（比率组 + 3 个统计组）保持一致
-    assert "正在读取关键比率" in js
+    assert '<h2>关键比率</h2>' in js
+    # 骨架顺序必须与真实结构一致：关键比率在统计组之前
+    skeleton = js[js.index('document.getElementById("stats").innerHTML'):js.index('function render(data)')]
+    assert skeleton.index('ratio-group') < skeleton.index('statGroups.map')
     assert "metric.repeat(group.keys.length)" in js
 
     # 配置摘要覆盖后端返回的全部 8 项，缺失值显示 —

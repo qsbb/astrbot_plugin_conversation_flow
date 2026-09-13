@@ -7,7 +7,7 @@ const featureLabels = {
   chunking: "智能分段",
   image_intent: "图片意图",
   interrupt: "插话中断",
-  steering: "插话引导（steering）",
+  steering: "插话引导",
   group_context: "群聊上下文"
 };
 const statLabels = {
@@ -64,8 +64,8 @@ function renderLoading({ replace = true } = {}) {
   if (!replace) return;
   const metric = '<article class="metric skeleton-card"><span></span><strong></strong></article>';
   const feature = '<div class="feature skeleton-card"><span></span><strong></strong></div>';
-  document.getElementById("stats").innerHTML = `<section class="stat-group"><div class="stat-group-head"><h2>正在读取运行状态</h2><span>…</span></div><div class="metric-grid">${metric.repeat(4)}</div></section>`
-    + `<section class="stat-group"><div class="stat-group-head"><h2>正在读取关键比率</h2><span>…</span></div><div class="metric-grid">${metric.repeat(4)}</div></section>`
+  // 骨架必须与 render() 的最终结构同序（关键比率 → 各统计组），避免加载完成后整块重排。
+  document.getElementById("stats").innerHTML = `<section class="stat-group ratio-group"><div class="stat-group-head"><h2>关键比率</h2><span>…</span></div><div class="metric-grid ratio-grid">${metric.repeat(4)}</div></section>`
     + statGroups.map((group) => `<section class="stat-group"><div class="stat-group-head"><h2>${group.title}</h2><span>…</span></div><div class="metric-grid">${metric.repeat(group.keys.length)}</div></section>`).join("");
   document.getElementById("features").innerHTML = feature.repeat(6);
   document.getElementById("config-summary").innerHTML = feature.repeat(4);
@@ -132,12 +132,19 @@ function renderConfig(data) {
     ["interrupt_scope", "插话作用域"],
     ["group_context_enabled", booleanLabels.group_context_enabled],
   ];
+  // 配置枚举值一律转成中文功能名，界面上不再出现 inject / steering / sender 这类内部值。
+  const configValueLabels = {
+    silence_strategy: { inject: "指令注入", prejudge: "独立预判", both: "两者结合" },
+    interrupt_mode: { steering: "运行中插话归属", window: "固定时间窗" },
+    interrupt_scope: { room: "本群任何新消息", sender: "仅同一发送者", mention_or_sender: "同一发送者或 @Bot" },
+  };
   const formatConfigValue = (key, value) => {
     if (Object.prototype.hasOwnProperty.call(booleanLabels, key)) {
       return value === true ? "开启" : value === false ? "关闭" : "—";
     }
     if (value === null || value === undefined || value === "") return "—";
-    return escapeHtml(value);
+    const mapped = configValueLabels[key] && configValueLabels[key][value];
+    return escapeHtml(mapped || value);
   };
   host.innerHTML = entries
     .map(([key, label]) => `<div class="feature"><span>${label}</span><strong>${formatConfigValue(key, config[key])}</strong></div>`)
@@ -187,7 +194,8 @@ async function load() {
       document.getElementById("features").innerHTML = '<p class="empty-state">能力状态暂不可用，请刷新重试。</p>';
       document.getElementById("config-summary").innerHTML = '<p class="empty-state">配置摘要暂不可用，请刷新重试。</p>';
     }
-    if (window.SeriesUI && typeof window.SeriesUI.toast === "function") {
+    // 已有旧数据时用内联横幅说明（stale），不再叠加 toast；首次失败才用 toast 提升可见性。
+    if (!lastUpdated && window.SeriesUI && typeof window.SeriesUI.toast === "function") {
       window.SeriesUI.toast(message, "error");
     }
   } finally {
