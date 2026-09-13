@@ -124,7 +124,7 @@ from .series_diagnostics import (
     logger,
 )
 
-__version__ = "0.12.2"
+__version__ = "0.12.3"
 PLUGIN_NAME = "astrbot_plugin_conversation_flow"
 RELATIONSHIP_PLUGIN_NAME = "astrbot_plugin_relationship"
 RELATIONSHIP_SNAPSHOT_CONTRACT_NAME = "relationship.snapshot"
@@ -196,6 +196,22 @@ SERIES_PROMPT_OWNERS = (
     OWNER_ACTIVE_LEARNER,
     OWNER_RELATIONSHIP,
 )
+
+# 核 WebUI 面板展示用的中文枚举映射（与 pages/manager 旧页面保持同一口径）。
+_PANEL_SILENCE_STRATEGY_LABELS = {
+    "inject": "指令注入",
+    "prejudge": "独立预判",
+    "both": "两者结合",
+}
+_PANEL_INTERRUPT_MODE_LABELS = {
+    "steering": "运行中插话归属",
+    "window": "固定时间窗",
+}
+_PANEL_INTERRUPT_SCOPE_LABELS = {
+    "room": "本群任何新消息",
+    "sender": "仅同一发送者",
+    "mention_or_sender": "同一发送者或 @Bot",
+}
 
 
 def _optional_event_filter(name: str):
@@ -487,12 +503,38 @@ class ConversationalFlowPlugin(Star):
             ],
         }
 
+    @staticmethod
+    def _panel_rate(stats: dict[str, object], keys: tuple[str, ...]) -> str:
+        """按独立 Page 的既有口径计算比率，总请求为 0 时显示占位符。"""
+        try:
+            total = int(stats.get("total_requests") or 0)
+        except (TypeError, ValueError):
+            total = 0
+        if total <= 0:
+            return "—"
+        hit = 0
+        for key in keys:
+            try:
+                hit += int(stats.get(key) or 0)
+            except (TypeError, ValueError):
+                continue
+        return f"{hit / total * 100:.1f}%"
+
+    @staticmethod
+    def _panel_label(value: object, labels: dict[str, str]) -> str:
+        """把内部枚举值渲染成中文功能名，未知值原样透出。"""
+        text = str(value or "").strip()
+        if not text:
+            return "—"
+        return labels.get(text, text)
+
     def webui_panel_data(self, panel: str) -> dict[str, object]:
         if panel != "status":
             return {"success": False, "error": "UNKNOWN_PANEL"}
         payload = self._status_payload()
         features = payload.get("features") if isinstance(payload.get("features"), dict) else {}
         stats = payload.get("stats") if isinstance(payload.get("stats"), dict) else {}
+        config = self.config
         rows = [
             {"item": "沉默判断", "value": "开启" if features.get("silence") else "关闭"},
             {"item": "智能分段", "value": "开启" if features.get("chunking") else "关闭"},
@@ -503,9 +545,9 @@ class ConversationalFlowPlugin(Star):
             {
                 "item": "上下文预算",
                 "value": (
-                    f"{self.config.context_budget_mode_label()} "
-                    f"(软 {self.config.context_budget_soft_limit} / "
-                    f"硬 {self.config.context_budget_hard_limit})"
+                    f"{config.context_budget_mode_label()} "
+                    f"(软 {config.context_budget_soft_limit} / "
+                    f"硬 {config.context_budget_hard_limit})"
                 ),
             },
             {"item": "预算裁剪", "value": stats.get("context_budget_trimmed", 0)},
@@ -513,6 +555,40 @@ class ConversationalFlowPlugin(Star):
             {"item": "沉默", "value": stats.get("silenced", 0)},
             {"item": "分段", "value": stats.get("chunked", 0)},
             {"item": "插话", "value": stats.get("interrupted", 0)},
+            {"item": "沉默率", "value": self._panel_rate(stats, ("silenced",))},
+            {"item": "分段率", "value": self._panel_rate(stats, ("chunked",))},
+            {"item": "插话合并率", "value": self._panel_rate(stats, ("interrupted",))},
+            {
+                "item": "上下文拦截率",
+                "value": self._panel_rate(
+                    stats, ("intercepted", "air_guarded", "scene_guarded")
+                ),
+            },
+            {
+                "item": "沉默策略",
+                "value": self._panel_label(
+                    getattr(config, "silence_strategy", ""),
+                    _PANEL_SILENCE_STRATEGY_LABELS,
+                ),
+            },
+            {
+                "item": "分段最小长度",
+                "value": getattr(config, "chunking_min_length", "—"),
+            },
+            {
+                "item": "插话模式",
+                "value": self._panel_label(
+                    getattr(config, "interrupt_mode", ""),
+                    _PANEL_INTERRUPT_MODE_LABELS,
+                ),
+            },
+            {
+                "item": "插话作用域",
+                "value": self._panel_label(
+                    getattr(config, "interrupt_scope", ""),
+                    _PANEL_INTERRUPT_SCOPE_LABELS,
+                ),
+            },
         ]
         return {
             "success": True,

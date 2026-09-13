@@ -3322,15 +3322,49 @@ class ConversationWebUIPanelTests(unittest.TestCase):
 
         plugin = object.__new__(ConversationalFlowPlugin)
         plugin.config = build_plugin_config({})
-        plugin._stats = {"total_requests": 3, "silenced": 1}
+        plugin._stats = {
+            "total_requests": 8,
+            "silenced": 2,
+            "chunked": 4,
+            "interrupted": 1,
+            "intercepted": 1,
+            "air_guarded": 1,
+            "scene_guarded": 2,
+        }
 
         contract = plugin.webui_panels_contract()
         self.assertEqual(contract["name"], "series.webui@2.0")
         self.assertEqual(contract["standalone"]["entry"], "/pages/manager")
+        self.assertEqual(contract["standalone"]["pages"], ["manager"])
         data = plugin.webui_panel_data("status")
         self.assertTrue(data["success"])
-        self.assertIn("总请求", str(data["rows"]))
+        self.assertEqual(data["actions"], [])
+        rows = {row["item"]: row["value"] for row in data["rows"]}
+        self.assertEqual(rows["总请求"], 8)
+        self.assertEqual(rows["沉默率"], "25.0%")
+        self.assertEqual(rows["分段率"], "50.0%")
+        self.assertEqual(rows["插话合并率"], "12.5%")
+        self.assertEqual(rows["上下文拦截率"], "50.0%")
+        self.assertEqual(rows["沉默策略"], "指令注入")
+        self.assertEqual(rows["分段最小长度"], 60)
+        self.assertEqual(rows["插话模式"], "运行中插话归属")
+        self.assertEqual(rows["插话作用域"], "仅同一发送者")
+        self.assertTrue(
+            all(isinstance(value, (str, int, float, bool)) for value in rows.values())
+        )
         self.assertEqual(plugin.webui_panel_action("status", "x", {})["success"], False)
+
+    def test_status_panel_ratios_fall_back_to_placeholder(self) -> None:
+        from astrbot_plugin_conversation_flow.main import ConversationalFlowPlugin
+
+        plugin = object.__new__(ConversationalFlowPlugin)
+        plugin.config = build_plugin_config({})
+        plugin._stats = {}
+
+        data = plugin.webui_panel_data("status")
+        rows = {row["item"]: row["value"] for row in data["rows"]}
+        for label in ("沉默率", "分段率", "插话合并率", "上下文拦截率"):
+            self.assertEqual(rows[label], "—")
 
 
 class InterruptScopeTests(unittest.TestCase):
