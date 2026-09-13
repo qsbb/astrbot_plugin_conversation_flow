@@ -16,14 +16,20 @@
         <div>
           <p class="eyebrow">AstrBot 插件管理页</p>
           <h1>凝心溯溪-言</h1>
-          <p>沉默判断、智能分段、插话 steering 与群聊上下文状态</p>
+          <p>沉默判断、智能分段、插话引导（steering）与群聊上下文状态</p>
+          <p id="plugin-meta" class="meta-line">版本读取中</p>
         </div>
         <button id="refresh" type="button">刷新</button>
       </header>
-      <section class="cards" id="stats"></section>
+      <p id="stale-notice" class="alert warning" role="status" hidden></p>
+      <section id="stats" class="stat-groups" aria-label="运行统计"></section>
       <section class="card">
-        <h2>功能开关</h2>
+        <h2>能力状态</h2>
         <div id="features" class="feature-list"></div>
+      </section>
+      <section class="card">
+        <h2>当前配置摘要</h2>
+        <div id="config-summary" class="feature-list"><p class="empty-state">读取中…</p></div>
       </section>
       <p class="note">配置修改请在 AstrBot 插件配置中进行；核安装后可在核 WebUI 统一查看本面板。</p>
     </main>
