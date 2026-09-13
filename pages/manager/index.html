@@ -3,22 +3,49 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>凝心溯溪-言 · 功能入口已并入核 WebUI</title>
-    <link rel="stylesheet" href="./style.css?v=0.12.4-1" />
-    <link rel="stylesheet" href="./series-ui.css?v=0.12.4-1" />
+    <title>凝心溯溪-言 · 对话流状态</title>
+    <link rel="stylesheet" href="./style.css?v=0.12.5-1" />
+        <link rel="stylesheet" href="./series-ui.css?v=0.12.5-1" />
   </head>
   <body data-series-ui="1">
+    <p id="bridge-error" class="alert error" role="alert" hidden>
+      页面通信组件没有加载，请从 AstrBot 插件详情重新打开本页。
+    </p>
     <main class="shell">
-      <section class="card" aria-labelledby="migration-title">
-        <p class="eyebrow">AstrBot 插件管理页</p>
-        <h1 id="migration-title">凝心溯溪-言</h1>
-        <p>
-          对话流状态与配置摘要已并入核 WebUI「系列接管 → 对话与消息 → 插件面板」；
-          未安装核时，可用 <code>/convflow status</code> 命令查看运行状态，并在 AstrBot 原生插件配置页调整设置。
-        </p>
+      <header class="hero">
+        <div>
+          <p class="eyebrow">AstrBot 插件管理页</p>
+          <h1>凝心溯溪-言</h1>
+          <p>沉默判断、智能分段、插话引导与群聊上下文状态</p>
+          <p id="plugin-meta" class="meta-line">版本读取中</p>
+        </div>
+        <button id="refresh" type="button">刷新</button>
+      </header>
+      <p id="stale-notice" class="alert warning" role="status" hidden></p>
+      <section id="stats" class="stat-groups" aria-label="运行统计"></section>
+      <section class="card">
+        <h2>能力状态</h2>
+        <div id="features" class="feature-list"></div>
+      </section>
+      <section class="card">
+        <h2>当前配置摘要</h2>
+        <div id="config-summary" class="feature-list"><p class="empty-state">读取中…</p></div>
+      </section>
+      <section class="card" id="settings-card">
+        <div class="card-head">
+          <h2>设置</h2>
+          <span id="settings-dirty" class="dirty-badge" hidden></span>
+          <span class="card-head-spacer"></span>
+          <button id="settings-reset" type="button" disabled>撤销修改</button>
+          <button id="settings-save" type="button" class="primary" disabled>保存修改</button>
+        </div>
+        <p id="settings-notice" class="alert warning" role="status" hidden></p>
+        <div id="settings-groups"><p class="empty-state">读取中…</p></div>
+        <p class="note">保存后立即生效并持久化到本地配置；安装核后同一份配置也可在核 WebUI 字段接管中调整，被核覆盖层接管的项会标注「核已覆盖」。</p>
       </section>
     </main>
-    <script src="./series-ui.js?v=0.12.4-1"></script>
-    <script type="module" src="./app.js?v=0.12.4-1"></script>
+    <script src="/api/plugin/page/bridge-sdk.js"></script>
+    <script src="./series-ui.js?v=0.12.5-1"></script>
+    <script type="module" src="./app.js?v=0.12.5-1"></script>
   </body>
 </html>

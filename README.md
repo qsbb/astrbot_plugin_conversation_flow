@@ -19,7 +19,7 @@
 
 - 版本号以 `metadata.yaml` 的 `version` 为唯一事实源，代码侧引用 `main.__version__`；本文档不登记具体版本号。AstrBot 兼容范围：`>=4.16,<5`。
 - 命令入口：`/convflow` 命令组，支持 `status`、`config`、`reload`、`set`、`silence_test`、`air_reset`、`followup_reset`、`mood_reset`、`reset_stats`、`help`。
-- 页面入口：`pages/manager` 为引导页；对话流状态与配置摘要已并入核 WebUI「系列接管 → 对话与消息」，未安装核时可用 `/convflow` 命令与 AstrBot 原生插件配置页。
+- 页面入口：`pages/manager` 提供对话流运行状态、能力开关与配置摘要（只读）；配置在 AstrBot Dashboard 插件配置页编辑，运行时也可用 `/convflow set` 命令；安装核后同一信息也会聚合到核 WebUI「系列接管 → 对话与消息」（两处并存，未安装核时页面照常可用）。
 
 ### 系列诊断日志
 

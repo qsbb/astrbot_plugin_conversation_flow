@@ -125,8 +125,19 @@ from .series_diagnostics import (
     logger,
 )
 
-__version__ = "0.12.4"
+__version__ = "0.12.5"
 PLUGIN_NAME = "astrbot_plugin_conversation_flow"
+_SCHEMA_FILE_PATH = pathlib.Path(__file__).with_name("_conf_schema.json")
+_PAGE_FIELD_TYPES = frozenset({"bool", "int", "float", "string", "list"})
+
+
+def _web_request() -> Any:
+    """惰性取当前页面请求对象；测试环境或旧宿主不可用时返回 None。"""
+    try:
+        from astrbot.api.web import request
+    except Exception:
+        return None
+    return request
 RELATIONSHIP_PLUGIN_NAME = "astrbot_plugin_relationship"
 RELATIONSHIP_SNAPSHOT_CONTRACT_NAME = "relationship.snapshot"
 RELATIONSHIP_SNAPSHOT_CONTRACT_MAJOR = "1"
@@ -462,6 +473,8 @@ class ConversationalFlowPlugin(Star):
         try:
             register(f"/{PLUGIN_NAME}/status", self._pages_status, ["GET"], "对话流运行状态")
             register(f"/{PLUGIN_NAME}/config", self._pages_config, ["GET"], "对话流只读配置")
+            register(f"/{PLUGIN_NAME}/schema", self._pages_schema, ["GET"], "对话流配置结构")
+            register(f"/{PLUGIN_NAME}/config", self._pages_save_config, ["POST"], "保存对话流配置")
             return True
         except Exception:
             return False
@@ -483,6 +496,208 @@ class ConversationalFlowPlugin(Star):
                     "interrupt_scope": self.config.interrupt_scope,
                     "group_context_enabled": bool(self.config.group_context_enabled),
                 },
+            }
+        )
+
+    # ------------------------------------------------------------------
+    # Plugin Page 设置中心（standalone 配置编辑，与运行内核共用同一状态）
+    # ------------------------------------------------------------------
+
+    def _page_schema_fields(self) -> dict[str, dict[str, Any]]:
+        """加载 _conf_schema.json 并归一化成页面可渲染的字段表。"""
+        cached = getattr(self, "_page_schema_cache", None)
+        if cached is not None:
+            return cached
+        fields: dict[str, dict[str, Any]] = {}
+        try:
+            raw = json.loads(_SCHEMA_FILE_PATH.read_text(encoding="utf-8"))
+        except Exception as exc:
+            self.logger.warning("[conv-flow] failed to read config schema: %s", exc)
+            raw = {}
+        if isinstance(raw, dict):
+            for key, spec in raw.items():
+                if not isinstance(spec, dict):
+                    continue
+                kind = str(spec.get("type") or "").strip().lower()
+                if kind not in _PAGE_FIELD_TYPES:
+                    continue
+                description = str(spec.get("description") or "")
+                group = "其它"
+                match = re.match(r"^\[([^\]]+)\]\s*(.*)$", description)
+                if match:
+                    group = match.group(1).strip() or group
+                    description = match.group(2).strip()
+                fields[str(key)] = {
+                    "key": str(key),
+                    "type": kind,
+                    "group": group,
+                    "description": description or str(key),
+                    "hint": str(spec.get("hint") or ""),
+                    "options": [str(item) for item in (spec.get("options") or [])],
+                    "default": spec.get("default"),
+                    "minimum": spec.get("minimum"),
+                    "maximum": spec.get("maximum"),
+                    "special": str(spec.get("_special") or ""),
+                }
+        self._page_schema_cache = fields
+        return fields
+
+    @staticmethod
+    def _page_value_for_json(value: Any, spec: dict[str, Any]) -> Any:
+        kind = str(spec.get("type") or "")
+        if kind == "bool":
+            return bool(value)
+        if kind == "int":
+            try:
+                return int(value)
+            except (TypeError, ValueError):
+                return spec.get("default")
+        if kind == "float":
+            try:
+                return float(value)
+            except (TypeError, ValueError):
+                return spec.get("default")
+        if kind == "list":
+            if isinstance(value, (list, tuple, set, frozenset)):
+                return [str(item) for item in value]
+            text = str(value or "")
+            return [item.strip() for item in re.split(r"[\n,]", text) if item.strip()]
+        return "" if value is None else str(value)
+
+    def _page_config_values(
+        self, fields: dict[str, dict[str, Any]]
+    ) -> dict[str, Any]:
+        """当前生效值（含核接管覆盖层）的快照。"""
+        values: dict[str, Any] = {}
+        for key, spec in fields.items():
+            values[key] = self._page_value_for_json(
+                getattr(self.config, key, spec.get("default")), spec
+            )
+        return values
+
+    def _page_overlay_keys(self) -> list[str]:
+        control = getattr(self, "_series_control", None)
+        if control is None or getattr(control, "_mode", "") != "managed":
+            return []
+        overlay = getattr(control, "_overlay", None)
+        return sorted(str(key) for key in overlay) if isinstance(overlay, dict) else []
+
+    @staticmethod
+    def _coerce_page_value(spec: dict[str, Any], value: Any) -> Any:
+        kind = str(spec.get("type") or "")
+        if kind == "bool":
+            if isinstance(value, bool):
+                return value
+            text = str(value).strip().lower()
+            if text in {"1", "true", "yes", "on", "开", "开启"}:
+                return True
+            if text in {"0", "false", "no", "off", "关", "关闭"}:
+                return False
+            raise ValueError("需要开关值")
+        if kind in {"int", "float"}:
+            if isinstance(value, bool):
+                raise ValueError("需要数字")
+            try:
+                number = int(value) if kind == "int" else float(value)
+            except (TypeError, ValueError):
+                raise ValueError("需要数字") from None
+            minimum, maximum = spec.get("minimum"), spec.get("maximum")
+            if isinstance(minimum, (int, float)) and number < minimum:
+                raise ValueError(f"不能小于 {minimum}")
+            if isinstance(maximum, (int, float)) and number > maximum:
+                raise ValueError(f"不能大于 {maximum}")
+            return number
+        if kind == "list":
+            if isinstance(value, (list, tuple, set, frozenset)):
+                items = [str(item).strip() for item in value]
+            else:
+                items = [
+                    item.strip() for item in re.split(r"[\n,]", str(value or ""))
+                ]
+            return [item for item in items if item]
+        text = "" if value is None else str(value).strip()
+        options = spec.get("options") or []
+        if options and text not in options:
+            raise ValueError("不在可选范围内")
+        return text
+
+    async def _pages_schema(self):
+        fields = self._page_schema_fields()
+        groups: list[str] = []
+        for spec in fields.values():
+            if spec["group"] not in groups:
+                groups.append(spec["group"])
+        return self._json_response(
+            {
+                "success": True,
+                "fields": list(fields.values()),
+                "groups": groups,
+                "values": self._page_config_values(fields),
+                "overridden": self._page_overlay_keys(),
+            }
+        )
+
+    async def _pages_save_config(self, request_obj: Any = None):
+        active_request = request_obj if request_obj is not None else _web_request()
+        if active_request is None:
+            payload = None
+        else:
+            try:
+                payload = await active_request.json(default={})
+            except Exception:
+                payload = None
+        if not isinstance(payload, dict):
+            return self._json_response(
+                {"success": False, "error": "请求格式错误"}, 400
+            )
+        updates = payload.get("config")
+        if not isinstance(updates, dict) or not updates:
+            return self._json_response(
+                {"success": False, "error": "没有需要保存的配置项"}, 400
+            )
+        fields = self._page_schema_fields()
+        candidate = dict(self._raw_config)
+        applied: list[str] = []
+        errors: list[str] = []
+        for raw_key, value in updates.items():
+            key = str(raw_key)
+            spec = fields.get(key)
+            if spec is None:
+                errors.append(f"{key}：未知配置项")
+                continue
+            try:
+                candidate[key] = self._coerce_page_value(spec, value)
+            except ValueError as exc:
+                errors.append(f"{key}：{exc}")
+                continue
+            applied.append(key)
+        if errors:
+            return self._json_response(
+                {"success": False, "error": "；".join(errors), "errors": errors}, 400
+            )
+        if "reply_quote_enabled" in applied:
+            candidate["reply_quote_mode"] = (
+                "llm_decides" if candidate.get("reply_quote_enabled") else "off"
+            )
+        elif "reply_quote_mode" in applied:
+            candidate.pop("reply_quote_enabled", None)
+        try:
+            normalized = normalize_config(candidate)
+            build_plugin_config(normalized)
+        except Exception as exc:
+            return self._json_response(
+                {"success": False, "error": f"配置不合法：{exc}"}, 400
+            )
+        self._raw_config = normalized
+        # 单写者：先落基础配置，再按当前模式重建（managed 时叠加核覆盖层）。
+        self._sync_series_control_runtime()
+        self._persist_local_config()
+        return self._json_response(
+            {
+                "success": True,
+                "updated": applied,
+                "values": self._page_config_values(fields),
+                "overridden": self._page_overlay_keys(),
             }
         )
 
