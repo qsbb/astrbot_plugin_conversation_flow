@@ -8,6 +8,11 @@ from typing import Any
 
 from .task_relation import task_relation, text_completeness
 
+# 思考中合并的护栏：连续取消重跑次数与单轮总时长上限。
+# 超过后退化为"排队下一轮"，避免用户连续补话把回复饿死。
+_THINKING_MERGE_MAX_RESTARTS = 3
+_THINKING_MERGE_MAX_SECONDS = 45.0
+
 
 @dataclass
 class PendingRequest:
@@ -20,6 +25,13 @@ class PendingRequest:
     sender_id: str = ""
     finished: bool = False
     response_started: bool = False
+    # 思考中合并的护栏与阶段标记：
+    # merge_restarts 记录本轮被取消重跑过几次；turn_started_at 是本轮最早一条
+    # 消息的时间（合并后继承）；continuation 表示新消息是在"她已开口、正在
+    # 投递"阶段到达，下一轮需要自然衔接。
+    merge_restarts: int = 0
+    turn_started_at: float = 0.0
+    continuation: bool = False
     # 这条消息是否像"还没说完"（前导语/逗号结尾/很短裸句），
     # 决定回复发出前是否留一个很短的提交缓冲。
     burst_open: bool = False
@@ -101,6 +113,7 @@ class ConversationTracker:
 
     SEQ_EXTRA_KEY = "conv_flow_seq"
     MERGE_HINT_EXTRA_KEY = "conv_flow_merge_hint"
+    CONTINUATION_EXTRA_KEY = "conv_flow_continuation_hint"
     UMO_EXTRA_KEY = "conv_flow_umo"
 
     def __init__(self, ttl_ms: int = 600000, max_history_turns: int = 3) -> None:
@@ -157,12 +170,7 @@ class ConversationTracker:
         state.cleanup_finished()
         now = time.time()
         window_s = self._interrupt_window_ms / 1000.0
-        return any(
-            not pending.finished
-            and pending.seq not in state.discarded
-            and (window_s <= 0 or (now - pending.started_at) <= window_s)
-            for pending in state.pending.values()
-        )
+        return bool(self._active_merge_candidates(state, now, window_s))
 
     def steering_applies(self, event: Any) -> bool:
         """公开只读判断：steering 是否适用于该事件。"""
@@ -195,6 +203,24 @@ class ConversationTracker:
             # room 作用域只共享会话 key；不同发送者允许抢占停止，
             # 但绝不能继承/合并对方的文本。
             return "preempt_only"
+        # 状态驱动：合并判据是她"开没开口"，不是间隔几秒。
+        # 她已经开始输出（分段投递中）→ 说出去的话不撤回，交给排队 + 衔接提示；
+        # 她还在思考（未产出）→ 用户补充的任何内容都算同一轮，直接合并；
+        # 只有连续取消重跑超预算时才退化排队，避免回复被饿死。
+        if pending.response_started:
+            return "new_task"
+        if self._merge_budget_exhausted(pending, now):
+            return "new_task"
+        return "same_task"
+
+    def _classify_task_relation_legacy(
+        self,
+        pending: PendingRequest,
+        new_text: str,
+        now: float,
+        event: Any,
+    ) -> str:
+        """旧的时间窗启发式判定（steering 主决策已不使用，保留供参考）。"""
         old_texts = [
             str(item).strip()
             for item in pending.user_texts
@@ -227,6 +253,34 @@ class ConversationTracker:
             return "same_task"
         return relation
 
+    def _active_merge_candidates(
+        self, state: ConversationState, now: float, window_s: float
+    ) -> list[PendingRequest]:
+        """仍在进行、可作为合并对象的 pending。
+
+        思考中（未产出）不受固定时间窗限制：只要她还没开口，用户补充的内容
+        都算同一轮；已产出（正在投递）才回落到时间窗内判定。
+        """
+        return [
+            pending
+            for pending in state.pending.values()
+            if not pending.finished
+            and pending.seq not in state.discarded
+            and (
+                not pending.response_started
+                or window_s <= 0
+                or (now - pending.started_at) <= window_s
+            )
+        ]
+
+    @staticmethod
+    def _merge_budget_exhausted(pending: PendingRequest, now: float) -> bool:
+        """连续取消重跑超预算后不再合并，改为排队，避免回复被饿死。"""
+        if pending.merge_restarts >= _THINKING_MERGE_MAX_RESTARTS:
+            return True
+        started = pending.turn_started_at or pending.started_at
+        return (now - started) > _THINKING_MERGE_MAX_SECONDS
+
     def classify_event_relation(self, event: Any, is_wake: bool = False) -> str:
         """在会话锁外预判新消息与活动任务的关系（不修改状态）。"""
         if not self._steering_applies(event):
@@ -235,13 +289,7 @@ class ConversationTracker:
         state.cleanup_finished()
         now = time.time()
         window_s = self._interrupt_window_ms / 1000.0
-        active = [
-            pending
-            for pending in state.pending.values()
-            if not pending.finished
-            and pending.seq not in state.discarded
-            and (window_s <= 0 or (now - pending.started_at) <= window_s)
-        ]
+        active = self._active_merge_candidates(state, now, window_s)
         if not active:
             return "new_task"
         primary = max(active, key=lambda item: item.started_at)
@@ -379,13 +427,7 @@ class ConversationTracker:
         old_texts: list[str] = []
         now = time.time()
         window_s = self._interrupt_window_ms / 1000.0
-        active_pending = [
-            p
-            for p in state.pending.values()
-            if not p.finished
-            and p.seq not in state.discarded
-            and (window_s <= 0 or (now - p.started_at) <= window_s)
-        ]
+        active_pending = self._active_merge_candidates(state, now, window_s)
 
         # mention_or_sender + 被唤醒：额外中断同群其他 sender 的 pending
         if (
@@ -460,6 +502,26 @@ class ConversationTracker:
                     old_captions=old_captions,
                 )
 
+        speaking_primary = (
+            max(active_pending, key=lambda item: item.started_at)
+            if active_pending
+            else None
+        )
+        # 她已经开始输出（分段投递中）时收到的新消息：不撤回旧回复，
+        # 作为下一轮处理，但要带上"接着回应、别重复"的衔接提示。
+        continuation = bool(
+            speaking_primary is not None
+            and speaking_primary.response_started
+            and not merge_candidates
+        )
+        if merge_candidates:
+            inherited_restarts = max(p.merge_restarts for p in merge_candidates) + 1
+            inherited_turn_start = min(
+                (p.turn_started_at or p.started_at) for p in merge_candidates
+            )
+        else:
+            inherited_restarts = 0
+            inherited_turn_start = now
         inherited_texts = old_texts if merge_hint else []
         inherited_times = old_times if merge_hint else []
         inherited_media = PendingMedia()
@@ -485,12 +547,21 @@ class ConversationTracker:
                 else inherited_times
             ),
             media=inherited_media,
+            merge_restarts=inherited_restarts,
+            turn_started_at=inherited_turn_start,
+            continuation=continuation,
         )
         state.last_user_text = user_text
         state.last_active_ts = time.time()
         self._set_extra(event, self.SEQ_EXTRA_KEY, seq)
         if merge_hint:
             self._set_extra(event, self.MERGE_HINT_EXTRA_KEY, merge_hint)
+        if continuation:
+            self._set_extra(
+                event,
+                self.CONTINUATION_EXTRA_KEY,
+                {"new_text": meaningful_user_text, "hint_ts": now},
+            )
         return seq
 
     def mark_response_started(self, event: Any) -> None:
@@ -548,6 +619,35 @@ class ConversationTracker:
         state = self._states.get(self._get_umo(event)) if seq is not None else None
         pending = state.pending.get(seq) if state is not None else None
         return pending.interrupt_token if pending is not None else {}
+
+    def has_continuation_hint(self, event: Any) -> bool:
+        """新消息是否在"她正在说话"时到达、需要下一轮自然衔接。"""
+        return bool(self._get_extra(event, self.CONTINUATION_EXTRA_KEY))
+
+    def get_continuation_hint(self, event: Any) -> dict[str, Any]:
+        """返回衔接提示所需信息：刚说过的话 + 用户补充的内容。"""
+        raw = self._get_extra(event, self.CONTINUATION_EXTRA_KEY)
+        if not isinstance(raw, dict):
+            return {}
+        seq = self._get_extra(event, self.SEQ_EXTRA_KEY)
+        state = self._states.get(self._get_umo(event))
+        if state is None:
+            return {}
+        pending = state.pending.get(seq) if isinstance(seq, int) else None
+        if pending is not None and not pending.continuation:
+            return {}
+        previous = state.last_bot_text
+        if not previous and state.recent_turns:
+            previous = state.recent_turns[-1].bot_text
+        try:
+            hint_ts = float(raw.get("hint_ts") or 0.0)
+        except (TypeError, ValueError):
+            hint_ts = 0.0
+        return {
+            "new_text": str(raw.get("new_text", "")),
+            "hint_ts": hint_ts,
+            "previous_bot_text": str(previous or ""),
+        }
 
     def has_merge_hint(self, event: Any) -> bool:
         return bool(self._get_extra(event, self.MERGE_HINT_EXTRA_KEY))

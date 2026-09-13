@@ -33,9 +33,9 @@ def test_conversation_page_keeps_series_ui_asset_order_and_cache_stamp() -> None
     ]
     assert all(position >= 0 for position in positions)
     assert positions == sorted(positions)
-    assert "style.css?v=0.12.3-1" in html
-    assert "series-ui.css?v=0.12.3-1" in html
-    assert "series-ui.js?v=0.12.3-1" in html
-    assert "app.js?v=0.12.3-1" in html
+    assert "style.css?v=0.12.4-1" in html
+    assert "series-ui.css?v=0.12.4-1" in html
+    assert "series-ui.js?v=0.12.4-1" in html
+    assert "app.js?v=0.12.4-1" in html
     assert (PAGE_DIR / "series-ui.css").is_file()
     assert (PAGE_DIR / "series-ui.js").is_file()

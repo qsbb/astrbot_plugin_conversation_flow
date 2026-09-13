@@ -1960,16 +1960,22 @@ class ConversationTrackerTests(unittest.TestCase):
         self.assertEqual(hint["previous_state"], "thinking")
         self.assertEqual(hint["old_texts"], ["第一句"])
 
-    def test_response_started_merges_without_experimental_flag(self) -> None:
+    def test_response_started_queues_next_turn_with_continuation(self) -> None:
+        """她已开口（正在投递）时的新消息不再撤回旧回复，改为排队 + 衔接提示。"""
         tracker = ConversationTracker()
         first = _Event("session", "第一句")
         second = _Event("session", "第二句")
         tracker.begin_request(first)
         tracker.mark_response_started(first)
+        tracker.record_response(first, "先把上一句说完。")
         tracker.begin_request(second)
-        hint = tracker.get_merge_hint(second)
-        self.assertEqual(hint["previous_state"], "response_started")
-        self.assertEqual(hint["old_texts"], ["第一句"])
+
+        self.assertFalse(tracker.is_discarded(first))
+        self.assertFalse(tracker.has_merge_hint(second))
+        self.assertTrue(tracker.has_continuation_hint(second))
+        hint = tracker.get_continuation_hint(second)
+        self.assertEqual(hint["previous_bot_text"], "先把上一句说完。")
+        self.assertEqual(hint["new_text"], "第二句")
 
     def test_finished_discarded_request_does_not_pollute_next_request(self) -> None:
         tracker = ConversationTracker()
@@ -3032,15 +3038,17 @@ class ReverseWakeTests(unittest.IsolatedAsyncioTestCase):
 
 
 class InterruptWindowTests(unittest.TestCase):
-    def test_expired_pending_not_interrupted(self) -> None:
+    def test_over_budget_pending_not_interrupted(self) -> None:
+        """思考中不再受时间窗约束；只有连续重跑超预算才停止合并。"""
         tracker = ConversationTracker()
         tracker.update_interrupt_config(window_ms=1000, scope="room")
         first = _Event("session", "第一句")
         tracker.begin_request(first)
-        # 手动把 pending 的 started_at 设为很久以前
+        # 把本轮开始时间拨回很久以前：连续重跑预算已耗尽。
         state = tracker.get_state("session")
         for p in state.pending.values():
             p.started_at = 0
+            p.turn_started_at = 0
         second = _Event("session", "第二句")
         tracker.begin_request(second)
         self.assertFalse(tracker.is_discarded(first))
@@ -3100,13 +3108,16 @@ class NativeFollowupDebounceTests(unittest.TestCase):
         self.assertEqual(calls, [second])
         self.assertTrue(second.get_extra(plugin.NATIVE_FOLLOWUP_BYPASSED_KEY))
 
-    def test_expired_turn_is_left_to_normal_core_flow(self) -> None:
+    def test_over_budget_turn_is_left_to_normal_core_flow(self) -> None:
         plugin = self._plugin()
         plugin.tracker.update_interrupt_config(window_ms=1000, scope="sender")
         first = self._private_event("旧消息")
         second = self._private_event("新消息")
         plugin.tracker.begin_request(first)
-        plugin.tracker.get_state(first.unified_msg_origin).pending[1].started_at = 0
+        pending = plugin.tracker.get_state(first.unified_msg_origin).pending[1]
+        # 本轮已超 45 秒重跑预算：不再合并，交给排队。
+        pending.started_at = 0
+        pending.turn_started_at = 0
         calls = []
         plugin._request_native_followup_stop = lambda event: calls.append(event) or True
 
@@ -3119,11 +3130,8 @@ class NativeFollowupDebounceTests(unittest.TestCase):
         first = self._private_event("晚上好呀。")
         second = self._private_event("帮我查下明天天气")
         plugin.tracker.begin_request(first)
-        # 把旧请求时间整体拨回 5 秒，模拟超过新任务间隔的新话题。
-        state = plugin.tracker.get_state(first.unified_msg_origin)
-        for pending in state.pending.values():
-            pending.started_at -= 5
-            pending.user_text_times = [ts - 5 for ts in pending.user_text_times]
+        # 她已经开口（正在投递）后到来的新消息：不再打断，交给下一轮排队。
+        plugin.tracker.mark_response_started(first)
         calls = []
         plugin._request_native_followup_stop = lambda event: calls.append(event) or True
 
@@ -3314,6 +3322,63 @@ class SteeringMergeStrategyTests(unittest.TestCase):
         joined = "\n".join(texts)
         self.assertIn("同轮补充", joined)
         self.assertNotIn("我想吃火锅", joined)
+
+
+class ContinuationHintInjectionTests(unittest.TestCase):
+    @staticmethod
+    def _texts(req) -> str:
+        parts = []
+        for part in req.extra_user_content_parts:
+            value = (
+                part.get("text", "")
+                if isinstance(part, dict)
+                else getattr(part, "text", "")
+            )
+            parts.append(str(value))
+        return "\n".join(parts)
+
+    def test_continuation_injects_continue_reply_hint(self) -> None:
+        """她已开口时用户补充的新消息：注入"接着回应、别重复"的提示。"""
+        from astrbot_plugin_conversation_flow.main import ConversationalFlowPlugin
+
+        plugin = object.__new__(ConversationalFlowPlugin)
+        plugin.config = build_plugin_config({"interrupt_mode": "steering"})
+        plugin.logger = _Logger()
+        plugin.tracker = ConversationTracker()
+
+        first = _Event("session", "下班啦")
+        second = _Event("session", "回家回家")
+        plugin.tracker.begin_request(first)
+        plugin.tracker.mark_response_started(first)
+        plugin.tracker.record_response(first, "辛苦啦凌溪，路上小心。")
+        plugin.tracker.begin_request(second)
+
+        req = _ProviderRequest(extra_user_content_parts=[])
+        plugin._apply_continuation(second, req)
+
+        joined = self._texts(req)
+        self.assertIn("辛苦啦凌溪，路上小心。", joined)
+        self.assertIn("回家回家", joined)
+        self.assertIn("不要重复", joined)
+
+    def test_continuation_skipped_without_known_previous_reply(self) -> None:
+        from astrbot_plugin_conversation_flow.main import ConversationalFlowPlugin
+
+        plugin = object.__new__(ConversationalFlowPlugin)
+        plugin.config = build_plugin_config({"interrupt_mode": "steering"})
+        plugin.logger = _Logger()
+        plugin.tracker = ConversationTracker()
+
+        first = _Event("session", "第一句")
+        second = _Event("session", "第二句")
+        plugin.tracker.begin_request(first)
+        plugin.tracker.mark_response_started(first)
+        plugin.tracker.begin_request(second)
+
+        req = _ProviderRequest(extra_user_content_parts=[])
+        plugin._apply_continuation(second, req)
+
+        self.assertEqual(req.extra_user_content_parts, [])
 
 
 class ConversationWebUIPanelTests(unittest.TestCase):

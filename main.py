@@ -78,6 +78,7 @@ from .core.prompts import (
     SCENE_TO_OTHER_INSTRUCTION_TEMPLATE,
     TOPIC_CONTEXT_INSTRUCTION_TEMPLATE,
     IMAGE_INTENT_INSTRUCTION,
+    INTERRUPT_CONTINUATION_TEMPLATE,
     INTERRUPT_MERGE_APPEND_TEMPLATE,
     INTERRUPT_MERGE_DISCARD_HINT,
     INTERRUPT_MERGE_REWRITE_SYSTEM,
@@ -124,7 +125,7 @@ from .series_diagnostics import (
     logger,
 )
 
-__version__ = "0.12.3"
+__version__ = "0.12.4"
 PLUGIN_NAME = "astrbot_plugin_conversation_flow"
 RELATIONSHIP_PLUGIN_NAME = "astrbot_plugin_relationship"
 RELATIONSHIP_SNAPSHOT_CONTRACT_NAME = "relationship.snapshot"
@@ -1463,6 +1464,15 @@ class ConversationalFlowPlugin(Star):
             self.logger.info(
                 "[conv-flow] interrupt detected, seq=%s, merged context injected", seq
             )
+        elif self.config.interrupt_enabled and self.tracker.has_continuation_hint(
+            event
+        ):
+            # 她在分段投递时用户补充了新消息：不撤回已说出口的内容，
+            # 只给这一轮一个"接着回应、别重复"的衔接提示。
+            self._apply_continuation(event, req)
+            self.logger.info(
+                "[conv-flow] continuation hint injected, seq=%s", seq
+            )
 
         # 3) 沉默判断
         # 注意：被插话取代的旧请求不需要再做沉默判断（反正要丢弃）。
@@ -2651,6 +2661,51 @@ class ConversationalFlowPlugin(Star):
         except Exception as exc:
             self.logger.warning(
                 "[conv-flow] merge inject via system_prompt failed: %s", exc
+            )
+
+    def _apply_continuation(self, event: AstrMessageEvent, req: Any) -> None:
+        """她在分段投递时收到的新消息：给下一轮一个自然的衔接提示。"""
+        hint = self.tracker.get_continuation_hint(event)
+        if not hint:
+            return
+        previous = str(hint.get("previous_bot_text", "")).strip()
+        if not previous:
+            return
+        new_text = str(hint.get("new_text", "")).strip()
+        now_ts = time.time()
+        try:
+            hint_ts = float(hint.get("hint_ts") or now_ts)
+        except (TypeError, ValueError):
+            hint_ts = now_ts
+        new_label = relative_label(hint_ts, now_ts) or "刚刚"
+        if len(previous) > 240:
+            previous = previous[:239] + "…"
+        injection = INTERRUPT_CONTINUATION_TEMPLATE.format(
+            previous_bot_text=previous,
+            new_label=new_label,
+            new_text=new_text or "（当前消息包含图片或其他媒体）",
+        )
+        try:
+            parts = getattr(req, "extra_user_content_parts", None)
+            if parts is not None:
+                try:
+                    from astrbot.core.agent.message import TextPart
+
+                    parts.append(TextPart(text=injection))
+                    return
+                except Exception:
+                    parts.append({"type": "text", "text": injection})
+                    return
+        except Exception as exc:
+            self.logger.debug(
+                "[conv-flow] continuation inject via parts failed: %s", exc
+            )
+        try:
+            current = getattr(req, "system_prompt", None) or ""
+            req.system_prompt = current + "\n\n" + injection
+        except Exception as exc:
+            self.logger.warning(
+                "[conv-flow] continuation inject via system_prompt failed: %s", exc
             )
 
     def _prepend_interrupt_media(self, req: Any, raw_hint: dict[str, Any]) -> None:
