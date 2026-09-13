@@ -50,3 +50,37 @@ def test_conversation_page_has_loading_skeleton_contract() -> None:
     assert ".skeleton-card" in css
     assert "skeleton-shimmer" in css
     assert "prefers-reduced-motion" in css
+
+
+def test_conversation_page_puts_ratio_kpis_first_and_lists_full_config() -> None:
+    js = (PAGE_DIR / "app.js").read_text(encoding="utf-8")
+    css = (PAGE_DIR / "style.css").read_text(encoding="utf-8")
+
+    # 首屏 4 个比率 KPI
+    assert "const ratioKpis" in js
+    for label in ("沉默率", "分段率", "插话合并率", "上下文拦截率"):
+        assert label in js
+    assert "function ratioValue(stats, keys)" in js
+    assert "function renderRatioKpis(stats)" in js
+    assert 'return "—";' in js or 'if (!total) return "—";' in js
+    assert "renderRatioKpis(stats) + statGroups.map" in js
+    assert ".ratio-grid" in css
+    assert ".ratio-metric strong" in css
+    # 加载骨架与最终结构（比率组 + 3 个统计组）保持一致
+    assert "正在读取关键比率" in js
+    assert "metric.repeat(group.keys.length)" in js
+
+    # 配置摘要覆盖后端返回的全部 8 项，缺失值显示 —
+    for key in (
+        "silence_enabled",
+        "silence_strategy",
+        "chunking_enabled",
+        "chunking_min_length",
+        "interrupt_enabled",
+        "interrupt_mode",
+        "interrupt_scope",
+        "group_context_enabled",
+    ):
+        assert f'"{key}"' in js
+    assert 'return value === true ? "开启" : value === false ? "关闭" : "—";' in js
+    assert 'value === null || value === undefined || value === ""' in js

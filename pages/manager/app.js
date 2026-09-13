@@ -29,6 +29,14 @@ const statLabels = {
   recent_activity_recorded: "跨会话记录",
   recent_activity_selected: "跨会话选用"
 };
+// 首屏先看 4 个比率：它们比绝对计数更能说明“这轮对话被怎么处理”。
+const ratioKpis = [
+  { label: "沉默率", keys: ["silenced"], hint: "沉默 / 总请求" },
+  { label: "分段率", keys: ["chunked"], hint: "分段 / 总请求" },
+  { label: "插话合并率", keys: ["interrupted"], hint: "插话合并 / 总请求" },
+  { label: "上下文拦截率", keys: ["intercepted", "air_guarded", "scene_guarded"], hint: "拦截命中 / 总请求" },
+];
+
 const statGroups = [
   { title: "响应决策", keys: ["total_requests", "silenced", "intercepted", "air_guarded", "scene_guarded", "scene_hinted", "mood_silenced", "mood_hinted"] },
   { title: "输出节奏", keys: ["chunked", "interrupted", "time_annotated_injections"] },
@@ -56,14 +64,34 @@ function renderLoading({ replace = true } = {}) {
   if (!replace) return;
   const metric = '<article class="metric skeleton-card"><span></span><strong></strong></article>';
   const feature = '<div class="feature skeleton-card"><span></span><strong></strong></div>';
-  document.getElementById("stats").innerHTML = `<section class="stat-group"><div class="stat-group-head"><h2>正在读取运行状态</h2><span>…</span></div><div class="metric-grid">${metric.repeat(6)}</div></section>`;
+  document.getElementById("stats").innerHTML = `<section class="stat-group"><div class="stat-group-head"><h2>正在读取运行状态</h2><span>…</span></div><div class="metric-grid">${metric.repeat(4)}</div></section>`
+    + `<section class="stat-group"><div class="stat-group-head"><h2>正在读取关键比率</h2><span>…</span></div><div class="metric-grid">${metric.repeat(4)}</div></section>`
+    + statGroups.map((group) => `<section class="stat-group"><div class="stat-group-head"><h2>${group.title}</h2><span>…</span></div><div class="metric-grid">${metric.repeat(group.keys.length)}</div></section>`).join("");
   document.getElementById("features").innerHTML = feature.repeat(6);
   document.getElementById("config-summary").innerHTML = feature.repeat(4);
 }
 
+function ratioValue(stats, keys) {
+  const total = Number(stats.total_requests || 0);
+  if (!total) return "—";
+  const hit = keys.reduce((sum, key) => sum + Number(stats[key] || 0), 0);
+  return `${((hit / total) * 100).toFixed(1)}%`;
+}
+
+function renderRatioKpis(stats) {
+  return `
+    <section class="stat-group ratio-group">
+      <div class="stat-group-head"><h2>关键比率</h2><span>相对总请求 ${Number(stats.total_requests || 0)} 条</span></div>
+      <div class="metric-grid ratio-grid">
+        ${ratioKpis.map((item) => `<article class="metric ratio-metric"><span>${item.label}</span><strong>${ratioValue(stats, item.keys)}</strong><small>${item.hint}</small></article>`).join("")}
+      </div>
+    </section>
+  `;
+}
+
 function render(data) {
   const stats = data.stats || {};
-  document.getElementById("stats").innerHTML = statGroups.map((group) => `
+  document.getElementById("stats").innerHTML = renderRatioKpis(stats) + statGroups.map((group) => `
     <section class="stat-group">
       <div class="stat-group-head"><h2>${group.title}</h2><span>${group.keys.length} 项</span></div>
       <div class="metric-grid">
@@ -88,14 +116,31 @@ function renderConfig(data) {
     return;
   }
   const config = data.config || {};
+  const booleanLabels = {
+    silence_enabled: "沉默判断",
+    chunking_enabled: "智能分段",
+    interrupt_enabled: "插话中断",
+    group_context_enabled: "群聊上下文",
+  };
   const entries = [
+    ["silence_enabled", booleanLabels.silence_enabled],
     ["silence_strategy", "沉默策略"],
+    ["chunking_enabled", booleanLabels.chunking_enabled],
     ["chunking_min_length", "分段最小长度"],
+    ["interrupt_enabled", booleanLabels.interrupt_enabled],
     ["interrupt_mode", "插话模式"],
     ["interrupt_scope", "插话作用域"],
+    ["group_context_enabled", booleanLabels.group_context_enabled],
   ];
+  const formatConfigValue = (key, value) => {
+    if (Object.prototype.hasOwnProperty.call(booleanLabels, key)) {
+      return value === true ? "开启" : value === false ? "关闭" : "—";
+    }
+    if (value === null || value === undefined || value === "") return "—";
+    return escapeHtml(value);
+  };
   host.innerHTML = entries
-    .map(([key, label]) => `<div class="feature"><span>${label}</span><strong>${escapeHtml(config[key] ?? "—")}</strong></div>`)
+    .map(([key, label]) => `<div class="feature"><span>${label}</span><strong>${formatConfigValue(key, config[key])}</strong></div>`)
     .join("");
 }
 

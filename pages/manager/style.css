@@ -106,13 +106,6 @@
   to { background-position: -200% 0; }
 }
 
-.cards {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
-  gap: 12px;
-  margin: 18px 0;
-}
-
 .metric span {
   display: block;
 }
@@ -209,10 +202,6 @@
     align-self: flex-start;
   }
 
-  .cards {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-  }
-
   .feature-list {
     grid-template-columns: 1fr;
   }
@@ -226,5 +215,38 @@
   .skeleton-card span,
   .skeleton-card strong {
     animation: none;
+  }
+}
+
+/* 首屏关键比率：比绝对计数更容易一眼判断处理倾向 */
+.ratio-group {
+  border-color: rgba(102, 92, 246, .28);
+  background: linear-gradient(135deg, rgba(102, 92, 246, .10), rgba(84, 198, 232, .10));
+}
+
+.ratio-grid {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
+.ratio-metric strong {
+  color: var(--si-primary-strong);
+  font-size: 26px;
+  letter-spacing: -.02em;
+}
+
+.ratio-metric small {
+  display: block;
+  margin-top: 4px;
+  color: var(--si-muted);
+  font-size: 11px;
+}
+
+@media (max-width: 720px) {
+  .ratio-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .ratio-metric strong {
+    font-size: 22px;
   }
 }
