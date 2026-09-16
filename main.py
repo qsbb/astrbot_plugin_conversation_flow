@@ -127,7 +127,7 @@ from .series_diagnostics import (
     record_link_state as record_diagnostic_link,
 )
 
-__version__ = "0.12.9"
+__version__ = "0.12.10"
 PLUGIN_NAME = "astrbot_plugin_conversation_flow"
 # 契约前缀 -> 对端插件 id（用于联动健康链路标识）
 _LINK_PEER_BY_CONTRACT_PREFIX = {
@@ -5598,6 +5598,55 @@ class ConversationalFlowPlugin(Star):
 
     def series_control_snapshot(self):
         return self._series_control.series_control_snapshot()
+
+    def series_control_native_write(self, patch, *, expected_revision=None):
+        """一键固化入口（核调用）：把值写进本插件自己的配置文件。"""
+        return self._series_control.series_control_native_write(
+            patch, expected_revision=expected_revision
+        )
+
+    def _backup_native_config(self) -> str:
+        """写原生配置前先备份，返回 backup_id（写入失败可人工/自动恢复）。"""
+        try:
+            if not self._config_file.is_file():
+                return ""
+            stamp = datetime.now(UTC).strftime("%Y%m%d-%H%M%S")
+            backup = self._config_file.with_name(f"native-backup-{stamp}.json")
+            backup.write_text(
+                self._config_file.read_text(encoding="utf-8"), encoding="utf-8"
+            )
+            return stamp
+        except Exception as exc:
+            self.logger.warning("[conv-flow] native backup failed: %s", exc)
+            return ""
+
+    def _apply_native_series_control_values(self, values):
+        """把给定字段写进原生配置并落盘（固化用；失败不改内存）。"""
+        if not isinstance(values, dict) or not values:
+            return {"status": "error", "reason": "INVALID_PATCH"}
+        backup_id = self._backup_native_config()
+        candidate = dict(self._raw_config)
+        candidate.update(values)
+        try:
+            normalized = normalize_config(candidate)
+            build_plugin_config(normalized)
+        except Exception as exc:
+            return {"status": "error", "reason": f"INVALID_CONFIG:{exc}"}
+        previous = self._raw_config
+        self._raw_config = normalized
+        self._sync_series_control_runtime()
+        try:
+            self._persist_local_config()
+        except Exception as exc:
+            self._raw_config = previous
+            self._sync_series_control_runtime()
+            return {"status": "error", "reason": f"PERSIST_FAILED:{exc}"}
+        return {
+            "status": "ok",
+            "written": sorted(values.keys()),
+            "skipped": [],
+            "backup_id": backup_id,
+        }
 
     def series_control_set_mode(self, mode):
         result = self._series_control.series_control_set_mode(mode)
