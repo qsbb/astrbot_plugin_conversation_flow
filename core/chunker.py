@@ -45,8 +45,6 @@ _TURN_WORDS = ("不过", "但是", "可是", "但", "只是", "其实", "另外"
 # 软边界（波浪号收尾 / 句首转折）所需的最小累计长度：比 min_length 小得多，
 # 既避免"好～"这类短语气被切断，也避免把一句话拆碎。
 SOFT_BOUNDARY_MIN_LENGTH = 12
-# 句末标点切分时，若后半段短于该长度（且以句末标点收尾），不单独成条，避免「…了！好耶。」的小尾巴。
-FRAGMENT_MIN_CHARS = 5
 # 段落分隔（连续换行）
 _PARAGRAPH_SPLIT = re.compile(r"\n\s*\n+")
 # 代码块围栏
@@ -229,16 +227,9 @@ class Chunker:
         events.sort()
 
         start = 0
-        for index, (end, threshold) in enumerate(events):
+        for end, threshold in events:
             if end <= start:
                 continue
-            # 句末标点切分（阈值=min_length）时避免留下小尾巴：
-            # 「…顺利跑通了！好耶。」里的「好耶。」应留在同一条。
-            if threshold == self._chunk_cfg.min_length:
-                next_end = next((pos for pos, _ in events[index + 1 :]), len(text))
-                tail = text[end:next_end].strip()
-                if 0 < len(tail) < FRAGMENT_MIN_CHARS and _SENTENCE_END.search(tail):
-                    continue
             current += text[start:end]
             start = end
             if len(current) >= threshold:

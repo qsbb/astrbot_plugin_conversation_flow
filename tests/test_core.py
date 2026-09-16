@@ -829,15 +829,15 @@ class ChunkerTests(unittest.TestCase):
                 first = f"这个方案现在终于可以稳定运行了{mark}"
                 self.assertEqual(chunker.split(first + second), [first, second])
 
-    def test_short_sentence_after_exclamation_is_not_left_as_fragment(self) -> None:
+    def test_short_emotional_tail_splits_as_its_own_message(self) -> None:
+        """「…跑通了！好耶。」= 两条：尾句是独立情绪，真人也会单独发一条。"""
         cfg = build_plugin_config({})
         chunker = Chunker(cfg, _LLM())
         text = "这次终于把所有自动化测试都顺利跑通了！好耶。"
 
         result = chunker.split(text)
 
-        self.assertEqual(len(result), 1)
-        self.assertIn("好耶。", result[0])
+        self.assertEqual(result, ["这次终于把所有自动化测试都顺利跑通了！", "好耶。"])
 
     def test_comma_period_and_ellipsis_behavior_remains_stable(self) -> None:
         cfg = build_plugin_config({})
