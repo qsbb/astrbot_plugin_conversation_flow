@@ -15,21 +15,21 @@ DEFAULTS: dict[str, Any] = {
     "silence_prejudge_provider_id": "",
     "silence_prejudge_max_chars": 200,
     "chunking_enabled": True,
-    # 参考自然 bot（云崽）实测：一条中位 17 字 / p75 27 字，故默认 25 而不是 60。
-    "chunking_min_length": 25,
-    "chunking_max_segments": 5,
+    # 参考自然 bot（云崽）实测（一条中位 17 字 / p75 27 字）与用户偏好：默认 15。
+    "chunking_min_length": 15,
+    "chunking_max_segments": 8,
     "chunking_delay_mode": "per_char",
     "chunking_segment_interval_ms": 800,
-    "chunking_delay_per_char_ms": 35,
+    "chunking_delay_per_char_ms": 80,
     "chunking_delay_min_ms": 500,
     "chunking_delay_max_ms": 4000,
     "chunking_protect_code_block": True,
     "chunking_preserve_paragraphs": True,
-    "chunking_long_paragraph_threshold": 120,
+    "chunking_long_paragraph_threshold": 40,
     # 单换行：auto=主链优先（空行分条），只对极短行（称呼/笑声/短反应）例外切分。
     "chunking_newline_mode": "auto",
     "chunking_short_line_chars": 12,
-    "chunking_llm_assist": False,
+    "chunking_llm_assist": True,
     # LLM 辅助分段只对长文启用；短回复交给确定性规则，避免每条都多一次模型调用。
     "chunking_llm_assist_min_length": 120,
     "plain_text_mode": True,
@@ -674,19 +674,19 @@ class PluginConfig:
     silence_prejudge_provider_id: str = ""
     silence_prejudge_max_chars: int = 200
     chunking_enabled: bool = True
-    chunking_min_length: int = 25
-    chunking_max_segments: int = 5
+    chunking_min_length: int = 15
+    chunking_max_segments: int = 8
     chunking_delay_mode: str = "per_char"
     chunking_segment_interval_ms: int = 800
-    chunking_delay_per_char_ms: int = 35
+    chunking_delay_per_char_ms: int = 80
     chunking_delay_min_ms: int = 500
     chunking_delay_max_ms: int = 4000
     chunking_protect_code_block: bool = True
     chunking_preserve_paragraphs: bool = True
-    chunking_long_paragraph_threshold: int = 120
+    chunking_long_paragraph_threshold: int = 40
     chunking_newline_mode: str = "auto"
     chunking_short_line_chars: int = 12
-    chunking_llm_assist: bool = False
+    chunking_llm_assist: bool = True
     chunking_llm_assist_min_length: int = 120
     plain_text_mode: bool = True
     image_intent_mode: bool = True

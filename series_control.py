@@ -18,11 +18,11 @@ _FIELDS: dict[str, dict[str, Any]] = {
     "chunking_delay_mode": {
         "type": "str", "default": "per_char", "options": ("fixed", "per_char")
     },
-    "chunking_min_length": {"type": "int", "default": 25, "minimum": 1, "maximum": 10000},
-    "chunking_max_segments": {"type": "int", "default": 5, "minimum": 1, "maximum": 20},
+    "chunking_min_length": {"type": "int", "default": 15, "minimum": 1, "maximum": 10000},
+    "chunking_max_segments": {"type": "int", "default": 8, "minimum": 1, "maximum": 20},
     "chunking_long_paragraph_threshold": {
         "type": "int",
-        "default": 120,
+        "default": 40,
         "minimum": 1,
         "maximum": 10000,
     },
@@ -32,6 +32,8 @@ _FIELDS: dict[str, dict[str, Any]] = {
         "enum": ["auto", "always", "never"],
     },
     "chunking_short_line_chars": {"type": "int", "default": 12, "minimum": 1, "maximum": 60},
+    "chunking_llm_assist": {"type": "bool", "default": True},
+    "chunking_delay_per_char_ms": {"type": "int", "default": 80, "minimum": 0, "maximum": 5000},
     "silence_enabled": {"type": "bool", "default": True},
     "silence_strategy": {
         "type": "str", "default": "inject", "options": ("inject", "prejudge", "both")

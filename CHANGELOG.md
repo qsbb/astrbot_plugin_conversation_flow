@@ -1,4 +1,13 @@
 ## [Unreleased]
+## 0.12.8 - 2026-09-16
+
+### 变更
+
+- 新预设（用户定档）：`chunking_min_length` 60→**15**、`chunking_max_segments` 5→**8**、`chunking_long_paragraph_threshold` 20→**40**、`chunking_llm_assist` false→**true**、`chunking_delay_per_char_ms` 35→**80**；新增 `chunking_newline_mode=auto`、`chunking_short_line_chars=12`（全部可在核接管页调整）。
+- 单换行改为"主链优先"：只有极短行（≤12 字、无标点，如「小明」「哈哈哈哈」）才独立成条，其余单换行交给主链用空行表达；冒号前后都不再作为切点；关联词（因为→所以）不强制合。
+- 句末标点切分时避免小尾巴：「…跑通了！好耶。」这类 5 字以内且带句末标点的尾句不再单独成条。
+- 主链注入改为 `build_chunking_instruction()`：按当前已开功能动态生成（一条 15 字左右/最多 8 条、列举看情况、冒号后不断开、语气收尾+转折另起一条、按 `newline_mode` 追加说明）。
+- 新增 `series.webui@2.0` 面板 `chunk_preview`（分段预览）：在核 WebUI 里输入一段话，走真实分段流水线看会被切成几条，并显示「当前已开」摘要。
 
 ## 0.12.7 - 2026-09-14
 

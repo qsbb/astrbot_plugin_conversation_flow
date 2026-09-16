@@ -127,7 +127,7 @@ from .series_diagnostics import (
     record_link_state as record_diagnostic_link,
 )
 
-__version__ = "0.12.7"
+__version__ = "0.12.8"
 PLUGIN_NAME = "astrbot_plugin_conversation_flow"
 # 契约前缀 -> 对端插件 id（用于联动健康链路标识）
 _LINK_PEER_BY_CONTRACT_PREFIX = {

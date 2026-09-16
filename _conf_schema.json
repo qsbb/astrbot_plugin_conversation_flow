@@ -67,16 +67,16 @@
   },
   "chunking_min_length": {
     "type": "int",
-    "description": "[智能分段] 触发分段的最小回复长度（一条消息的舒适长度，默认 25）",
+    "description": "[智能分段] 触发分段的最小回复长度（一条消息的舒适长度，默认 15）",
     "hint": "常规回复短于此长度（字符数）保持单条发送；但若无双空行、存在全角/半角强语气句界且前后都是完整自然句，可放宽一次拆分，避免长短句黏在一起。默认 60。",
-    "default": 25,
+    "default": 15,
     "minimum": 1
   },
   "chunking_max_segments": {
     "type": "int",
     "description": "[智能分段] 单次回复最大分段数",
     "hint": "超过此数量时会合并末尾的多段为一段，避免刷屏。默认 5。",
-    "default": 5,
+    "default": 8,
     "minimum": 1
   },
   "chunking_preserve_paragraphs": {
@@ -87,9 +87,9 @@
   },
   "chunking_long_paragraph_threshold": {
     "type": "int",
-    "description": "[智能分段] 段落超过该长度才继续按句切开（默认 120）",
+    "description": "[智能分段] 段落超过该长度才继续按句切开（默认 40）",
     "hint": "仅超过此长度的自然段才按句末标点继续拆分。默认 20，作为 LLM 主动分段（双空行）未生效时的保底策略。",
-    "default": 120,
+    "default": 40,
     "minimum": 10
   },
   "chunking_protect_code_block": {
@@ -109,7 +109,7 @@
     "type": "bool",
     "description": "[智能分段] 让 LLM 判断长回复怎么分段",
     "hint": "开启后，达到最小长度且主模型没有用空行主动分段时，会额外调用一次 LLM，判断保持一条还是按语义切成多条。没有可用模型、调用关闭、超过 6 秒、返回异常或改写原文时，自动改用本地标点规则。短回复和其他插件发起的主动消息不会额外调用。会增加少量等待时间和 token 消耗。",
-    "default": false
+    "default": true
   },
   "chunking_delay_mode": {
     "type": "string",
@@ -136,7 +136,7 @@
     "type": "int",
     "description": "[分段延迟] 按字数延迟系数（毫秒/字）",
     "hint": "仅在 per_char 模式生效。推荐 35ms/字。",
-    "default": 35,
+    "default": 80,
     "minimum": 0
   },
   "chunking_delay_min_ms": {

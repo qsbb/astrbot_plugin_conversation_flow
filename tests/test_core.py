@@ -848,7 +848,8 @@ class ChunkerTests(unittest.TestCase):
 
         first = "这个方案已经完成了全部配置检查。"
         second = "后面的完整回归测试也顺利通过了。"
-        self.assertEqual(chunker.split(first + second), [first + second])
+        # 默认 15 字起切：两句各 16/17 字，按"一句话一条"切成两条
+        self.assertEqual(chunker.split(first + second), [first, second])
 
         ellipsis_first = "整理房间嘛……确实还是不太行。"
         ellipsis_second = "不过正式任务已经全部按计划完成了。"
@@ -1072,11 +1073,14 @@ class ChunkingPromptTests(unittest.TestCase):
         self.assertIn("句末标点", CHUNK_LLM_ASSIST_SYSTEM)
         self.assertIn("不可拆分的单句", CHUNK_LLM_ASSIST_SYSTEM)
 
-    def test_long_paragraph_threshold_default_is_120(self) -> None:
-        """默认阈值 120：尊重她自己用空行分的段，只在超长段落才继续切。"""
+    def test_chunking_presets_match_user_choice(self) -> None:
+        """当前预设（2026-09-16 用户定）：15 / 8 / 40 / LLM 辅助开 / 每字 80ms。"""
         cfg = build_plugin_config({})
-        self.assertEqual(cfg.chunking_long_paragraph_threshold, 120)
-        self.assertEqual(cfg.chunking_min_length, 25)
+        self.assertEqual(cfg.chunking_min_length, 15)
+        self.assertEqual(cfg.chunking_max_segments, 8)
+        self.assertEqual(cfg.chunking_long_paragraph_threshold, 40)
+        self.assertTrue(cfg.chunking_llm_assist)
+        self.assertEqual(cfg.chunking_delay_per_char_ms, 80)
         self.assertEqual(cfg.chunking_newline_mode, "auto")
         self.assertEqual(cfg.chunking_short_line_chars, 12)
 
@@ -1319,8 +1323,9 @@ class DelayTests(unittest.TestCase):
 
     def test_per_char_delay_uses_recommended_value(self) -> None:
         cfg = build_plugin_config({})
-        self.assertEqual(calculate_segment_delay_ms("测试文本共十个有效字符", cfg), 500)
-        self.assertEqual(calculate_segment_delay_ms("字" * 40, cfg), 1400)
+        # 每字 80ms：11 字 → 880ms；40 字 → 3200ms（未触上下限）
+        self.assertEqual(calculate_segment_delay_ms("测试文本共十个有效字符", cfg), 880)
+        self.assertEqual(calculate_segment_delay_ms("字" * 40, cfg), 3200)
 
     def test_per_char_delay_is_clamped(self) -> None:
         cfg = build_plugin_config({})
@@ -3493,7 +3498,7 @@ class ConversationWebUIPanelTests(unittest.TestCase):
         self.assertEqual(rows["插话合并率"], "12.5%")
         self.assertEqual(rows["上下文拦截率"], "50.0%")
         self.assertEqual(rows["沉默策略"], "指令注入")
-        self.assertEqual(rows["分段最小长度"], 25)
+        self.assertEqual(rows["分段最小长度"], 15)
         self.assertEqual(rows["插话模式"], "运行中插话归属")
         self.assertEqual(rows["插话作用域"], "仅同一发送者")
         self.assertTrue(

@@ -175,6 +175,10 @@ def test_preview_chunk_soft_boundary_is_reported_in_notes(plugin) -> None:
 def test_preview_chunk_with_llm_skips_model_when_setting_disabled(plugin) -> None:
     import asyncio
 
+    # 预设默认开启 LLM 辅助，这里显式关掉以验证"关闭时不会调用模型"
+    plugin.config = build_plugin_config({"chunking_llm_assist": False})
+    plugin.chunker.cfg = plugin.config
+    plugin.chunker.sync_config()
     adapter = SeriesWebUIPanels(plugin)
     result = asyncio.run(
         adapter.panel_action(
