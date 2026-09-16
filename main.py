@@ -118,6 +118,7 @@ from .core.request_context import (
 from .core.silence_judge import SilenceJudge
 from .core.time_labels import burst_note, labeled_line, relative_label
 from .series_control import SeriesControlAdapter
+from .series_webui import SeriesWebUIPanels
 from .series_diagnostics import (
     diagnostic_clear as clear_diagnostic_events,
     diagnostic_event,
@@ -708,12 +709,20 @@ class ConversationalFlowPlugin(Star):
             }
         )
 
+    def _series_webui_panels(self) -> SeriesWebUIPanels:
+        """惰性获取 webui 面板适配层，兼容测试与热重载路径。"""
+        adapter = getattr(self, "_series_webui", None)
+        if adapter is None:
+            adapter = SeriesWebUIPanels(self)
+            self._series_webui = adapter
+        return adapter
+
     def webui_panels_contract(self) -> dict[str, object]:
-        """series.webui@2.0：核统一接管时提供只读对话流状态。"""
-        return {
+        """series.webui@2.0：核统一接管时提供状态面板与分段预览。"""
+        contract = {
             "name": "series.webui@2.0",
             "version": "2.0",
-            "capabilities": ["generic_table"],
+            "capabilities": ["generic_table", "generic_actions"],
             "plugin_id": PLUGIN_NAME,
             "series_id": "ningxin_suxi",
             "standalone": {"available": True, "entry": "/pages/manager", "pages": ["manager"]},
@@ -722,9 +731,19 @@ class ConversationalFlowPlugin(Star):
                     "id": "status",
                     "title": "对话流状态",
                     "description": "只读查看沉默、分段、steering 与群聊上下文状态",
-                }
+                },
+                {
+                    "id": "chunk_preview",
+                    "title": "分段预览",
+                    "description": (
+                        "用当前设置（含核接管覆盖）跑真实分段流水线，"
+                        "预览一段话会被切成几条。"
+                    ),
+                    "actions": self._series_webui_panels().panels()[0]["actions"],
+                },
             ],
         }
+        return contract
 
     @staticmethod
     def _panel_rate(stats: dict[str, object], keys: tuple[str, ...]) -> str:
@@ -752,6 +771,8 @@ class ConversationalFlowPlugin(Star):
         return labels.get(text, text)
 
     def webui_panel_data(self, panel: str) -> dict[str, object]:
+        if panel == "chunk_preview":
+            return self._series_webui_panels().panel_data(panel)
         if panel != "status":
             return {"success": False, "error": "UNKNOWN_PANEL"}
         payload = self._status_payload()
@@ -821,7 +842,17 @@ class ConversationalFlowPlugin(Star):
             "actions": [],
         }
 
-    def webui_panel_action(self, panel: str, action: str, payload: dict) -> dict[str, object]:
+    async def webui_panel_action(
+        self,
+        panel: str,
+        action: str,
+        payload: dict[str, object],
+        context: dict[str, object] | None = None,
+    ) -> dict[str, object]:
+        if panel == "chunk_preview":
+            return await self._series_webui_panels().panel_action(
+                panel, action, payload, context
+            )
         return {"success": False, "error": "UNKNOWN_ACTION"}
 
     def series_module_contract(self) -> dict[str, object]:
@@ -839,7 +870,7 @@ class ConversationalFlowPlugin(Star):
                 "pages": ["manager"],
             },
             "capabilities": ["control", "diagnostics", "proactive_delivery", "steering", "webui"],
-            "panels": ["status"],
+            "panels": ["status", "chunk_preview"],
         }
 
     def diagnostic_log_contract(self) -> dict[str, object]:
@@ -3024,8 +3055,14 @@ class ConversationalFlowPlugin(Star):
         self._inject_instruction(req, PLAIN_TEXT_INSTRUCTION, "plain text")
 
     def _inject_chunking_instruction(self, req: Any) -> None:
-        """注入分段引导指令到 req.extra_user_content_parts。"""
-        self._inject_instruction(req, CHUNKING_INSTRUCTION, "chunking")
+        """按当前已开启的分段功能生成并注入分段引导指令。"""
+        from .core.prompts import build_chunking_instruction
+
+        try:
+            instruction = build_chunking_instruction(self.config)
+        except Exception:
+            instruction = CHUNKING_INSTRUCTION
+        self._inject_instruction(req, instruction, "chunking")
 
     def _inject_natural_tool_call_instruction(self, req: Any) -> None:
         """注入自然工具调用指令到 req.extra_user_content_parts。"""

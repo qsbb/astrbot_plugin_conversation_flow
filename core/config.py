@@ -15,7 +15,8 @@ DEFAULTS: dict[str, Any] = {
     "silence_prejudge_provider_id": "",
     "silence_prejudge_max_chars": 200,
     "chunking_enabled": True,
-    "chunking_min_length": 60,
+    # 参考自然 bot（云崽）实测：一条中位 17 字 / p75 27 字，故默认 25 而不是 60。
+    "chunking_min_length": 25,
     "chunking_max_segments": 5,
     "chunking_delay_mode": "per_char",
     "chunking_segment_interval_ms": 800,
@@ -24,7 +25,10 @@ DEFAULTS: dict[str, Any] = {
     "chunking_delay_max_ms": 4000,
     "chunking_protect_code_block": True,
     "chunking_preserve_paragraphs": True,
-    "chunking_long_paragraph_threshold": 20,
+    "chunking_long_paragraph_threshold": 120,
+    # 单换行：auto=主链优先（空行分条），只对极短行（称呼/笑声/短反应）例外切分。
+    "chunking_newline_mode": "auto",
+    "chunking_short_line_chars": 12,
     "chunking_llm_assist": False,
     # LLM 辅助分段只对长文启用；短回复交给确定性规则，避免每条都多一次模型调用。
     "chunking_llm_assist_min_length": 120,
@@ -112,6 +116,7 @@ DEFAULTS: dict[str, Any] = {
 _VALID_STRATEGIES = {"inject", "prejudge", "both"}
 _VALID_MERGE = {"append", "rewrite", "discard_old"}
 _VALID_INTERRUPT_MODES = {"steering", "window"}
+_VALID_NEWLINE_MODES = {"auto", "always", "never"}
 _VALID_DELAY_MODES = {"fixed", "per_char"}
 _VALID_SCOPES = {"room", "sender", "mention_or_sender"}
 _VALID_REPLY_QUOTE_MODES = {"off", "probability", "llm_decides"}
@@ -232,6 +237,18 @@ def normalize_config(raw: dict[str, Any] | None) -> dict[str, Any]:
     )
     out["chunking_protect_code_block"] = _coerce_bool(
         raw.get("chunking_protect_code_block"), DEFAULTS["chunking_protect_code_block"]
+    )
+    newline_mode = str(
+        raw.get("chunking_newline_mode") or DEFAULTS["chunking_newline_mode"]
+    ).strip().lower()
+    out["chunking_newline_mode"] = (
+        newline_mode if newline_mode in _VALID_NEWLINE_MODES else DEFAULTS["chunking_newline_mode"]
+    )
+    out["chunking_short_line_chars"] = max(
+        1,
+        _coerce_int(
+            raw.get("chunking_short_line_chars"), DEFAULTS["chunking_short_line_chars"]
+        ),
     )
     out["chunking_preserve_paragraphs"] = _coerce_bool(
         raw.get("chunking_preserve_paragraphs"),
@@ -657,7 +674,7 @@ class PluginConfig:
     silence_prejudge_provider_id: str = ""
     silence_prejudge_max_chars: int = 200
     chunking_enabled: bool = True
-    chunking_min_length: int = 60
+    chunking_min_length: int = 25
     chunking_max_segments: int = 5
     chunking_delay_mode: str = "per_char"
     chunking_segment_interval_ms: int = 800
@@ -666,7 +683,9 @@ class PluginConfig:
     chunking_delay_max_ms: int = 4000
     chunking_protect_code_block: bool = True
     chunking_preserve_paragraphs: bool = True
-    chunking_long_paragraph_threshold: int = 20
+    chunking_long_paragraph_threshold: int = 120
+    chunking_newline_mode: str = "auto"
+    chunking_short_line_chars: int = 12
     chunking_llm_assist: bool = False
     chunking_llm_assist_min_length: int = 120
     plain_text_mode: bool = True

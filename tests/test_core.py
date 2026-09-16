@@ -1072,10 +1072,44 @@ class ChunkingPromptTests(unittest.TestCase):
         self.assertIn("句末标点", CHUNK_LLM_ASSIST_SYSTEM)
         self.assertIn("不可拆分的单句", CHUNK_LLM_ASSIST_SYSTEM)
 
-    def test_long_paragraph_threshold_default_is_20(self) -> None:
-        """默认阈值应为 20（保底策略）。"""
+    def test_long_paragraph_threshold_default_is_120(self) -> None:
+        """默认阈值 120：尊重她自己用空行分的段，只在超长段落才继续切。"""
         cfg = build_plugin_config({})
-        self.assertEqual(cfg.chunking_long_paragraph_threshold, 20)
+        self.assertEqual(cfg.chunking_long_paragraph_threshold, 120)
+        self.assertEqual(cfg.chunking_min_length, 25)
+        self.assertEqual(cfg.chunking_newline_mode, "auto")
+        self.assertEqual(cfg.chunking_short_line_chars, 12)
+
+
+class ChunkingInstructionTests(unittest.TestCase):
+    def test_instruction_reflects_current_settings(self) -> None:
+        """注入文案要读取当前已开的功能（阈值/上限/单换行策略）。"""
+        from astrbot_plugin_conversation_flow.core.prompts import build_chunking_instruction
+
+        class Cfg:
+            chunking_newline_mode = "never"
+            chunking_short_line_chars = 8
+            chunking_min_length = 40
+            chunking_max_segments = 3
+
+        text = build_chunking_instruction(Cfg())
+        self.assertIn("40 字左右", text)
+        self.assertIn("最多分 3 条", text)
+        self.assertIn("只有空行才会分条", text)
+
+    def test_instruction_lists_default_lean_towards_short_points(self) -> None:
+        from astrbot_plugin_conversation_flow.core.prompts import build_chunking_instruction
+
+        class Cfg:
+            chunking_newline_mode = "auto"
+            chunking_short_line_chars = 12
+            chunking_min_length = 25
+            chunking_max_segments = 5
+
+        text = build_chunking_instruction(Cfg())
+        self.assertIn("列举时看情况", text)
+        self.assertIn("不要在冒号后断开", text)
+        self.assertIn("单独占一行", text)
 
 
 class FollowupGuardTests(unittest.TestCase):
@@ -3459,13 +3493,15 @@ class ConversationWebUIPanelTests(unittest.TestCase):
         self.assertEqual(rows["插话合并率"], "12.5%")
         self.assertEqual(rows["上下文拦截率"], "50.0%")
         self.assertEqual(rows["沉默策略"], "指令注入")
-        self.assertEqual(rows["分段最小长度"], 60)
+        self.assertEqual(rows["分段最小长度"], 25)
         self.assertEqual(rows["插话模式"], "运行中插话归属")
         self.assertEqual(rows["插话作用域"], "仅同一发送者")
         self.assertTrue(
             all(isinstance(value, (str, int, float, bool)) for value in rows.values())
         )
-        self.assertEqual(plugin.webui_panel_action("status", "x", {})["success"], False)
+        self.assertFalse(
+            asyncio.run(plugin.webui_panel_action("status", "x", {}))["success"]
+        )
 
     def test_status_panel_ratios_fall_back_to_placeholder(self) -> None:
         from astrbot_plugin_conversation_flow.main import ConversationalFlowPlugin

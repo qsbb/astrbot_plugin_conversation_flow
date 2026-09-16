@@ -8,8 +8,16 @@
   "silence_strategy": {
     "type": "string",
     "description": "[沉默判断] 判断策略（inject=指令注入 / prejudge=独立预判 / both=两者结合）",
-    "options": ["inject", "prejudge", "both"],
-    "labels": ["指令注入", "独立预判", "两者结合"],
+    "options": [
+      "inject",
+      "prejudge",
+      "both"
+    ],
+    "labels": [
+      "指令注入",
+      "独立预判",
+      "两者结合"
+    ],
     "hint": "inject=指令注入（省一次 LLM 调用，推荐）；prejudge=独立预判断（更可控但慢）；both=二者结合。",
     "default": "inject"
   },
@@ -59,9 +67,9 @@
   },
   "chunking_min_length": {
     "type": "int",
-    "description": "[智能分段] 触发分段的最小回复长度",
+    "description": "[智能分段] 触发分段的最小回复长度（一条消息的舒适长度，默认 25）",
     "hint": "常规回复短于此长度（字符数）保持单条发送；但若无双空行、存在全角/半角强语气句界且前后都是完整自然句，可放宽一次拆分，避免长短句黏在一起。默认 60。",
-    "default": 60,
+    "default": 25,
     "minimum": 1
   },
   "chunking_max_segments": {
@@ -79,9 +87,9 @@
   },
   "chunking_long_paragraph_threshold": {
     "type": "int",
-    "description": "[智能分段] 需要进一步拆分的段落长度",
+    "description": "[智能分段] 段落超过该长度才继续按句切开（默认 120）",
     "hint": "仅超过此长度的自然段才按句末标点继续拆分。默认 20，作为 LLM 主动分段（双空行）未生效时的保底策略。",
-    "default": 20,
+    "default": 120,
     "minimum": 10
   },
   "chunking_protect_code_block": {
@@ -106,8 +114,14 @@
   "chunking_delay_mode": {
     "type": "string",
     "description": "[分段延迟] 延迟模式（fixed=每段固定延迟 / per_char=按下一段字数计算延迟）",
-    "options": ["fixed", "per_char"],
-    "labels": ["固定延迟", "按字数计算"],
+    "options": [
+      "fixed",
+      "per_char"
+    ],
+    "labels": [
+      "固定延迟",
+      "按字数计算"
+    ],
     "hint": "fixed=每段固定延迟；per_char=按下一段有效字数乘以每字延迟，并受最小/最大值限制。推荐 per_char。",
     "default": "per_char"
   },
@@ -148,8 +162,14 @@
   "interrupt_mode": {
     "type": "string",
     "description": "[插话中断] 处理模式（steering=运行中插话的任务归属判定 / window=旧的固定时间窗）",
-    "options": ["steering", "window"],
-    "labels": ["任务引导", "固定时间窗"],
+    "options": [
+      "steering",
+      "window"
+    ],
+    "labels": [
+      "任务引导",
+      "固定时间窗"
+    ],
     "hint": "steering：单条消息不额外等待，生成中的补充/纠正/媒体延续按同一任务合并，新话题不硬合并；window：保持旧的固定时间窗逻辑。默认 steering。",
     "default": "steering"
   },
@@ -177,8 +197,16 @@
   "interrupt_scope": {
     "type": "string",
     "description": "[插话中断] 群聊中断作用域（room=本群任何新消息 / sender=仅同一发送者 / mention_or_sender=同一发送者或明确@Bot）",
-    "options": ["room", "sender", "mention_or_sender"],
-    "labels": ["群聊内全部消息", "仅同一发送者", "同一发送者或明确 @Bot"],
+    "options": [
+      "room",
+      "sender",
+      "mention_or_sender"
+    ],
+    "labels": [
+      "群聊内全部消息",
+      "仅同一发送者",
+      "同一发送者或明确 @Bot"
+    ],
     "hint": "room=房间内任何新消息可中断旧回复；sender=仅同一发送者的新消息可中断（推荐）；mention_or_sender=同一发送者或明确@/回复bot时中断。",
     "default": "sender"
   },
@@ -199,8 +227,16 @@
   "interrupt_merge_strategy": {
     "type": "string",
     "description": "[插话中断] 插话合并策略（append=旧消息追加为上下文 / rewrite=让 LLM 重写合并 / discard_old=直接丢弃旧响应）",
-    "options": ["append", "rewrite", "discard_old"],
-    "labels": ["追加上下文", "重写合并", "丢弃旧响应"],
+    "options": [
+      "append",
+      "rewrite",
+      "discard_old"
+    ],
+    "labels": [
+      "追加上下文",
+      "重写合并",
+      "丢弃旧响应"
+    ],
     "hint": "append=把旧消息作为追加上下文注入（推荐）；rewrite=让 LLM 重写为新语境；discard_old=直接丢弃旧响应不合并。",
     "default": "append"
   },
@@ -518,8 +554,16 @@
   "reply_quote_mode": {
     "type": "string",
     "description": "[引用回复] 引用决策模式",
-    "options": ["off", "probability", "llm_decides"],
-    "labels": ["关闭", "按概率引用", "由 LLM 决定"],
+    "options": [
+      "off",
+      "probability",
+      "llm_decides"
+    ],
+    "labels": [
+      "关闭",
+      "按概率引用",
+      "由 LLM 决定"
+    ],
     "hint": "off=关闭；probability=按本地概率引用；llm_decides=由当前主模型在同一次回复中判断是否确有必要引用，不增加额外 LLM 请求。推荐 llm_decides。",
     "default": "off"
   },
@@ -598,9 +642,41 @@
   "log_level": {
     "type": "string",
     "description": "[通用] 插件日志级别",
-    "options": ["DEBUG", "INFO", "WARNING", "ERROR"],
-    "labels": ["调试", "信息", "警告", "错误"],
+    "options": [
+      "DEBUG",
+      "INFO",
+      "WARNING",
+      "ERROR"
+    ],
+    "labels": [
+      "调试",
+      "信息",
+      "警告",
+      "错误"
+    ],
     "hint": "DEBUG 会输出详细的状态流转日志，方便排查问题。生产环境建议 INFO。",
     "default": "INFO"
+  },
+  "chunking_newline_mode": {
+    "type": "string",
+    "default": "auto",
+    "options": [
+      "auto",
+      "always",
+      "never"
+    ],
+    "description": "[智能分段] 单换行怎么处理（auto=只对极短行切分，主链用空行表达分条 / always=一律切 / never=不切）",
+    "hint": "auto 下：称呼、笑声、短反应这类极短行（≤chunking_short_line_chars）独立成条，其余单换行交给主链用空行表达。",
+    "labels": [
+      "自动（主链优先）",
+      "一律切分",
+      "不切分"
+    ]
+  },
+  "chunking_short_line_chars": {
+    "type": "int",
+    "default": 12,
+    "description": "[智能分段] 极短行的长度上限（默认 12，用于称呼/笑声/短反应单独成条）",
+    "hint": "只在 chunking_newline_mode=auto 时生效。"
   }
 }

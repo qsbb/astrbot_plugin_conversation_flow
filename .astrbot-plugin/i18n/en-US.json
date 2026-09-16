@@ -57,6 +57,15 @@
           "Error"
         ]
       }
+    },
+    "智能分段": {
+      "chunking_newline_mode": {
+        "labels": [
+          "Auto (main chain decides)",
+          "Always split",
+          "Never split"
+        ]
+      }
     }
   },
   "pages": {

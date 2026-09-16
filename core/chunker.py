@@ -18,18 +18,23 @@ LLM_ASSIST_TIMEOUT_SECONDS = 6.0
 
 @dataclass
 class ChunkConfig:
-    min_length: int = 60
+    min_length: int = 25
     max_segments: int = 5
     protect_code_block: bool = True
     preserve_paragraphs: bool = True
-    long_paragraph_threshold: int = 240
+    long_paragraph_threshold: int = 120
     llm_assist: bool = False
     llm_assist_min_length: int = 120
+    # 单换行策略：auto=主链优先（空行分条）+ 极短行例外；always=一律切；never=不切
+    newline_mode: str = "auto"
+    short_line_chars: int = 12
 
 
 # 强句末标点。省略号表示停顿/延续，不应在“嘛……不太行”中间断开。
 # 连续标点和紧随其后的闭合引号作为一个整体，避免从标点串内部切段。
-_SENTENCE_END = re.compile(r"(?:[。！？!?]+[”’」』】》）)\]\"']*|\n+)")
+_SENTENCE_END = re.compile(r"(?:[。！？!?]+[”’」』】》）)\]\"']*)")
+# 单换行：auto 模式只把"极短行"（称呼/笑声/短反应）当作分条信号，其余交给主链用空行表达。
+_SINGLE_NEWLINE = re.compile(r"\n")
 # 短回复兜底只考虑强语气句界；常规句号仍受 min_length 控制。
 _STRONG_SENTENCE_END = re.compile(r"[！？!?]+[”’」』】》）)\]\"']*")
 _COMPLETE_SENTENCE_END = re.compile(r"[。！？!?]+[”’」』】》）)\]\"']*\s*$")
@@ -39,7 +44,7 @@ _WAVE_END = re.compile(r"[～~]")
 _TURN_WORDS = ("不过", "但是", "可是", "但", "只是", "其实", "另外", "而且", "所以", "然后", "结果", "话说", "对了")
 # 软边界（波浪号收尾 / 句首转折）所需的最小累计长度：比 min_length 小得多，
 # 既避免"好～"这类短语气被切断，也避免把一句话拆碎。
-SOFT_BOUNDARY_MIN_LENGTH = 16
+SOFT_BOUNDARY_MIN_LENGTH = 12
 # 段落分隔（连续换行）
 _PARAGRAPH_SPLIT = re.compile(r"\n\s*\n+")
 # 代码块围栏
@@ -61,6 +66,8 @@ class Chunker:
             long_paragraph_threshold=cfg.chunking_long_paragraph_threshold,
             llm_assist=cfg.chunking_llm_assist,
             llm_assist_min_length=cfg.chunking_llm_assist_min_length,
+            newline_mode=getattr(cfg, "chunking_newline_mode", "auto"),
+            short_line_chars=getattr(cfg, "chunking_short_line_chars", 12),
         )
 
     def sync_config(self) -> None:
@@ -73,6 +80,8 @@ class Chunker:
             long_paragraph_threshold=self.cfg.chunking_long_paragraph_threshold,
             llm_assist=self.cfg.chunking_llm_assist,
             llm_assist_min_length=self.cfg.chunking_llm_assist_min_length,
+            newline_mode=getattr(self.cfg, "chunking_newline_mode", "auto"),
+            short_line_chars=getattr(self.cfg, "chunking_short_line_chars", 12),
         )
 
     def split_candidates(self, text: str) -> list[str]:
@@ -95,6 +104,11 @@ class Chunker:
             segments = self._split_with_code_protection(text)
         else:
             segments = self._split_plain(text)
+        if len(segments) == 1:
+            # 累积没切出来时，再给「强语气均衡 / 语气收尾 / 极短行」一次放宽机会
+            relaxed = self._split_short_reply(text)
+            if len(relaxed) > 1:
+                segments = relaxed
         return [segment for segment in self._merge_short(segments) if segment.strip()]
 
     def split(self, text: str) -> list[str]:
@@ -175,7 +189,7 @@ class Chunker:
         paragraphs = _PARAGRAPH_SPLIT.split(text)
         # 只有一段：没有双空行，整体按句末标点切
         if len(paragraphs) <= 1:
-            return self._split_by_sentence(text.strip())
+            return self._split_with_newlines(text.strip())
 
         # 有双空行：LLM 主动分段，每段保留；超长段才按句号切
         segments: list[str] = []
@@ -260,6 +274,49 @@ class Chunker:
             segments.extend(self._split_plain(text[cursor:]))
         return segments
 
+    def _newline_points(self, text: str) -> list[int]:
+        """返回"按换行分条"的位置：空行天然分条，单换行按 newline_mode 判定。"""
+        mode = str(self._chunk_cfg.newline_mode or "auto").lower()
+        points: list[int] = []
+        for match in _SINGLE_NEWLINE.finditer(text):
+            index = match.start()
+            if (index > 0 and text[index - 1] == "\n") or (
+                index + 1 < len(text) and text[index + 1] == "\n"
+            ):
+                continue  # 空行由段落切分处理
+            if mode == "never":
+                continue
+            if mode == "always":
+                points.append(index + 1)
+                continue
+            prev_line = text[:index].rsplit("\n", 1)[-1].strip()
+            if not prev_line or len(prev_line) > self._chunk_cfg.short_line_chars:
+                continue
+            if re.search(r"[。！？!?～~…，,、；;：:]$", prev_line):
+                continue
+            points.append(index + 1)
+        return points
+
+    def _split_with_newlines(self, text: str) -> list[str]:
+        """按换行分条，再对每个片段按标点细分；片段之间不再合并。"""
+        points = self._newline_points(text)
+        if not points:
+            return self._split_by_sentence(text)
+        pieces: list[str] = []
+        start = 0
+        for end in points:
+            piece = text[start:end].strip()
+            if piece:
+                pieces.append(piece)
+            start = end
+        tail = text[start:].strip()
+        if tail:
+            pieces.append(tail)
+        out: list[str] = []
+        for piece in pieces:
+            out.extend(self._split_by_sentence(piece))
+        return out
+
     def _soft_min_length(self) -> int:
         """软边界（波浪号收尾 / 句首转折词）所需的最小累计长度。"""
         return max(6, min(self._chunk_cfg.min_length, SOFT_BOUNDARY_MIN_LENGTH))
@@ -315,6 +372,10 @@ class Chunker:
                 return [left, right]
         # 语气收尾（～）或句首转折词：两侧都够长才放宽切一次，
         # 这样"…真随性～ 不过…"会分成两条，而"好～"这种短语气不受影响。
+        # 换行是最明确的分条意图：称呼行、笑声行即使很短也独立成条
+        line_parts = self._split_with_newlines(text)
+        if len(line_parts) > 1:
+            return line_parts
         soft_minimum = self._soft_reply_segment_threshold()
         for end in self._soft_boundaries(text):
             left = text[:end].strip()
@@ -339,6 +400,7 @@ class Chunker:
                 merged
                 and len(seg) < threshold
                 and not _COMPLETE_SENTENCE_END.search(seg)
+                and len(merged[-1]) >= threshold
             ):
                 merged[-1] = merged[-1] + "\n" + seg
             else:

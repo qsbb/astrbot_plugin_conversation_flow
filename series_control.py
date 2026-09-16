@@ -18,8 +18,20 @@ _FIELDS: dict[str, dict[str, Any]] = {
     "chunking_delay_mode": {
         "type": "str", "default": "per_char", "options": ("fixed", "per_char")
     },
-    "chunking_min_length": {"type": "int", "default": 60, "minimum": 1, "maximum": 10000},
+    "chunking_min_length": {"type": "int", "default": 25, "minimum": 1, "maximum": 10000},
     "chunking_max_segments": {"type": "int", "default": 5, "minimum": 1, "maximum": 20},
+    "chunking_long_paragraph_threshold": {
+        "type": "int",
+        "default": 120,
+        "minimum": 1,
+        "maximum": 10000,
+    },
+    "chunking_newline_mode": {
+        "type": "string",
+        "default": "auto",
+        "enum": ["auto", "always", "never"],
+    },
+    "chunking_short_line_chars": {"type": "int", "default": 12, "minimum": 1, "maximum": 60},
     "silence_enabled": {"type": "bool", "default": True},
     "silence_strategy": {
         "type": "str", "default": "inject", "options": ("inject", "prejudge", "both")

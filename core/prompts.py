@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 from .followup_guard import LEVEL_HARD, LEVEL_SOFT, FollowupDecision
 
 FOLLOWUP_GUARD_MARKER = "[对话流控制指令 - 收尾方式]"
@@ -284,22 +286,53 @@ PLAIN_TEXT_INSTRUCTION = """[对话流控制指令 - 纯文本回复]
 
 
 # 智能分段引导：让 LLM 主动用双空行分段，作为正则切分的首选来源
-CHUNKING_INSTRUCTION = """[对话流控制指令 - 分段回复]
-你正在即时通讯软件中与用户聊天。请像真人发消息一样决定分成几条发送：
-- 只有单句的极简回应才直接输出一条；如果包含两个及以上完整句子（例如问候后又关心、连续两个问题、先回应再补充），按句分成多条；
-- 语气收尾（～、！、…）之后如果接着转折或补充（不过 / 但 / 可是 / 其实 / 另外 / 而且 / 所以），转折要另起一条——真人不会把"调侃 + 转折"塞进同一条消息；
-- 每段表达一个完整的观点、一句话或一小段叙述；
-- 段与段之间用一个空行分隔（即两次换行 \\n\\n），插件会按你的分段逐条发送；
-- 不要人为添加"1.""2."等编号，直接分段即可；
-- 代码块内部不要插入空行分段。
+class _ChunkingDefaults:
+    """仅用于生成「默认配置下」的注入文案，避免常量与构建器漂移。"""
 
-示例（"～"收尾后的转折另起一条，中间是一个空行）：
-晚上七点的早餐，你这时间线是真随性～
+    chunking_newline_mode = "auto"
+    chunking_short_line_chars = 12
+    chunking_min_length = 25
+    chunking_max_segments = 5
 
-不过胃没再空着，我就放心啦。
 
-请直接开始回复。
-"""
+def build_chunking_instruction(cfg: Any) -> str:
+    """按当前已开启的分段功能生成注入指令（核接管可改这些开关）。
+
+    - 分条一律用空行表达（主链决定分不分）；
+    - 单换行按 ``chunking_newline_mode`` 说明不同策略；
+    - 列表：按"看她自己怎么选"的默认倾向描述，不做硬性要求。
+    """
+    mode = str(getattr(cfg, "chunking_newline_mode", "auto") or "auto").strip().lower()
+    if mode not in {"auto", "always", "never"}:
+        mode = "auto"
+    short = int(getattr(cfg, "chunking_short_line_chars", 12) or 12)
+    min_length = int(getattr(cfg, "chunking_min_length", 25) or 25)
+    max_segments = int(getattr(cfg, "chunking_max_segments", 5) or 5)
+
+    lines = [
+        "[对话流控制指令 - 分段回复]",
+        "你正在即时通讯软件中与用户聊天。请按自己的人设与说话习惯决定分成几条发送：",
+        "- 想分成多条发送时，用【空行】（即两次换行 \\n\\n）分隔，插件会按你的分段逐条发送；",
+        f"- 一条消息 {min_length} 字左右最自然（最多分 {max_segments} 条）；一句话一条，不要把好几层意思塞进同一条；",
+        "- 只有单句的极简回应才直接输出一条；如果包含两个及以上完整句子（例如问候后又关心、连续两个问题、先回应再补充），按句分成多条；",
+        "- 列举时看情况：短的点可以分开、每条发一项；每项还带解释或整体很长时，写在同一条里即可；",
+        "- 语气收尾（～、！、…）之后如果要接着转折或补充（不过 / 但 / 可是 / 其实 / 另外 / 而且 / 所以），把转折另起一条——真人不会把「调侃 + 转折」塞进同一条；",
+        "- 不要在冒号后断开：「跟你说个事：」后面的内容要跟在同一条里；",
+        "- 不要人为添加“1.”“2.”等编号，直接分段即可；代码块内部不要插入空行分段。",
+    ]
+    if mode == "auto":
+        lines.append(
+            f"- 不要用单个换行做排版；若想让称呼、笑声或短反应（不超过 {short} 字）单独成一条，可以单独占一行。"
+        )
+    elif mode == "always":
+        lines.append("- 单个换行也会被当作分条，请只在你确实想分条时换行。")
+    else:
+        lines.append("- 单个换行不会被当作分条，只有空行才会分条。")
+    return "\n".join(lines) + "\n\n请直接开始回复。\n"
+
+
+# 默认配置下的注入文本（运行时由 build_chunking_instruction 按当前开关生成）
+CHUNKING_INSTRUCTION = build_chunking_instruction(_ChunkingDefaults())
 
 
 REPLY_QUOTE_DECISION_INSTRUCTION = """[对话流控制指令 - 引用回复决策]
