@@ -758,6 +758,52 @@ class ChunkerTests(unittest.TestCase):
         self.assertTrue(result[1].endswith("！"))
         self.assertTrue(result[2].endswith("？"))
 
+    def test_wave_turn_splits_short_reply(self) -> None:
+        """语气收尾（～）后的转折另起一条：默认 min_length=60 的短回复也要切开。"""
+        cfg = build_plugin_config({})
+        chunker = Chunker(cfg, _LLM())
+        first = "晚上七点的早餐，凌溪你这时间线是真随性～"
+        second = "不过胃没再空着，我这边能放下一半心啦。"
+        self.assertEqual(chunker.split(first + " " + second), [first, second])
+        # 波浪号后面没有空格（紧跟转折词）同样认作收尾
+        self.assertEqual(chunker.split(first + second), [first, second])
+
+    def test_period_before_turn_word_splits_short_reply(self) -> None:
+        """句末标点 + 句首转折词，同样放宽一条消息的切分。"""
+        cfg = build_plugin_config({})
+        chunker = Chunker(cfg, _LLM())
+        first = "晚上七点的早餐，你这时间线是真随性。"
+        second = "不过胃没再空着，我就放心啦。"
+        self.assertEqual(chunker.split(first + second), [first, second])
+
+    def test_wave_boundaries_ignore_ranges_and_short_tone(self) -> None:
+        """数字范围（3～5）与短语气（好～ / 好～～～）不能误判成段界。"""
+        cfg = build_plugin_config({})
+        chunker = Chunker(cfg, _LLM())
+        for text in (
+            "今天讲的 3～5 岁睡眠课挺有用，你也注意作息～",
+            "好～",
+            "好～～～",
+        ):
+            self.assertEqual(chunker.split(text), [text], text)
+
+    def test_turn_word_inside_sentence_is_not_a_boundary(self) -> None:
+        """转折词在句子中间（"其实…，我只是…"）时不切。"""
+        cfg = build_plugin_config({})
+        chunker = Chunker(cfg, _LLM())
+        text = "这次其实不算太难，我只是有点紧张而已，你别担心啦。"
+        self.assertEqual(chunker.split(text), [text])
+
+    def test_chunking_instruction_teaches_wave_turn_split(self) -> None:
+        from astrbot_plugin_conversation_flow.core.prompts import (
+            CHUNK_LLM_ASSIST_SYSTEM,
+            CHUNKING_INSTRUCTION,
+        )
+
+        self.assertIn("～", CHUNKING_INSTRUCTION)
+        self.assertIn("另起一条", CHUNKING_INSTRUCTION)
+        self.assertIn("2.1.", CHUNK_LLM_ASSIST_SYSTEM)
+
     def test_fullwidth_exclamation_splits_balanced_short_reply(self) -> None:
         cfg = build_plugin_config({})
         chunker = Chunker(cfg, _LLM())
@@ -807,7 +853,9 @@ class ChunkerTests(unittest.TestCase):
         ellipsis_first = "整理房间嘛……确实还是不太行。"
         ellipsis_second = "不过正式任务已经全部按计划完成了。"
         result = chunker.split(ellipsis_first + ellipsis_second)
-        self.assertEqual(result, [ellipsis_first + ellipsis_second])
+        # 省略号本身仍然不是段界（不会切在"嘛……"上），但句首转折词"不过"
+        # 按新规则另起一条——真人在"不太行。|不过任务完成了"之间也会换一条发。
+        self.assertEqual(result, [ellipsis_first, ellipsis_second])
         self.assertFalse(any(segment.endswith("…") for segment in result))
 
     def test_ellipsis_is_continuation_not_sentence_boundary(self) -> None:

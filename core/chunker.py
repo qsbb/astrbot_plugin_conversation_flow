@@ -33,6 +33,13 @@ _SENTENCE_END = re.compile(r"(?:[。！？!?]+[”’」』】》）)\]\"']*|\n+
 # 短回复兜底只考虑强语气句界；常规句号仍受 min_length 控制。
 _STRONG_SENTENCE_END = re.compile(r"[！？!?]+[”’」』】》）)\]\"']*")
 _COMPLETE_SENTENCE_END = re.compile(r"[。！？!?]+[”’」』】》）)\]\"']*\s*$")
+# 语气收尾：波浪号常表示拖长音/俏皮收尾，真人会在这里断一条消息。
+_WAVE_END = re.compile(r"[～~]")
+# 转折 / 承接词：只有出现在一句话的开头才算新消息；句中（如"不算过分"）不切。
+_TURN_WORDS = ("不过", "但是", "可是", "但", "只是", "其实", "另外", "而且", "所以", "然后", "结果", "话说", "对了")
+# 软边界（波浪号收尾 / 句首转折）所需的最小累计长度：比 min_length 小得多，
+# 既避免"好～"这类短语气被切断，也避免把一句话拆碎。
+SOFT_BOUNDARY_MIN_LENGTH = 16
 # 段落分隔（连续换行）
 _PARAGRAPH_SPLIT = re.compile(r"\n\s*\n+")
 # 代码块围栏
@@ -198,12 +205,20 @@ class Chunker:
         current = ""
         segments: list[str] = []
 
+        events: list[tuple[int, int]] = [
+            (match.end(), self._chunk_cfg.min_length) for match in _SENTENCE_END.finditer(text)
+        ]
+        soft_threshold = self._soft_min_length()
+        events.extend((end, soft_threshold) for end in self._soft_boundaries(text))
+        events.sort()
+
         start = 0
-        for match in _SENTENCE_END.finditer(text):
-            chunk = text[start : match.end()]
-            start = match.end()
-            current += chunk
-            if len(current) >= self._chunk_cfg.min_length:
+        for end, threshold in events:
+            if end <= start:
+                continue
+            current += text[start:end]
+            start = end
+            if len(current) >= threshold:
                 segments.append(current.strip())
                 current = ""
 
@@ -245,6 +260,43 @@ class Chunker:
             segments.extend(self._split_plain(text[cursor:]))
         return segments
 
+    def _soft_min_length(self) -> int:
+        """软边界（波浪号收尾 / 句首转折词）所需的最小累计长度。"""
+        return max(6, min(self._chunk_cfg.min_length, SOFT_BOUNDARY_MIN_LENGTH))
+
+    def _soft_reply_segment_threshold(self) -> int:
+        """短回复走软边界时，两侧各自至少要有的长度。"""
+        return max(8, self._chunk_cfg.min_length // 6)
+
+    @staticmethod
+    def _starts_with_turn(text: str) -> bool:
+        return text.lstrip().startswith(_TURN_WORDS)
+
+    def _soft_boundaries(self, text: str) -> list[int]:
+        """软切分位置：波浪号收尾处，以及「句末标点 + 句首转折词」处。
+
+        波浪号只在明显是收尾时才算边界：
+        - 后面是空白/停顿标点，或紧跟转折承接词（"…随性～不过…"）；
+        - 排除连续波浪号（"好～～～"）与数字范围（"3～5 岁"）。
+        """
+        points: set[int] = set()
+        for match in _WAVE_END.finditer(text):
+            index = match.start()
+            prev = text[index - 1] if index > 0 else ""
+            nxt = text[index + 1] if index + 1 < len(text) else ""
+            if not nxt or nxt in "～~":
+                continue  # 连续波浪号只认最后一个（"好～～～ " 的收尾），中间不断开
+            if prev.isdigit() or nxt.isdigit():
+                continue
+            if nxt.isspace() or nxt in "，,、；;。":
+                points.add(index + 1)
+            elif self._starts_with_turn(text[index + 1:]):
+                points.add(index + 1)
+        for match in _SENTENCE_END.finditer(text):
+            if self._starts_with_turn(text[match.end():]):
+                points.add(match.end())
+        return sorted(points)
+
     def _short_reply_segment_threshold(self) -> int:
         """返回短回复例外拆分的最低自然句段长度。"""
         return max(10, self._chunk_cfg.min_length // 4)
@@ -260,6 +312,14 @@ class Chunker:
                 and len(right) >= minimum
                 and _COMPLETE_SENTENCE_END.search(right)
             ):
+                return [left, right]
+        # 语气收尾（～）或句首转折词：两侧都够长才放宽切一次，
+        # 这样"…真随性～ 不过…"会分成两条，而"好～"这种短语气不受影响。
+        soft_minimum = self._soft_reply_segment_threshold()
+        for end in self._soft_boundaries(text):
+            left = text[:end].strip()
+            right = text[end:].strip()
+            if len(left) >= soft_minimum and len(right) >= soft_minimum:
                 return [left, right]
         return [text]
 
