@@ -35,6 +35,9 @@ class PendingRequest:
     # 这条消息是否像"还没说完"（前导语/逗号结尾/很短裸句），
     # 决定回复发出前是否留一个很短的提交缓冲。
     burst_open: bool = False
+    # 本轮是否是"打断了一条还在思考的请求"合并而来：生成前要等一个
+    # 安静窗口（merge settle），避免连发消息时反复打断重跑。
+    settle_required: bool = False
     # 新消息与上一条 pending 的关系：same_task / new_task / uncertain。
     task_relation: str = "new_task"
     user_texts: list[str] = field(default_factory=list)
@@ -127,6 +130,10 @@ class ConversationTracker:
         self._steering_new_turn_gap_ms: int = 3500
         self._steering_uncertain_gap_ms: int = 1500
         self._steering_open_hold_ms: int = 400
+        # 打断后安静合并：生效与否、安静窗口、自本轮首条消息起的总封顶
+        self._settle_enabled: bool = True
+        self._settle_ms: int = 4000
+        self._settle_max_ms: int = 15000
 
     def update_interrupt_config(
         self,
@@ -149,6 +156,14 @@ class ConversationTracker:
             self._steering_uncertain_gap_ms = max(0, int(uncertain_gap_ms))
         if open_hold_ms is not None:
             self._steering_open_hold_ms = max(0, int(open_hold_ms))
+
+    def update_settle_config(
+        self, enabled: bool, settle_ms: int, max_ms: int
+    ) -> None:
+        """更新打断后安静合并参数。"""
+        self._settle_enabled = bool(enabled)
+        self._settle_ms = max(0, int(settle_ms))
+        self._settle_max_ms = max(0, int(max_ms))
 
     def update_history_limit(self, max_history_turns: int) -> None:
         """更新短期对话轮次上限，并立即收缩已有会话。"""
@@ -357,6 +372,33 @@ class ConversationTracker:
             return 0
         return self._steering_open_hold_ms if pending.burst_open else 0
 
+    def get_settle_hold_ms(self, event: Any) -> int:
+        """打断重跑前的安静等待毫秒数；不需要等待返回 0。
+
+        只对"打断了一条还在思考的请求"合并而来的本轮生效：等待期间若有
+        更新消息到达，本轮会被 discard 并由更新的一轮重新计时；自本轮首条
+        消息起超过总封顶则不再等待，避免回复被饿死。
+        """
+        if not self._settle_enabled or self._settle_ms <= 0:
+            return 0
+        if not self._steering_applies(event):
+            return 0
+        seq = self._get_extra(event, self.SEQ_EXTRA_KEY)
+        if seq is None:
+            return 0
+        state = self._states.get(self._get_umo(event))
+        pending = state.pending.get(seq) if state else None
+        if pending is None or pending.finished or not pending.settle_required:
+            return 0
+        if seq in state.discarded:
+            return 0
+        chain_start = pending.turn_started_at or pending.started_at
+        elapsed_ms = (time.time() - chain_start) * 1000.0
+        remaining = self._settle_max_ms - elapsed_ms
+        if remaining <= 0:
+            return 0
+        return int(min(self._settle_ms, remaining))
+
     @staticmethod
     def _event_has_media(event: Any) -> bool:
         """只读判断事件消息链里是否含图片/语音/文件等非文本组件。"""
@@ -550,6 +592,7 @@ class ConversationTracker:
             merge_restarts=inherited_restarts,
             turn_started_at=inherited_turn_start,
             continuation=continuation,
+            settle_required=bool(merge_candidates),
         )
         state.last_user_text = user_text
         state.last_active_ts = time.time()

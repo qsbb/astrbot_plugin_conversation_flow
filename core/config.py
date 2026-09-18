@@ -44,6 +44,10 @@ DEFAULTS: dict[str, Any] = {
     "steering_new_turn_gap_ms": 3500,
     "steering_uncertain_gap_ms": 1500,
     "steering_open_hold_ms": 400,
+    # 打断后安静合并：消息打断了一条还在思考的回复时，等一个安静窗口再重跑
+    "merge_settle_enabled": True,
+    "merge_settle_ms": 4000,
+    "merge_settle_max_ms": 15000,
     "interrupt_window_ms": 30000,
     "interrupt_state_ttl_ms": 600000,
     "interrupt_scope": "sender",
@@ -97,6 +101,7 @@ DEFAULTS: dict[str, Any] = {
     "reply_context_enabled": True,
     "relationship_offense_detection_enabled": False,
     "reply_context_api_fallback": True,
+    "typo_interpretation_enabled": True,
     "reply_quote_mode": "off",
     "reply_quote_private_enabled": False,
     "reply_quote_probability": 30,
@@ -321,6 +326,19 @@ def normalize_config(raw: dict[str, Any] | None) -> dict[str, Any]:
         _coerce_int(
             raw.get("steering_open_hold_ms"),
             DEFAULTS["steering_open_hold_ms"],
+        ),
+    )
+    out["merge_settle_enabled"] = _coerce_bool(
+        raw.get("merge_settle_enabled"), DEFAULTS["merge_settle_enabled"]
+    )
+    out["merge_settle_ms"] = max(
+        0,
+        _coerce_int(raw.get("merge_settle_ms"), DEFAULTS["merge_settle_ms"]),
+    )
+    out["merge_settle_max_ms"] = max(
+        0,
+        _coerce_int(
+            raw.get("merge_settle_max_ms"), DEFAULTS["merge_settle_max_ms"]
         ),
     )
     out["interrupt_window_ms"] = max(
@@ -596,6 +614,10 @@ def normalize_config(raw: dict[str, Any] | None) -> dict[str, Any]:
         )
     out["reply_quote_mode"] = raw_quote_mode
     # 旧 bool 只用于没有 mode 的配置迁移；开启值迁移到主模型同链决策。
+    out["typo_interpretation_enabled"] = _coerce_bool(
+        raw.get("typo_interpretation_enabled"),
+        DEFAULTS["typo_interpretation_enabled"],
+    )
     out["reply_quote_private_enabled"] = _coerce_bool(
         raw.get("reply_quote_private_enabled"),
         DEFAULTS["reply_quote_private_enabled"],
@@ -698,6 +720,9 @@ class PluginConfig:
     steering_new_turn_gap_ms: int = 3500
     steering_uncertain_gap_ms: int = 1500
     steering_open_hold_ms: int = 400
+    merge_settle_enabled: bool = True
+    merge_settle_ms: int = 4000
+    merge_settle_max_ms: int = 15000
     interrupt_window_ms: int = 30000
     interrupt_state_ttl_ms: int = 600000
     interrupt_scope: str = "sender"
@@ -746,6 +771,7 @@ class PluginConfig:
     reply_context_enabled: bool = True
     relationship_offense_detection_enabled: bool = False
     reply_context_api_fallback: bool = True
+    typo_interpretation_enabled: bool = True
     reply_quote_mode: str = "off"
     reply_quote_private_enabled: bool = False
     reply_quote_probability: int = 30

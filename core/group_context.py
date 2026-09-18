@@ -32,6 +32,10 @@ class GroupMessageRecord:
     reply_to_id: str = ""
     reply_to_name: str = ""
     reply_to_preview: str = ""
+    # 这条消息是否 @ 了 bot（带正文），以及是否引用回复了 bot 发的消息：
+    # 唤醒注入时用来打「← 在叫你 / ← 回复你」优先标记。
+    mention_bot: bool = False
+    reply_to_bot: bool = False
     reverse_wake_eligible: bool = True
     reverse_wake_consumed: bool = False
 
@@ -83,6 +87,8 @@ class GroupContextManager:
         reply_to_id: str = "",
         reply_to_name: str = "",
         reply_to_preview: str = "",
+        mention_bot: bool = False,
+        reply_to_bot: bool = False,
         reverse_wake_eligible: bool = True,
     ) -> GroupMessageRecord | None:
         """记录一条群聊消息。空文本跳过，返回落库的记录。"""
@@ -104,6 +110,8 @@ class GroupContextManager:
             reply_to_id=str(reply_to_id or ""),
             reply_to_name=(reply_to_name or "").strip(),
             reply_to_preview=(reply_to_preview or "").strip(),
+            mention_bot=bool(mention_bot),
+            reply_to_bot=bool(reply_to_bot),
             reverse_wake_eligible=bool(reverse_wake_eligible),
         )
         queue.records.append(rec)
@@ -204,11 +212,55 @@ class GroupContextManager:
         避免它既作为 prompt 主体又出现在背景记录里造成重复。
         ``now`` 供测试注入固定时刻；缺省取当前时间。
         """
+        text, _refs = self._build_context(
+            group_id,
+            n=n,
+            bot_label=bot_label,
+            exclude_message_id=exclude_message_id,
+            now=now,
+            with_refs=False,
+        )
+        return text
+
+    def get_recent_context_with_refs(
+        self,
+        group_id: str,
+        n: int = 0,
+        bot_label: str = "你",
+        exclude_message_id: str = "",
+        now: float | None = None,
+    ) -> tuple[str, dict[str, str]]:
+        """带 #n 编号与优先标记的上下文，以及编号 → message_id 的映射。
+
+        供唤醒注入使用：模型可通过 ``reply_with_quote(target="#n")`` 引用
+        记录里的任意一条。「@bot 带正文」与「回复 bot 的消息」会追加
+        「← 在叫你 / ← 回复你」优先标记。没有 message_id 的行（如 bot 自己
+        的发言）仍占编号，但不出现在映射里。
+        """
+        return self._build_context(
+            group_id,
+            n=n,
+            bot_label=bot_label,
+            exclude_message_id=exclude_message_id,
+            now=now,
+            with_refs=True,
+        )
+
+    def _build_context(
+        self,
+        group_id: str,
+        *,
+        n: int,
+        bot_label: str,
+        exclude_message_id: str,
+        now: float | None,
+        with_refs: bool,
+    ) -> tuple[str, dict[str, str]]:
         if not group_id:
-            return ""
+            return "", {}
         queue = self._queues.get(group_id)
         if queue is None or not queue.records:
-            return ""
+            return "", {}
 
         all_records = list(queue.records)
         visible = [
@@ -217,19 +269,31 @@ class GroupContextManager:
             if not (exclude_message_id and rec.message_id == str(exclude_message_id))
         ]
         if not visible:
-            return ""
+            return "", {}
         count = n if n > 0 else self._max
         selected = visible[-count:]
 
         current = time.time() if now is None else float(now)
         lines: list[str] = []
-        for rec in selected:
+        refs: dict[str, str] = {}
+        for index, rec in enumerate(selected, 1):
             name = bot_label if rec.is_bot else rec.sender_name
             annotation = self._format_reply_annotation(rec, all_records, bot_label)
             label = relative_label(rec.timestamp, current)
             prefix = f"（{label}）" if label else ""
-            lines.append(f"{prefix}{name}{annotation}: {rec.text}")
-        return "\n".join(lines)
+            ref = ""
+            priority = ""
+            if with_refs:
+                ref = f"#{index} "
+                if rec.message_id:
+                    refs[f"#{index}"] = rec.message_id
+                if not rec.is_bot:
+                    if rec.mention_bot:
+                        priority += "（← 在叫你）"
+                    if rec.reply_to_bot:
+                        priority += "（← 回复你）"
+            lines.append(f"{prefix}{ref}{name}{annotation}{priority}: {rec.text}")
+        return "\n".join(lines), refs
 
     @staticmethod
     def _format_reply_annotation(

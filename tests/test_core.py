@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 import pathlib
 import sys
 import types
@@ -4186,10 +4187,23 @@ class ReplyQuoteTests(unittest.TestCase):
         for text in (
             "请解释 <REPLY_QUOTE/> 是什么",
             "<REPLY_QUOTE/> 后面仍有正常正文",
-            "普通回复<REPLY_QUOTE/>",
         ):
             with self.subTest(text=text):
                 self.assertEqual(plugin._parse_reply_quote_control(text), (False, text))
+
+    def test_llm_marker_without_newline_is_still_stripped(self) -> None:
+        """模型把标记直接跟在正文末尾（不换行）也要剥掉，防止漏进用户可见文本。"""
+        plugin = self._plugin({"reply_quote_mode": "llm_decides"})
+        for text, expected in (
+            ("从妈妈到臭鸡，这一晚上我形象跌得有点狠啊<REPLY_QUOTE/>", "从妈妈到臭鸡，这一晚上我形象跌得有点狠啊"),
+            ("普通回复 <REPLY_QUOTE/> ", "普通回复"),
+            ("回复<REPLY_QUOTE />\n  ", "回复"),
+            ("回复<reply_quote/>", "回复"),
+        ):
+            with self.subTest(text=text):
+                self.assertEqual(
+                    plugin._parse_reply_quote_control(text), (True, expected)
+                )
 
     def test_llm_decision_fails_closed_without_message_id_or_request(self) -> None:
         plugin = self._plugin({"reply_quote_mode": "llm_decides"})
@@ -4221,6 +4235,83 @@ class ReplyQuoteTests(unittest.TestCase):
         self.assertEqual(event._result.chain[0].text, "第一段")
         self.assertIs(event._result.chain[1], image)
         self.assertEqual(event._result.chain[2].text, "第二段")
+
+
+class ReplyQuoteToolTests(unittest.TestCase):
+    """llm_decides 模式改用 LLM 工具调用（替代文本标记）。"""
+
+    def _plugin_stub(self, mode="llm_decides"):
+        from astrbot_plugin_conversation_flow.main import ConversationalFlowPlugin
+
+        plugin = ConversationalFlowPlugin.__new__(ConversationalFlowPlugin)
+        plugin.config = build_plugin_config({"reply_quote_mode": mode})
+        plugin.logger = _Logger()
+        plugin.tracker = types.SimpleNamespace(is_discarded=lambda _event: False)
+        plugin._reply_quote_tool = None
+        added, removed = [], []
+        plugin.context = types.SimpleNamespace(
+            add_llm_tools=lambda *tools: added.extend(tools),
+            remove_llm_tool=lambda name: removed.append(name),
+        )
+        plugin._added, plugin._removed = added, removed
+        return plugin
+
+    @staticmethod
+    def _event():
+        class Event:
+            def __init__(self):
+                self._extra = {}
+                self.message_obj = types.SimpleNamespace(message_id="source-1")
+
+            def set_extra(self, key, value):
+                self._extra[key] = value
+
+            def get_extra(self, key):
+                return self._extra.get(key)
+
+            def get_message_id(self):
+                return "source-1"
+
+        return Event()
+
+    def test_registers_tool_when_llm_decides(self) -> None:
+        plugin = self._plugin_stub()
+        plugin._register_reply_quote_tool()
+        self.assertIsNotNone(plugin._reply_quote_tool)
+        self.assertEqual(plugin._reply_quote_tool.name, "reply_with_quote")
+        self.assertEqual(plugin._added, [plugin._reply_quote_tool])
+
+    def test_no_tool_when_not_llm_decides(self) -> None:
+        plugin = self._plugin_stub(mode="off")
+        plugin._register_reply_quote_tool()
+        self.assertIsNone(plugin._reply_quote_tool)
+        self.assertEqual(plugin._added, [])
+
+    def test_tool_run_marks_decision(self) -> None:
+        plugin = self._plugin_stub()
+        plugin._register_reply_quote_tool()
+        extra = {}
+        event = types.SimpleNamespace(set_extra=lambda key, value: extra.__setitem__(key, value))
+        asyncio.run(plugin._reply_quote_tool.run(event))
+        self.assertIs(extra[plugin.REPLY_QUOTE_DECISION_KEY], True)
+
+    def test_marker_instruction_not_injected_when_tool_active(self) -> None:
+        """工具接管后不再注入文本标记指令（正文不再带 <REPLY_QUOTE/>）。"""
+        plugin = self._plugin_stub()
+        plugin._register_reply_quote_tool()
+        req = types.SimpleNamespace(extra_user_content_parts=[], system_prompt="")
+        self.assertFalse(plugin._inject_reply_quote_decision(self._event(), req))
+        self.assertEqual(req.extra_user_content_parts, [])
+
+    def test_marker_fallback_when_tool_unavailable(self) -> None:
+        """AstrBot 太老没有 add_llm_tools 时，文本标记仍作为兜底。"""
+        plugin = self._plugin_stub()
+        plugin.context = types.SimpleNamespace()  # 无 add_llm_tools
+        plugin._register_reply_quote_tool()
+        self.assertIsNone(plugin._reply_quote_tool)
+        req = types.SimpleNamespace(extra_user_content_parts=[], system_prompt="")
+        self.assertTrue(plugin._inject_reply_quote_decision(self._event(), req))
+        self.assertEqual(len(req.extra_user_content_parts), 1)
 
 
 class NewConfigTests(unittest.TestCase):
@@ -5741,6 +5832,418 @@ class ComponentDeliveryPlanTests(unittest.TestCase):
         self.assertTrue(plan.changed)
         self.assertFalse(plan.split_changed)
         self.assertEqual(plan.units[0][0].text, "说明")
+
+
+
+
+class GroupContextRefsTests(unittest.TestCase):
+    """唤醒注入用的带编号上下文：#n 映射与优先标记。"""
+
+    def test_refs_numbering_and_mapping(self) -> None:
+        mgr = GroupContextManager(max_messages=10)
+        mgr.record("g", "u1", "Alice", "大家好", message_id="m1")
+        mgr.record("g", "u2", "Bob", "这个咋看", message_id="m2")
+        text, refs = mgr.get_recent_context_with_refs("g")
+        self.assertIn("#1 Alice: 大家好", text)
+        self.assertIn("#2 Bob: 这个咋看", text)
+        self.assertEqual(refs, {"#1": "m1", "#2": "m2"})
+
+    def test_priority_markers(self) -> None:
+        mgr = GroupContextManager(max_messages=10)
+        mgr.record("g", "u1", "Alice", "@bot 在吗", message_id="m1", mention_bot=True)
+        mgr.record(
+            "g",
+            "u2",
+            "Bob",
+            "同意楼上",
+            message_id="m2",
+            reply_to_bot=True,
+            reply_to_preview="我觉得还行",
+        )
+        text, _refs = mgr.get_recent_context_with_refs("g")
+        self.assertIn("Alice（← 在叫你）: @bot 在吗", text)
+        self.assertIn("（← 回复你）: 同意楼上", text)
+
+    def test_bot_lines_numbered_but_not_mapped(self) -> None:
+        mgr = GroupContextManager(max_messages=10)
+        mgr.record("g", "u1", "Alice", "问题", message_id="m1")
+        mgr.record("g", "bot", "你", "回答", is_bot=True)  # 协议侧无 message_id
+        mgr.record("g", "u2", "Bob", "追问", message_id="m3")
+        text, refs = mgr.get_recent_context_with_refs("g")
+        self.assertIn("#2 你: 回答", text)
+        self.assertEqual(refs, {"#1": "m1", "#3": "m3"})
+        # bot 自己的行不打优先标记
+        self.assertNotIn("←", text.split("\n")[1])
+
+    def test_plain_context_has_no_refs(self) -> None:
+        mgr = GroupContextManager(max_messages=10)
+        mgr.record("g", "u1", "Alice", "大家好", message_id="m1", mention_bot=True)
+        context = mgr.get_recent_context("g")
+        self.assertNotIn("#1", context)
+        self.assertNotIn("←", context)
+
+    def test_refs_exclude_current_message(self) -> None:
+        mgr = GroupContextManager(max_messages=10)
+        mgr.record("g", "u1", "Alice", "第一条", message_id="m1")
+        mgr.record("g", "u2", "Bob", "第二条", message_id="m2")
+        text, refs = mgr.get_recent_context_with_refs("g", exclude_message_id="m2")
+        self.assertNotIn("第二条", text)
+        self.assertEqual(refs, {"#1": "m1"})
+
+    def test_record_stores_mention_flags(self) -> None:
+        mgr = GroupContextManager()
+        rec = mgr.record(
+            "g", "u1", "Alice", "hi", mention_bot=True, reply_to_bot=True
+        )
+        self.assertTrue(rec.mention_bot)
+        self.assertTrue(rec.reply_to_bot)
+        rec2 = mgr.record("g", "u1", "Alice", "普通")
+        self.assertFalse(rec2.mention_bot)
+        self.assertFalse(rec2.reply_to_bot)
+
+
+class _WakeGroupEvent:
+    """群聊唤醒事件 mock：带消息链 / self_id / extra。"""
+
+    def __init__(
+        self,
+        chain,
+        message_id: str = "m-cur",
+        self_id: str = "10000",
+        message_str: str = "",
+        private: bool = False,
+    ) -> None:
+        self.unified_msg_origin = "platform:GroupMessage:group1"
+        self.message_obj = types.SimpleNamespace(
+            message=list(chain), message_id=message_id, self_id=self_id
+        )
+        self._message_str = message_str
+        self._extra: dict = {}
+        self._private = private
+
+    def get_message_str(self) -> str:
+        return self._message_str
+
+    def set_extra(self, key, value) -> None:
+        self._extra[key] = value
+
+    def get_extra(self, key):
+        return self._extra.get(key)
+
+    def is_private_chat(self) -> bool:
+        return self._private
+
+
+class WakeScenarioTests(unittest.TestCase):
+    """群聊唤醒场景分级：裸@叫人 / @+正文 / @+引用+正文。"""
+
+    @staticmethod
+    def _plugin(*, tool: bool = True):
+        from astrbot_plugin_conversation_flow.main import ConversationalFlowPlugin
+
+        plugin = ConversationalFlowPlugin.__new__(ConversationalFlowPlugin)
+        plugin.config = build_plugin_config({})
+        plugin.logger = _Logger()
+        plugin._self_id_cache = ""
+        plugin._reply_quote_tool = object() if tool else None
+        return plugin
+
+    @staticmethod
+    def _req():
+        return types.SimpleNamespace(extra_user_content_parts=[], system_prompt="")
+
+    @staticmethod
+    def _parts_text(req) -> str:
+        out = []
+        for part in req.extra_user_content_parts:
+            text = getattr(part, "text", None)
+            if text is None and isinstance(part, dict):
+                text = part.get("text")
+            out.append(str(text or ""))
+        return "\n".join(out)
+
+    def test_bare_at_injects_bare_call_instruction(self) -> None:
+        plugin = self._plugin()
+        event = _WakeGroupEvent([_Seg("at", qq="10000")])
+        req = self._req()
+        plugin._inject_wake_scenario(event, req, True)
+        text = self._parts_text(req)
+        self.assertIn("被叫出来", text)
+        self.assertIn("reply_with_quote", text)  # 工具可用时给出引用提示
+
+    def test_bare_at_without_tool_hides_quote_hint(self) -> None:
+        plugin = self._plugin(tool=False)
+        event = _WakeGroupEvent([_Seg("at", qq="10000")])
+        req = self._req()
+        plugin._inject_wake_scenario(event, req, True)
+        text = self._parts_text(req)
+        self.assertIn("被叫出来", text)
+        self.assertNotIn("reply_with_quote", text)
+
+    def test_at_with_text_injects_nothing(self) -> None:
+        plugin = self._plugin()
+        event = _WakeGroupEvent(
+            [_Seg("at", qq="10000"), _Seg("plain", text=" 这个咋样")]
+        )
+        req = self._req()
+        plugin._inject_wake_scenario(event, req, True)
+        self.assertEqual(req.extra_user_content_parts, [])
+
+    def test_quoted_wake_switches_default_target(self) -> None:
+        plugin = self._plugin()
+        event = _WakeGroupEvent(
+            [
+                _Seg("reply", id="m-old-1"),
+                _Seg("at", qq="10000"),
+                _Seg("plain", text=" 这个呢"),
+            ]
+        )
+        req = self._req()
+        plugin._inject_wake_scenario(event, req, True)
+        self.assertIn("引用", self._parts_text(req))
+        self.assertIs(
+            event.get_extra(plugin.WAKE_QUOTED_SCENARIO_KEY), True
+        )
+        # 默认引用目标切换为被引用的那条消息
+        self.assertEqual(plugin._reply_quote_target_message_id(event), "m-old-1")
+
+    def test_private_chat_skipped(self) -> None:
+        plugin = self._plugin()
+        event = _WakeGroupEvent([_Seg("at", qq="10000")], private=True)
+        req = self._req()
+        plugin._inject_wake_scenario(event, req, True)
+        self.assertEqual(req.extra_user_content_parts, [])
+
+    def test_reverse_wake_restored_skipped(self) -> None:
+        plugin = self._plugin()
+        event = _WakeGroupEvent([_Seg("at", qq="10000")])
+        event.set_extra(plugin.REVERSE_WAKE_RESTORED_KEY, True)
+        req = self._req()
+        plugin._inject_wake_scenario(event, req, True)
+        self.assertEqual(req.extra_user_content_parts, [])
+
+    def test_not_woken_skipped(self) -> None:
+        plugin = self._plugin()
+        event = _WakeGroupEvent([_Seg("at", qq="10000")])
+        req = self._req()
+        plugin._inject_wake_scenario(event, req, False)
+        self.assertEqual(req.extra_user_content_parts, [])
+
+
+class ReplyQuoteTargetToolTests(unittest.TestCase):
+    """reply_with_quote 的 target 参数与引用目标优先级。"""
+
+    @staticmethod
+    def _plugin():
+        from astrbot_plugin_conversation_flow.main import ConversationalFlowPlugin
+
+        plugin = ConversationalFlowPlugin.__new__(ConversationalFlowPlugin)
+        plugin.config = build_plugin_config({})
+        plugin.logger = _Logger()
+        plugin._self_id_cache = ""
+        return plugin
+
+    def test_resolve_quote_ref(self) -> None:
+        plugin = self._plugin()
+        event = _WakeGroupEvent([], message_id="m-cur")
+        event.set_extra(plugin.GROUP_CONTEXT_REFS_KEY, {"#1": "m1", "#2": "m2"})
+        self.assertEqual(plugin._resolve_quote_ref(event, "#2"), "m2")
+        self.assertEqual(plugin._resolve_quote_ref(event, "2"), "m2")  # 自动补 #
+        self.assertEqual(plugin._resolve_quote_ref(event, "#9"), "")  # 非法编号
+        self.assertEqual(plugin._resolve_quote_ref(event, ""), "")
+        self.assertEqual(plugin._resolve_quote_ref(event, None), "")
+
+    def test_resolve_quote_ref_without_snapshot(self) -> None:
+        plugin = self._plugin()
+        event = _WakeGroupEvent([], message_id="m-cur")
+        self.assertEqual(plugin._resolve_quote_ref(event, "#1"), "")
+
+    def test_tool_run_with_target(self) -> None:
+        from astrbot_plugin_conversation_flow.core.quote_tool import ReplyQuoteTool
+
+        plugin = self._plugin()
+        tool = ReplyQuoteTool(plugin)
+        event = _WakeGroupEvent([], message_id="m-cur")
+        event.set_extra(plugin.GROUP_CONTEXT_REFS_KEY, {"#2": "m2"})
+        asyncio.run(tool.run(event, target="#2"))
+        self.assertIs(event.get_extra(plugin.REPLY_QUOTE_DECISION_KEY), True)
+        self.assertEqual(event.get_extra(plugin.REPLY_QUOTE_TARGET_KEY), "m2")
+        self.assertEqual(plugin._reply_quote_target_message_id(event), "m2")
+
+    def test_tool_run_with_invalid_target_falls_back(self) -> None:
+        from astrbot_plugin_conversation_flow.core.quote_tool import ReplyQuoteTool
+
+        plugin = self._plugin()
+        tool = ReplyQuoteTool(plugin)
+        event = _WakeGroupEvent([], message_id="m-cur")
+        event.set_extra(plugin.GROUP_CONTEXT_REFS_KEY, {"#2": "m2"})
+        asyncio.run(tool.run(event, target="#9"))
+        self.assertIs(event.get_extra(plugin.REPLY_QUOTE_DECISION_KEY), True)
+        self.assertIsNone(event.get_extra(plugin.REPLY_QUOTE_TARGET_KEY))
+        # 回落到当前消息
+        self.assertEqual(plugin._reply_quote_target_message_id(event), "m-cur")
+
+    def test_tool_run_without_target_keeps_current(self) -> None:
+        from astrbot_plugin_conversation_flow.core.quote_tool import ReplyQuoteTool
+
+        plugin = self._plugin()
+        tool = ReplyQuoteTool(plugin)
+        event = _WakeGroupEvent([], message_id="m-cur")
+        asyncio.run(tool.run(event))
+        self.assertIs(event.get_extra(plugin.REPLY_QUOTE_DECISION_KEY), True)
+        self.assertEqual(plugin._reply_quote_target_message_id(event), "m-cur")
+
+    def test_target_override_beats_wake_quoted_default(self) -> None:
+        plugin = self._plugin()
+        event = _WakeGroupEvent(
+            [_Seg("reply", id="m-old"), _Seg("plain", text="这个")],
+            message_id="m-cur",
+        )
+        event.set_extra(plugin.WAKE_QUOTED_SCENARIO_KEY, True)
+        event.set_extra(plugin.REPLY_QUOTE_TARGET_KEY, "m-picked")
+        self.assertEqual(plugin._reply_quote_target_message_id(event), "m-picked")
+
+
+class MergeSettleTests(unittest.TestCase):
+    """打断后安静合并：打断思考中的回复后等一个安静窗口再重跑。"""
+
+    @staticmethod
+    def _only_pending(tracker: ConversationTracker):
+        state = next(iter(tracker._states.values()))
+        return next(iter(state.pending.values()))
+
+    def test_first_message_no_settle(self) -> None:
+        tracker = ConversationTracker()
+        first = _Event("session", "第一句")
+        tracker.begin_request(first)
+        self.assertEqual(tracker.get_settle_hold_ms(first), 0)
+
+    def test_superseded_thinking_turn_requires_settle(self) -> None:
+        tracker = ConversationTracker()
+        first = _Event("session", "第一句")
+        second = _Event("session", "第二句")
+        tracker.begin_request(first)
+        tracker.begin_request(second)
+        self.assertTrue(tracker.is_discarded(first))
+        hold = tracker.get_settle_hold_ms(second)
+        self.assertGreater(hold, 0)
+        self.assertLessEqual(hold, 4000)
+
+    def test_settle_disabled_returns_zero(self) -> None:
+        tracker = ConversationTracker()
+        tracker.update_settle_config(False, 4000, 15000)
+        first = _Event("session", "第一句")
+        second = _Event("session", "第二句")
+        tracker.begin_request(first)
+        tracker.begin_request(second)
+        self.assertEqual(tracker.get_settle_hold_ms(second), 0)
+
+    def test_settle_zero_window_returns_zero(self) -> None:
+        tracker = ConversationTracker()
+        tracker.update_settle_config(True, 0, 15000)
+        first = _Event("session", "第一句")
+        second = _Event("session", "第二句")
+        tracker.begin_request(first)
+        tracker.begin_request(second)
+        self.assertEqual(tracker.get_settle_hold_ms(second), 0)
+
+    def test_settle_capped_by_chain_max(self) -> None:
+        tracker = ConversationTracker()  # 默认 4000 / 15000
+        first = _Event("session", "第一句")
+        tracker.begin_request(first)
+        # 本轮首条消息是 14.3 秒前到的 → 只剩约 700ms 封顶余量
+        self._only_pending(tracker).turn_started_at = time.time() - 14.3
+        second = _Event("session", "第二句")
+        tracker.begin_request(second)
+        hold = tracker.get_settle_hold_ms(second)
+        self.assertGreater(hold, 0)
+        self.assertLessEqual(hold, 800)
+
+    def test_settle_skipped_after_max_elapsed(self) -> None:
+        tracker = ConversationTracker()
+        first = _Event("session", "第一句")
+        tracker.begin_request(first)
+        self._only_pending(tracker).turn_started_at = time.time() - 20
+        second = _Event("session", "第二句")
+        tracker.begin_request(second)
+        self.assertEqual(tracker.get_settle_hold_ms(second), 0)
+
+    def test_superseded_round_loses_settle_and_new_round_retimes(self) -> None:
+        tracker = ConversationTracker()
+        first = _Event("session", "一")
+        second = _Event("session", "二")
+        third = _Event("session", "三")
+        tracker.begin_request(first)
+        tracker.begin_request(second)
+        tracker.begin_request(third)
+        self.assertTrue(tracker.is_discarded(second))
+        self.assertEqual(tracker.get_settle_hold_ms(second), 0)
+        self.assertGreater(tracker.get_settle_hold_ms(third), 0)
+
+    def test_response_started_turn_continues_without_settle(self) -> None:
+        """她已开口后新消息走排队+衔接，不再 settle。"""
+        tracker = ConversationTracker()
+        first = _Event("session", "第一句")
+        tracker.begin_request(first)
+        tracker.mark_response_started(first)
+        tracker.record_response(first, "先把上一句说完。")
+        second = _Event("session", "第二句")
+        tracker.begin_request(second)
+        self.assertEqual(tracker.get_settle_hold_ms(second), 0)
+
+    def test_legacy_window_mode_no_settle(self) -> None:
+        tracker = ConversationTracker()
+        tracker.update_interrupt_config(30000, "sender", steering_mode=False)
+        first = _Event("session", "第一句")
+        second = _Event("session", "第二句")
+        tracker.begin_request(first)
+        tracker.begin_request(second)
+        self.assertTrue(tracker.is_discarded(first))
+        self.assertEqual(tracker.get_settle_hold_ms(second), 0)
+
+    def test_config_update_clamps(self) -> None:
+        tracker = ConversationTracker()
+        tracker.update_settle_config(True, -5, -10)
+        first = _Event("session", "第一句")
+        second = _Event("session", "第二句")
+        tracker.begin_request(first)
+        tracker.begin_request(second)
+        self.assertEqual(tracker.get_settle_hold_ms(second), 0)
+
+
+class TypoInterpretationTests(unittest.TestCase):
+    """错字/同音字理解提示注入。"""
+
+    @staticmethod
+    def _plugin(config=None):
+        from astrbot_plugin_conversation_flow.main import ConversationalFlowPlugin
+
+        plugin = ConversationalFlowPlugin.__new__(ConversationalFlowPlugin)
+        plugin.config = build_plugin_config(config or {})
+        plugin.logger = _Logger()
+        return plugin
+
+    @staticmethod
+    def _req():
+        return types.SimpleNamespace(extra_user_content_parts=[], system_prompt="")
+
+    def test_enabled_by_default(self) -> None:
+        self.assertTrue(build_plugin_config({}).typo_interpretation_enabled)
+
+    def test_injects_when_enabled(self) -> None:
+        plugin = self._plugin()
+        req = self._req()
+        plugin._inject_typo_interpretation(_Event("s", "在麻"), req)
+        text = req.extra_user_content_parts[0]
+        text = getattr(text, "text", None) or text.get("text")
+        self.assertIn("错字", text)
+        self.assertIn("不要刻意纠正", text)
+
+    def test_skipped_when_disabled(self) -> None:
+        plugin = self._plugin({"typo_interpretation_enabled": False})
+        req = self._req()
+        plugin._inject_typo_interpretation(_Event("s", "在麻"), req)
+        self.assertEqual(req.extra_user_content_parts, [])
 
 
 if __name__ == "__main__":

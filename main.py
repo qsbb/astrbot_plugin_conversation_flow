@@ -69,6 +69,10 @@ from .core.recent_activity import (
 )
 from .core.prompts import (
     GROUP_CONTEXT_INSTRUCTION_TEMPLATE,
+    GROUP_CONTEXT_REFS_RULES,
+    TYPO_INTERPRETATION_INSTRUCTION,
+    WAKE_BARE_CALL_INSTRUCTION,
+    WAKE_QUOTED_CALL_INSTRUCTION,
     REPLY_SPEAKER_SELF,
     REPLY_TARGET_INSTRUCTION_TEMPLATE,
     REVERSE_WAKE_DECISION_INSTRUCTION_TEMPLATE,
@@ -127,7 +131,7 @@ from .series_diagnostics import (
     record_link_state as record_diagnostic_link,
 )
 
-__version__ = "0.12.10"
+__version__ = "0.12.11"
 PLUGIN_NAME = "astrbot_plugin_conversation_flow"
 # 契约前缀 -> 对端插件 id（用于联动健康链路标识）
 _LINK_PEER_BY_CONTRACT_PREFIX = {
@@ -276,6 +280,12 @@ class ConversationalFlowPlugin(Star):
     # event extra 上用于记录本轮是否命中“概率引用回复”，避免分段重复抽样
     REPLY_QUOTE_DECISION_KEY = "conv_flow_reply_quote_decision"
     REPLY_QUOTE_INSTRUCTION_KEY = "conv_flow_reply_quote_instruction_injected"
+    # reply_with_quote 工具选定的引用目标 message_id（缺省回退当前消息）
+    REPLY_QUOTE_TARGET_KEY = "conv_flow_reply_quote_target"
+    # 本轮是「@+引用+正文」唤醒场景：默认引用目标改为被引用的那条消息
+    WAKE_QUOTED_SCENARIO_KEY = "conv_flow_wake_quoted_scenario"
+    # 唤醒注入的群聊上下文 #n 编号 → message_id 映射快照
+    GROUP_CONTEXT_REFS_KEY = "conv_flow_group_context_refs"
     # event extra 上用于标记"私聊短消息承接上下文已注入"的 key
     PRIVATE_CONTEXT_INJECTED_KEY = "conv_flow_private_context_injected"
     DYNAMIC_CONTEXT_INJECTED_KEY = "conv_flow_dynamic_context_injected"
@@ -323,6 +333,9 @@ class ConversationalFlowPlugin(Star):
         self.config: PluginConfig = build_plugin_config(self._raw_config)
         self._series_control = SeriesControlAdapter(self)
         self._apply_log_level()
+        # 引用回复：llm_decides 模式改用 LLM 工具调用（替代末尾文本标记，杜绝泄漏）
+        self._reply_quote_tool = None
+        self._register_reply_quote_tool()
 
         # 子模块
         self.llm = LLMService(
@@ -345,6 +358,11 @@ class ConversationalFlowPlugin(Star):
             new_turn_gap_ms=self.config.steering_new_turn_gap_ms,
             uncertain_gap_ms=self.config.steering_uncertain_gap_ms,
             open_hold_ms=self.config.steering_open_hold_ms,
+        )
+        self.tracker.update_settle_config(
+            self.config.merge_settle_enabled,
+            self.config.merge_settle_ms,
+            self.config.merge_settle_max_ms,
         )
         self._tool_inflight: dict[str, int] = {}
         self.recent_activity = RecentActivityStore(
@@ -1485,6 +1503,7 @@ class ConversationalFlowPlugin(Star):
             pass
 
     def _refresh_modules(self) -> None:
+        """配置变更后刷新子模块内部状态（含引用回复工具的注册状态）。"""
         """配置变更后刷新子模块内部状态。"""
         self.llm.set_cfg_provider_id(self.config.llm_provider_id)
         self.silence_judge.cfg = self.config
@@ -1494,6 +1513,7 @@ class ConversationalFlowPlugin(Star):
         self.tracker._ttl_seconds = max(
             10.0, self.config.interrupt_state_ttl_ms / 1000.0
         )
+        self._register_reply_quote_tool()
         self.tracker.update_interrupt_config(
             self.config.interrupt_window_ms,
             self.config.interrupt_scope,
@@ -1501,6 +1521,11 @@ class ConversationalFlowPlugin(Star):
             new_turn_gap_ms=self.config.steering_new_turn_gap_ms,
             uncertain_gap_ms=self.config.steering_uncertain_gap_ms,
             open_hold_ms=self.config.steering_open_hold_ms,
+        )
+        self.tracker.update_settle_config(
+            self.config.merge_settle_enabled,
+            self.config.merge_settle_ms,
+            self.config.merge_settle_max_ms,
         )
         self.tracker.update_history_limit(
             max(
@@ -1668,6 +1693,27 @@ class ConversationalFlowPlugin(Star):
                 )
                 return
 
+        # 打断后安静合并：本轮打断了一条还在思考的回复，等一个安静窗口再生成；
+        # 期间被更新消息取代则取消本轮（更新的一轮会重新计时）。
+        settle_ms = self.tracker.get_settle_hold_ms(event)
+        if settle_ms > 0:
+            self.logger.info(
+                "[conv-flow] seq=%s settle hold %sms before regeneration",
+                seq,
+                settle_ms,
+            )
+            await asyncio.sleep(settle_ms / 1000.0)
+            if self.tracker.is_discarded(event):
+                self.tracker.cancel_request(event)
+                try:
+                    event.stop_event()
+                except Exception:
+                    pass
+                self.logger.info(
+                    "[conv-flow] seq=%s superseded during settle hold, stopped", seq
+                )
+                return
+
     # priority=500：凝心溯溪系列 on_llm_request 区间为 200-800，数值越大越先执行。
     # 顺序为 序 800（身份安全边界）> 知 700（知识事实）> 情 600（表达约束）>
     # 言 500。本钩子可能触发沉默并截断整轮，必须排在最后，否则前序模块的
@@ -1683,6 +1729,8 @@ class ConversationalFlowPlugin(Star):
         self._set_extra(event, self.LLM_RESPONSE_TERMINAL_KEY, False)
         self._set_extra(event, self.REPLY_QUOTE_DECISION_KEY, None)
         self._set_extra(event, self.REPLY_QUOTE_INSTRUCTION_KEY, False)
+        self._set_extra(event, self.REPLY_QUOTE_TARGET_KEY, None)
+        self._set_extra(event, self.WAKE_QUOTED_SCENARIO_KEY, False)
         set_flag(
             request_context,
             OWNER_CONVERSATION_FLOW,
@@ -1769,6 +1817,8 @@ class ConversationalFlowPlugin(Star):
 
         # 群聊上下文注入：被唤醒时获取最近群聊消息作为背景
         self._inject_group_context(event, req, seq, is_wake)
+        # 唤醒场景分级：裸@叫人 / @+正文 / @+引用+正文
+        self._inject_wake_scenario(event, req, is_wake)
         # 话题上下文注入：帮助 LLM 理解当前话题（群聊上下文已注入时自动跳过）
         self._inject_topic_context(event, req, seq)
         # 同一自然人的近期跨会话弱背景：本地选择，不联网、不额外调用模型。
@@ -1798,6 +1848,9 @@ class ConversationalFlowPlugin(Star):
 
         if not user_text:
             return
+
+        # 错字/同音字理解：静态注入，不增加额外 LLM 调用
+        self._inject_typo_interpretation(event, req)
 
         self._inject_relationship_offense_instruction(event, req, umo)
 
@@ -2451,6 +2504,11 @@ class ConversationalFlowPlugin(Star):
             and extract_at_targets(event).is_empty()
             and reply_ref.is_empty()
         )
+        self_id = self._get_self_id(event)
+        mention_bot = bool(self_id and self_id in extract_at_targets(event).ids)
+        reply_to_bot = bool(
+            reply_ref.sender_id and self_id and reply_ref.sender_id == self_id
+        )
         self.group_context.record(
             group_id,
             sender_id,
@@ -2461,6 +2519,8 @@ class ConversationalFlowPlugin(Star):
             reply_to_id=reply_ref.message_id,
             reply_to_name=reply_ref.sender_name,
             reply_to_preview=reply_ref.preview,
+            mention_bot=mention_bot,
+            reply_to_bot=reply_to_bot,
             reverse_wake_eligible=reverse_wake_eligible,
         )
 
@@ -2729,6 +2789,46 @@ class ConversationalFlowPlugin(Star):
     # ------------------------------------------------------------------
     # 终止钩子
     # ------------------------------------------------------------------
+
+    # ------------------------------------------------------------------
+    # 引用回复工具（llm_decides 模式）：把「要引用」从文本标记改为函数调用
+    # ------------------------------------------------------------------
+    def _register_reply_quote_tool(self) -> None:
+        """llm_decides 模式下注册 reply_with_quote 工具；否则卸载。"""
+        want = self.config.reply_quote_mode == "llm_decides"
+        context = getattr(self, "context", None)
+        add = getattr(context, "add_llm_tools", None)
+        if not callable(add):
+            return
+        self._cleanup_reply_quote_tool()
+        if not want:
+            return
+        from .core.quote_tool import ReplyQuoteTool
+
+        self._reply_quote_tool = ReplyQuoteTool(self)
+        try:
+            add(self._reply_quote_tool)
+        except Exception as exc:
+            self._reply_quote_tool = None
+            self.logger.warning("[conv-flow] 注册引用工具失败，回退文本标记: %s", exc)
+
+    def _cleanup_reply_quote_tool(self) -> None:
+        """卸载本插件的引用工具，避免热重载后残留同名旧实例。"""
+        current = getattr(self, "_reply_quote_tool", None)
+        if current is None:
+            return
+        name = current.name
+        context = getattr(self, "context", None)
+        for method_name in ("remove_llm_tool", "remove_llm_tools", "unregister_llm_tool"):
+            method = getattr(context, method_name, None)
+            if not callable(method):
+                continue
+            try:
+                method(name)
+                break
+            except Exception:
+                continue
+        self._reply_quote_tool = None
 
     async def terminate(self) -> None:
         """插件卸载时清理资源。"""
@@ -3529,6 +3629,63 @@ class ConversationalFlowPlugin(Star):
             "不要把历史 @对象自动带入本轮回复，也不要替当前发送者确认他人与 bot 的关系。"
         )
 
+    def _resolve_quote_ref(self, event: AstrMessageEvent, target: Any) -> str:
+        """把 reply_with_quote 的 target（#n）解析为 message_id；失败返回空串。"""
+        text = str(target or "").strip()
+        if not text:
+            return ""
+        if not text.startswith("#"):
+            text = f"#{text}"
+        refs = self._get_extra(event, self.GROUP_CONTEXT_REFS_KEY)
+        if not isinstance(refs, dict):
+            return ""
+        return str(refs.get(text) or "")
+
+    def _inject_wake_scenario(
+        self, event: AstrMessageEvent, req: Any, is_wake: bool
+    ) -> None:
+        """群聊唤醒场景分级：裸@叫人 / @+正文 / @+引用+正文。"""
+        if not is_wake or self._is_private_chat(event):
+            return
+        # 反向唤醒（先发正文再单独@）有专用判断指令，不重复分级
+        if self._get_extra(event, self.REVERSE_WAKE_RESTORED_KEY) is True:
+            return
+        reply_ref = extract_reply_ref(event)
+        if not reply_ref.is_empty():
+            # @+引用+正文：优先围绕被引用内容回应；默认引用目标切换为被引用消息
+            if self._inject_instruction(
+                req, WAKE_QUOTED_CALL_INSTRUCTION, "wake quoted call"
+            ):
+                self._set_extra(event, self.WAKE_QUOTED_SCENARIO_KEY, True)
+            return
+        text = extract_plain_text(event)
+        at_targets = extract_at_targets(event)
+        self_id = self._get_self_id(event)
+        if text.strip() or not self_id or self_id not in at_targets.ids:
+            return
+        # 裸@叫人：引导她看一眼群记录，挑值得接的话回应
+        quote_hint = ""
+        if getattr(self, "_reply_quote_tool", None) is not None:
+            quote_hint = (
+                "想引用某条记录时，调用 reply_with_quote 并传 target "
+                "为对应编号（如 #2）；"
+            )
+        self._inject_instruction(
+            req,
+            WAKE_BARE_CALL_INSTRUCTION.format(quote_hint=quote_hint),
+            "wake bare call",
+        )
+
+    def _inject_typo_interpretation(
+        self, event: AstrMessageEvent, req: Any
+    ) -> None:
+        """错字/同音字理解提示：私聊群聊均注入，静态文案不增加模型调用。"""
+        if not self.config.typo_interpretation_enabled:
+            return
+        self._inject_instruction(
+            req, TYPO_INTERPRETATION_INSTRUCTION, "typo interpretation"
+        )
+
     def _inject_group_context(
         self, event: AstrMessageEvent, req: Any, seq: Any, is_wake: bool
     ) -> None:
@@ -3543,17 +3700,32 @@ class ConversationalFlowPlugin(Star):
         bot_label = self.config.group_context_bot_label
         # 排除当前正在处理的这条消息：它已经是 prompt 主体，
         # 再出现在背景记录里会让模型看到重复内容。
-        context = self.group_context.get_recent_context(
-            group_id,
-            self.config.group_context_max_messages,
-            bot_label=bot_label,
-            exclude_message_id=self._context_exclude_message_id(event),
-        )
+        exclude_message_id = self._context_exclude_message_id(event)
+        refs: dict[str, str] = {}
+        if is_wake:
+            # 唤醒注入带 #n 编号与「← 在叫你 / ← 回复你」优先标记，
+            # 模型可经 reply_with_quote(target="#n") 引用记录里的任意一条。
+            context, refs = self.group_context.get_recent_context_with_refs(
+                group_id,
+                self.config.group_context_max_messages,
+                bot_label=bot_label,
+                exclude_message_id=exclude_message_id,
+            )
+        else:
+            context = self.group_context.get_recent_context(
+                group_id,
+                self.config.group_context_max_messages,
+                bot_label=bot_label,
+                exclude_message_id=exclude_message_id,
+            )
         if not context:
             return
         instruction = GROUP_CONTEXT_INSTRUCTION_TEMPLATE.format(
             context=context, bot_label=bot_label
         )
+        if refs:
+            instruction = f"{instruction}\n{GROUP_CONTEXT_REFS_RULES}"
+            self._set_extra(event, self.GROUP_CONTEXT_REFS_KEY, refs)
         instruction = f"{instruction}\n\n{self._current_sender_anchor(event)}"
         injected = False
         try:
@@ -5046,6 +5218,9 @@ class ConversationalFlowPlugin(Star):
             return False
         if not self._reply_quote_target_message_id(event):
             return False
+        if getattr(self, "_reply_quote_tool", None) is not None:
+            # 工具已接管：不再注入文本标记指令，正文不再出现 <REPLY_QUOTE/>
+            return False
         injected = self._inject_instruction(
             req, REPLY_QUOTE_DECISION_INSTRUCTION, "reply quote decision"
         )
@@ -5148,7 +5323,18 @@ class ConversationalFlowPlugin(Star):
         return decision
 
     def _reply_quote_target_message_id(self, event: AstrMessageEvent) -> str:
-        """返回真正被回应的消息 ID；反向唤醒优先引用前一条正文。"""
+        """返回真正被回应的消息 ID。
+
+        优先级：reply_with_quote 工具指定 > 「@+引用」场景被引用的消息 >
+        反向唤醒的前一条正文 > 当前消息。
+        """
+        override = self._get_extra(event, self.REPLY_QUOTE_TARGET_KEY)
+        if override:
+            return str(override)
+        if self._get_extra(event, self.WAKE_QUOTED_SCENARIO_KEY) is True:
+            reply_ref = extract_reply_ref(event)
+            if reply_ref.message_id:
+                return reply_ref.message_id
         if self._get_extra(event, self.REVERSE_WAKE_RESTORED_KEY) is True:
             source_message_id = self._get_extra(
                 event, self.REVERSE_WAKE_SOURCE_MESSAGE_ID_KEY
@@ -5689,6 +5875,8 @@ _RELATIONSHIP_OFFENSE_TAG_RE = re.compile(
 _RELATIONSHIP_OFFENSE_MARKER_RE = re.compile(
     r"^\s*<RELATIONSHIP_OFFENSE\s+([^>]+)>\s*", re.IGNORECASE
 )
+# 模型不一定会"另起一行"输出标记（实测出现过直接跟在正文末尾的写法），
+# 只要标记在回复最末尾就算——前面允许零个或多个空白，标记内允许空格变体。
 _REPLY_QUOTE_CONTROL_RE = re.compile(
-    r"(?:\r?\n)+\s*<REPLY_QUOTE/>\s*\Z", re.IGNORECASE
+    r"\s*<REPLY_QUOTE\s*/?>\s*\Z", re.IGNORECASE
 )
