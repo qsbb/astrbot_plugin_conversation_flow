@@ -14,7 +14,6 @@ from astrbot_plugin_conversation_flow.core.interrupt_tracker import (  # noqa: E
     ConversationTracker,
 )
 from astrbot_plugin_conversation_flow.core.task_relation import (  # noqa: E402
-    task_relation,
     text_completeness,
 )
 
@@ -67,40 +66,13 @@ def _classify_at(tracker: ConversationTracker, event: _Event, ts: float) -> str:
         return tracker.classify_event_relation(event)
 
 
-class TaskRelationRuleTests(unittest.TestCase):
+class TextCompletenessTests(unittest.TestCase):
     def test_text_completeness(self) -> None:
         self.assertEqual(text_completeness("在吗"), "open")
         self.assertEqual(text_completeness("我点个美式吧"), "open")
         self.assertEqual(text_completeness("先这样，"), "open")
         self.assertEqual(text_completeness("帮我查下明天天气。"), "complete")
         self.assertEqual(text_completeness(""), "complete")
-
-    def test_continuation_marker_is_same_task(self) -> None:
-        self.assertEqual(
-            task_relation(["我点个美式吧"], "还有，帮我带杯水", 900),
-            "same_task",
-        )
-
-    def test_correction_is_same_task_even_after_new_turn_gap(self) -> None:
-        self.assertEqual(
-            task_relation(["我想吃火锅"], "不是，我是说想吃烤肉", 6000),
-            "same_task",
-        )
-
-    def test_long_gap_without_signal_is_new_task(self) -> None:
-        self.assertEqual(
-            task_relation(["晚上好呀。"], "帮我查下明天天气", 6000),
-            "new_task",
-        )
-
-    def test_open_previous_message_short_gap_is_same_task(self) -> None:
-        self.assertEqual(task_relation(["帮我看下这个，"], "就是这段代码", 1800), "same_task")
-
-    def test_media_continuation_is_same_task(self) -> None:
-        self.assertEqual(
-            task_relation(["你看这个"], "", 2000, has_new_media=True),
-            "same_task",
-        )
 
 
 class SteeringTrackerTests(unittest.TestCase):

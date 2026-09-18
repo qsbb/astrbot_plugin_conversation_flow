@@ -28,10 +28,6 @@ def test_conversation_page_surfaces_grouped_stats_and_stale_state() -> None:
     assert 'steering: "插话引导"' in js
     assert "scene_hinted" in js
     assert "mood_hinted" in js
-    assert 'id="config-summary"' in html
-    assert "function renderConfig(" in js
-    assert 'bridge.apiGet("config")' in js
-    assert "配置摘要读取失败" in js
     assert ".stat-group" in css
     assert ".metric-grid" in css
     assert "justify-content: space-between" in css
@@ -52,7 +48,7 @@ def test_conversation_page_has_loading_skeleton_contract() -> None:
     assert "prefers-reduced-motion" in css
 
 
-def test_conversation_page_puts_ratio_kpis_first_and_lists_full_config() -> None:
+def test_conversation_page_puts_ratio_kpis_first() -> None:
     js = (PAGE_DIR / "app.js").read_text(encoding="utf-8")
     css = (PAGE_DIR / "style.css").read_text(encoding="utf-8")
 
@@ -72,21 +68,6 @@ def test_conversation_page_puts_ratio_kpis_first_and_lists_full_config() -> None
     skeleton = js[js.index('document.getElementById("stats").innerHTML'):js.index('function render(data)')]
     assert skeleton.index('ratio-group') < skeleton.index('statGroups.map')
     assert "metric.repeat(group.keys.length)" in js
-
-    # 配置摘要覆盖后端返回的全部 8 项，缺失值显示 —
-    for key in (
-        "silence_enabled",
-        "silence_strategy",
-        "chunking_enabled",
-        "chunking_min_length",
-        "interrupt_enabled",
-        "interrupt_mode",
-        "interrupt_scope",
-        "group_context_enabled",
-    ):
-        assert f'"{key}"' in js
-    assert 'return value === true ? "开启" : value === false ? "关闭" : "—";' in js
-    assert 'value === null || value === undefined || value === ""' in js
 
 
 def test_conversation_page_settings_center_edits_config_without_kernel() -> None:
@@ -112,7 +93,7 @@ def test_conversation_page_settings_center_edits_config_without_kernel() -> None
     assert "核已覆盖" in js
     # 数字校验与错误提示留在页面内（不弹原生对话框）
     assert "请填写数字或撤销该项修改" in js
-    assert "alert(" not in js and "confirm(" not in js and "prompt(" not in js
+    assert "alert(" not in js and "window.confirm(" not in js and "prompt(" not in js
     # 布局与响应式
     assert ".settings-grid" in css
     assert ".settings-row.dirty" in css

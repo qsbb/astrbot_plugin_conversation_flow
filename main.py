@@ -131,7 +131,7 @@ from .series_diagnostics import (
     record_link_state as record_diagnostic_link,
 )
 
-__version__ = "0.12.11"
+__version__ = "0.12.12"
 PLUGIN_NAME = "astrbot_plugin_conversation_flow"
 # 契约前缀 -> 对端插件 id（用于联动健康链路标识）
 _LINK_PEER_BY_CONTRACT_PREFIX = {
@@ -282,7 +282,7 @@ class ConversationalFlowPlugin(Star):
     REPLY_QUOTE_INSTRUCTION_KEY = "conv_flow_reply_quote_instruction_injected"
     # reply_with_quote 工具选定的引用目标 message_id（缺省回退当前消息）
     REPLY_QUOTE_TARGET_KEY = "conv_flow_reply_quote_target"
-    # 本轮是「@+引用+正文」唤醒场景：默认引用目标改为被引用的那条消息
+    # 本轮是「@+引用+正文」唤醒场景：默认引用被引用的那条消息
     WAKE_QUOTED_SCENARIO_KEY = "conv_flow_wake_quoted_scenario"
     # 唤醒注入的群聊上下文 #n 编号 → message_id 映射快照
     GROUP_CONTEXT_REFS_KEY = "conv_flow_group_context_refs"
@@ -355,8 +355,6 @@ class ConversationalFlowPlugin(Star):
             self.config.interrupt_window_ms,
             self.config.interrupt_scope,
             steering_mode=self.config.interrupt_mode == "steering",
-            new_turn_gap_ms=self.config.steering_new_turn_gap_ms,
-            uncertain_gap_ms=self.config.steering_uncertain_gap_ms,
             open_hold_ms=self.config.steering_open_hold_ms,
         )
         self.tracker.update_settle_config(
@@ -498,7 +496,6 @@ class ConversationalFlowPlugin(Star):
             return False
         try:
             register(f"/{PLUGIN_NAME}/status", self._pages_status, ["GET"], "对话流运行状态")
-            register(f"/{PLUGIN_NAME}/config", self._pages_config, ["GET"], "对话流只读配置")
             register(f"/{PLUGIN_NAME}/schema", self._pages_schema, ["GET"], "对话流配置结构")
             register(f"/{PLUGIN_NAME}/config", self._pages_save_config, ["POST"], "保存对话流配置")
             return True
@@ -507,23 +504,6 @@ class ConversationalFlowPlugin(Star):
 
     async def _pages_status(self):
         return self._json_response(self._status_payload())
-
-    async def _pages_config(self):
-        return self._json_response(
-            {
-                "success": True,
-                "config": {
-                    "silence_enabled": bool(self.config.silence_enabled),
-                    "silence_strategy": self.config.silence_strategy,
-                    "chunking_enabled": bool(self.config.chunking_enabled),
-                    "chunking_min_length": self.config.chunking_min_length,
-                    "interrupt_enabled": bool(self.config.interrupt_enabled),
-                    "interrupt_mode": self.config.interrupt_mode,
-                    "interrupt_scope": self.config.interrupt_scope,
-                    "group_context_enabled": bool(self.config.group_context_enabled),
-                },
-            }
-        )
 
     # ------------------------------------------------------------------
     # Plugin Page 设置中心（standalone 配置编辑，与运行内核共用同一状态）
@@ -1518,8 +1498,6 @@ class ConversationalFlowPlugin(Star):
             self.config.interrupt_window_ms,
             self.config.interrupt_scope,
             steering_mode=self.config.interrupt_mode == "steering",
-            new_turn_gap_ms=self.config.steering_new_turn_gap_ms,
-            uncertain_gap_ms=self.config.steering_uncertain_gap_ms,
             open_hold_ms=self.config.steering_open_hold_ms,
         )
         self.tracker.update_settle_config(
@@ -2791,7 +2769,7 @@ class ConversationalFlowPlugin(Star):
     # ------------------------------------------------------------------
 
     # ------------------------------------------------------------------
-    # 引用回复工具（llm_decides 模式）：把「要引用」从文本标记改为函数调用
+    # 引用回复工具（llm_decides 模式）：由模型调用 reply_with_quote 表达引用
     # ------------------------------------------------------------------
     def _register_reply_quote_tool(self) -> None:
         """llm_decides 模式下注册 reply_with_quote 工具；否则卸载。"""

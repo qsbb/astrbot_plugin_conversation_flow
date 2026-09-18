@@ -41,8 +41,6 @@ DEFAULTS: dict[str, Any] = {
     # steering：运行中插话（生成先行、任务归属判定、延迟提交）；
     # window：兼容旧的固定时间窗逻辑。
     "interrupt_mode": "steering",
-    "steering_new_turn_gap_ms": 3500,
-    "steering_uncertain_gap_ms": 1500,
     "steering_open_hold_ms": 400,
     # 打断后安静合并：消息打断了一条还在思考的回复时，等一个安静窗口再重跑
     "merge_settle_enabled": True,
@@ -306,20 +304,6 @@ def normalize_config(raw: dict[str, Any] | None) -> dict[str, Any]:
     mode = _coerce_str(raw.get("interrupt_mode"), DEFAULTS["interrupt_mode"])
     out["interrupt_mode"] = (
         mode if mode in _VALID_INTERRUPT_MODES else DEFAULTS["interrupt_mode"]
-    )
-    out["steering_new_turn_gap_ms"] = max(
-        0,
-        _coerce_int(
-            raw.get("steering_new_turn_gap_ms"),
-            DEFAULTS["steering_new_turn_gap_ms"],
-        ),
-    )
-    out["steering_uncertain_gap_ms"] = max(
-        0,
-        _coerce_int(
-            raw.get("steering_uncertain_gap_ms"),
-            DEFAULTS["steering_uncertain_gap_ms"],
-        ),
     )
     out["steering_open_hold_ms"] = max(
         0,
@@ -717,8 +701,6 @@ class PluginConfig:
     interrupt_thinking_merge_context_count: int = 5
     interrupt_merge_strategy: str = "append"
     interrupt_mode: str = "steering"
-    steering_new_turn_gap_ms: int = 3500
-    steering_uncertain_gap_ms: int = 1500
     steering_open_hold_ms: int = 400
     merge_settle_enabled: bool = True
     merge_settle_ms: int = 4000

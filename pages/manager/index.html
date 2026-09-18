@@ -4,8 +4,8 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>凝心溯溪-言 · 对话流状态</title>
-    <link rel="stylesheet" href="./style.css?v=0.12.11-1" />
-        <link rel="stylesheet" href="./series-ui.css?v=0.12.11-1" />
+    <link rel="stylesheet" href="./style.css?v=0.12.12-1" />
+        <link rel="stylesheet" href="./series-ui.css?v=0.12.12-1" />
   </head>
   <body data-series-ui="1">
     <p id="bridge-error" class="alert error" role="alert" hidden>
@@ -16,7 +16,7 @@
         <div>
           <p class="eyebrow">AstrBot 插件管理页</p>
           <h1>凝心溯溪-言</h1>
-          <p>沉默判断、智能分段、插话引导与群聊上下文状态</p>
+          <p>对话节奏与拟人化表达</p>
           <p id="plugin-meta" class="meta-line">版本读取中</p>
         </div>
         <button id="refresh" type="button">刷新</button>
@@ -26,10 +26,6 @@
       <section class="card">
         <h2>能力状态</h2>
         <div id="features" class="feature-list"></div>
-      </section>
-      <section class="card">
-        <h2>当前配置摘要</h2>
-        <div id="config-summary" class="feature-list"><p class="empty-state">读取中…</p></div>
       </section>
       <section class="card" id="settings-card">
         <div class="card-head">
@@ -41,11 +37,11 @@
         </div>
         <p id="settings-notice" class="alert warning" role="status" hidden></p>
         <div id="settings-groups"><p class="empty-state">读取中…</p></div>
-        <p class="note">保存后立即生效并持久化到本地配置；安装核后同一份配置也可在核 WebUI 字段接管中调整，被核覆盖层接管的项会标注「核已覆盖」。</p>
+        <p class="note">保存后立即生效；若某项被凝心核统一管理，会标注「核已覆盖」。</p>
       </section>
     </main>
     <script src="/api/plugin/page/bridge-sdk.js"></script>
-    <script src="./series-ui.js?v=0.12.11-1"></script>
-    <script type="module" src="./app.js?v=0.12.11-1"></script>
+    <script src="./series-ui.js?v=0.12.12-1"></script>
+    <script type="module" src="./app.js?v=0.12.12-1"></script>
   </body>
 </html>

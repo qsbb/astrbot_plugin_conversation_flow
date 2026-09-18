@@ -173,20 +173,6 @@
     "hint": "steering：单条消息不额外等待，生成中的补充/纠正/媒体延续按同一任务合并，新话题不硬合并；window：保持旧的固定时间窗逻辑。默认 steering。",
     "default": "steering"
   },
-  "steering_new_turn_gap_ms": {
-    "type": "int",
-    "description": "[插话中断] steering 新任务间隔（毫秒）",
-    "hint": "超过此间隔且没有补充、纠正、媒体等连续信号时，视为新任务，旧回复正常发出。默认 3500ms。",
-    "default": 3500,
-    "minimum": 0
-  },
-  "steering_uncertain_gap_ms": {
-    "type": "int",
-    "description": "[插话中断] steering 不确定窗口（毫秒）",
-    "hint": "规则无法明确判断时，此窗口内倾向按同一任务合并，保证只回一条；默认 1500ms。",
-    "default": 1500,
-    "minimum": 0
-  },
   "steering_open_hold_ms": {
     "type": "int",
     "description": "[插话中断] steering 生成前宽限（毫秒）",

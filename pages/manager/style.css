@@ -69,6 +69,7 @@
 .stat-group-head span {
   color: var(--si-muted);
   font-size: 12px;
+  white-space: nowrap;
 }
 
 .metric-grid {
@@ -182,29 +183,15 @@
 }
 
 .alert {
-  width: min(1120px, calc(100% - 32px));
-  margin: 18px auto 0;
+  /* stale 提示与主体同宽，不再左右缩进 */
+  width: 100%;
+  margin: 18px 0 0;
   padding: 12px 14px;
   border: 1px solid rgba(209, 75, 90, .22);
   border-radius: var(--si-radius-sm);
   color: var(--si-danger);
   background: var(--si-danger-soft);
   box-shadow: var(--si-shadow-sm);
-}
-
-@media (max-width: 720px) {
-  .hero {
-    align-items: stretch;
-    flex-direction: column;
-  }
-
-  #refresh {
-    align-self: flex-start;
-  }
-
-  .feature-list {
-    grid-template-columns: 1fr;
-  }
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -241,7 +228,21 @@
   font-size: 11px;
 }
 
+/* 移动端：hero 纵排、列表单列；所有指标组统一两列，避免普通组塌成一列把页面拉得很长 */
 @media (max-width: 720px) {
+  .hero {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  #refresh {
+    align-self: flex-start;
+  }
+
+  .feature-list {
+    grid-template-columns: 1fr;
+  }
+
   .ratio-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
@@ -249,15 +250,9 @@
   .ratio-metric strong {
     font-size: 22px;
   }
-}
 
-/* 移动端：所有指标组统一两列，避免普通组塌成一列把页面拉得很长 */
-@media (max-width: 720px) {
   .metric-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
-
-/* stale 提示与主体同宽，不再左右缩进 */
-.alert { width: 100%; margin: 18px 0 0; }
 
 /* 指标数字用紧凑行高，标签/数字/说明之间保持一致节奏 */
 .metric strong { line-height: 1.1; }

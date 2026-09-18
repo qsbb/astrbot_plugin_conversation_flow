@@ -6,7 +6,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Any
 
-from .task_relation import task_relation, text_completeness
+from .task_relation import text_completeness
 
 # 思考中合并的护栏：连续取消重跑次数与单轮总时长上限。
 # 超过后退化为"排队下一轮"，避免用户连续补话把回复饿死。
@@ -127,8 +127,6 @@ class ConversationTracker:
         self._scope: str = "sender"
         # 运行中插话（steering）配置：默认开启，群聊 sender 作用域仍走旧窗口逻辑。
         self._steering_mode: bool = True
-        self._steering_new_turn_gap_ms: int = 3500
-        self._steering_uncertain_gap_ms: int = 1500
         self._steering_open_hold_ms: int = 400
         # 打断后安静合并：生效与否、安静窗口、自本轮首条消息起的总封顶
         self._settle_enabled: bool = True
@@ -141,8 +139,6 @@ class ConversationTracker:
         scope: str,
         *,
         steering_mode: bool | None = None,
-        new_turn_gap_ms: int | None = None,
-        uncertain_gap_ms: int | None = None,
         open_hold_ms: int | None = None,
     ) -> None:
         """更新插话检测时间窗和运行中插话（steering）参数。"""
@@ -150,10 +146,6 @@ class ConversationTracker:
         self._scope = scope
         if steering_mode is not None:
             self._steering_mode = bool(steering_mode)
-        if new_turn_gap_ms is not None:
-            self._steering_new_turn_gap_ms = max(0, int(new_turn_gap_ms))
-        if uncertain_gap_ms is not None:
-            self._steering_uncertain_gap_ms = max(0, int(uncertain_gap_ms))
         if open_hold_ms is not None:
             self._steering_open_hold_ms = max(0, int(open_hold_ms))
 
@@ -227,46 +219,6 @@ class ConversationTracker:
         if self._merge_budget_exhausted(pending, now):
             return "new_task"
         return "same_task"
-
-    def _classify_task_relation_legacy(
-        self,
-        pending: PendingRequest,
-        new_text: str,
-        now: float,
-        event: Any,
-    ) -> str:
-        """旧的时间窗启发式判定（steering 主决策已不使用，保留供参考）。"""
-        old_texts = [
-            str(item).strip()
-            for item in pending.user_texts
-            if str(item).strip() and not self._is_placeholder_text(str(item))
-        ]
-        last_ts = (
-            pending.user_text_times[-1]
-            if pending.user_text_times
-            else pending.started_at
-        )
-        gap_ms = max(0.0, (now - last_ts) * 1000.0)
-        hard_gap_ms = (
-            float(self._interrupt_window_ms)
-            if self._interrupt_window_ms > 0
-            else 86_400_000.0
-        )
-        relation = task_relation(
-            old_texts,
-            new_text,
-            gap_ms,
-            has_old_media=pending.media.has_content(),
-            has_new_media=self._event_has_media(event),
-            new_turn_gap_ms=float(self._steering_new_turn_gap_ms),
-            uncertain_gap_ms=float(self._steering_uncertain_gap_ms),
-            hard_gap_ms=hard_gap_ms,
-        )
-        # Phase 1：不确定时倾向合并，保证"只回一条"的连贯性；
-        # 超过不确定窗口且没有强信号时，规则已返回 new_task。
-        if relation == "uncertain" and gap_ms <= self._steering_uncertain_gap_ms:
-            return "same_task"
-        return relation
 
     def _active_merge_candidates(
         self, state: ConversationState, now: float, window_s: float

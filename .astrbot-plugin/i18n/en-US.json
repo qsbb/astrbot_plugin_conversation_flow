@@ -71,7 +71,7 @@
   "pages": {
     "manager": {
       "title": "Conversation Flow",
-      "description": "Configure silence handling, chunked delivery, interruption, quoting, and logging"
+      "description": "Configure silence handling, chunked delivery, interruption, and quoting"
     }
   }
 }

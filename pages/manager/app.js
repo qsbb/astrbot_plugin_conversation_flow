@@ -34,7 +34,7 @@ const ratioKpis = [
   { label: "沉默率", keys: ["silenced"], hint: "沉默 / 总请求" },
   { label: "分段率", keys: ["chunked"], hint: "分段 / 总请求" },
   { label: "插话合并率", keys: ["interrupted"], hint: "插话合并 / 总请求" },
-  { label: "上下文拦截率", keys: ["intercepted", "air_guarded", "scene_guarded"], hint: "拦截命中 / 总请求" },
+  { label: "上下文拦截率", keys: ["intercepted", "air_guarded", "scene_guarded"], hint: "拦截+读空气+场景 / 总请求" },
 ];
 
 const statGroups = [
@@ -44,15 +44,8 @@ const statGroups = [
 ];
 let lastUpdated = null;
 
-function escapeHtml(value) {
-  return String(value ?? "").replace(/[&<>"']/g, (ch) => ({
-    "&": "&amp;",
-    "<": "&lt;",
-    ">": "&gt;",
-    "\"": "&quot;",
-    "'": "&#39;"
-  })[ch]);
-}
+// 转义统一走系列共享实现；惰性解析避免 series-ui.js 未加载时模块顶层直接崩溃。
+const escapeHtml = (value) => window.SeriesUI.escapeHtml(value);
 
 function formatUpdated(date) {
   return date ? date.toLocaleTimeString("zh-CN", { hour12: false }) : "";
@@ -68,7 +61,6 @@ function renderLoading({ replace = true } = {}) {
   document.getElementById("stats").innerHTML = `<section class="stat-group ratio-group"><div class="stat-group-head"><h2>关键比率</h2><span>…</span></div><div class="metric-grid ratio-grid">${metric.repeat(4)}</div></section>`
     + statGroups.map((group) => `<section class="stat-group"><div class="stat-group-head"><h2>${group.title}</h2><span>…</span></div><div class="metric-grid">${metric.repeat(group.keys.length)}</div></section>`).join("");
   document.getElementById("features").innerHTML = feature.repeat(6);
-  document.getElementById("config-summary").innerHTML = feature.repeat(4);
 }
 
 function ratioValue(stats, keys) {
@@ -109,55 +101,12 @@ function render(data) {
   document.getElementById("plugin-meta").textContent = `版本 ${data.plugin?.version || "—"}`;
 }
 
-function renderConfig(data) {
-  const host = document.getElementById("config-summary");
-  if (!data) {
-    host.innerHTML = '<p class="empty-state">配置摘要读取失败，请刷新重试。</p>';
-    return;
-  }
-  const config = data.config || {};
-  const booleanLabels = {
-    silence_enabled: "沉默判断",
-    chunking_enabled: "智能分段",
-    interrupt_enabled: "插话中断",
-    group_context_enabled: "群聊上下文",
-  };
-  const entries = [
-    ["silence_enabled", booleanLabels.silence_enabled],
-    ["silence_strategy", "沉默策略"],
-    ["chunking_enabled", booleanLabels.chunking_enabled],
-    ["chunking_min_length", "分段最小长度"],
-    ["interrupt_enabled", booleanLabels.interrupt_enabled],
-    ["interrupt_mode", "插话模式"],
-    ["interrupt_scope", "插话作用域"],
-    ["group_context_enabled", booleanLabels.group_context_enabled],
-  ];
-  // 配置枚举值一律转成中文功能名，界面上不再出现 inject / steering / sender 这类内部值。
-  const configValueLabels = {
-    silence_strategy: { inject: "指令注入", prejudge: "独立预判", both: "两者结合" },
-    interrupt_mode: { steering: "运行中插话归属", window: "固定时间窗" },
-    interrupt_scope: { room: "本群任何新消息", sender: "仅同一发送者", mention_or_sender: "同一发送者或 @Bot" },
-  };
-  const formatConfigValue = (key, value) => {
-    if (Object.prototype.hasOwnProperty.call(booleanLabels, key)) {
-      return value === true ? "开启" : value === false ? "关闭" : "—";
-    }
-    if (value === null || value === undefined || value === "") return "—";
-    const mapped = configValueLabels[key] && configValueLabels[key][value];
-    return escapeHtml(mapped || value);
-  };
-  host.innerHTML = entries
-    .map(([key, label]) => `<div class="feature"><span>${label}</span><strong>${formatConfigValue(key, config[key])}</strong></div>`)
-    .join("");
-}
-
 async function load() {
   if (!bridge) {
     document.querySelector(".shell")?.setAttribute("aria-busy", "false");
     if (!lastUpdated) {
       document.getElementById("stats").innerHTML = '<p class="empty-state">页面通信组件未加载，运行状态暂不可用。</p>';
       document.getElementById("features").innerHTML = '<p class="empty-state">页面通信组件未加载，能力状态暂不可用。</p>';
-      document.getElementById("config-summary").innerHTML = '<p class="empty-state">页面通信组件未加载，配置摘要暂不可用。</p>';
     }
     return;
   }
@@ -169,15 +118,13 @@ async function load() {
     button.textContent = "刷新中…";
   }
   try {
-    const [statusResult, configResult, schemaResult] = await Promise.allSettled([
+    const [statusResult, schemaResult] = await Promise.allSettled([
       bridge.apiGet("status"),
-      bridge.apiGet("config"),
       bridge.apiGet("schema"),
     ]);
     if (statusResult.status !== "fulfilled") throw statusResult.reason;
     const data = statusResult.value;
     render(data);
-    renderConfig(configResult.status === "fulfilled" ? configResult.value : null);
     if (schemaResult.status === "fulfilled") {
       applySchemaPayload(schemaResult.value);
     } else {
@@ -199,9 +146,8 @@ async function load() {
       errorNode.hidden = false;
       document.getElementById("stats").innerHTML = '<p class="empty-state">运行状态暂不可用，请刷新重试。</p>';
       document.getElementById("features").innerHTML = '<p class="empty-state">能力状态暂不可用，请刷新重试。</p>';
-      document.getElementById("config-summary").innerHTML = '<p class="empty-state">配置摘要暂不可用，请刷新重试。</p>';
     }
-    // 已有旧数据时用内联横幅说明（stale），不再叠加 toast；首次失败才用 toast 提升可见性。
+    // 已有旧数据时用内联横幅说明（stale）；首次失败才用 toast。
     if (!lastUpdated && window.SeriesUI && typeof window.SeriesUI.toast === "function") {
       window.SeriesUI.toast(message, "error");
     }
@@ -230,7 +176,9 @@ const settingsDirtyNode = document.getElementById("settings-dirty");
 const settingsNoticeNode = document.getElementById("settings-notice");
 const settingsSaveButton = document.getElementById("settings-save");
 const settingsResetButton = document.getElementById("settings-reset");
-const showUnsavedConfirm = window.SeriesUI.confirm;
+// 惰性获取：series-ui.js 未加载时模块顶层不得抛错，保证 bridge-error 回退链可达。
+const showUnsavedConfirm = (options) =>
+  window.SeriesUI?.confirm ? window.SeriesUI.confirm(options) : Promise.resolve(false);
 
 function hasUnsavedChanges() {
   return dirtyKeys.size > 0;
@@ -311,7 +259,7 @@ function renderSettings() {
         .map((field) => {
           const overridden = overriddenKeys.has(field.key);
           const badge = overridden
-            ? '<em class="override-badge" title="该项当前由核 WebUI 覆盖层接管">核已覆盖</em>'
+            ? '<em class="override-badge" title="该项由凝心核统一管理，此处修改不生效">核已覆盖</em>'
             : "";
           const hint = field.hint
             ? `<span class="settings-hint">${escapeHtml(field.hint)}</span>`
