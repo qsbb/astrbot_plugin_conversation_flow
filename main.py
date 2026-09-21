@@ -131,7 +131,7 @@ from .series_diagnostics import (
     record_link_state as record_diagnostic_link,
 )
 
-__version__ = "0.12.12"
+__version__ = "0.12.13"
 PLUGIN_NAME = "astrbot_plugin_conversation_flow"
 # 契约前缀 -> 对端插件 id（用于联动健康链路标识）
 _LINK_PEER_BY_CONTRACT_PREFIX = {
@@ -1186,6 +1186,7 @@ class ConversationalFlowPlugin(Star):
             },
         }
         try:
+            # 门控与起草共用一次调用，按 conversation 路由，不拆分以省一次请求。
             decision = await self.llm.chat_json(
                 json.dumps(model_input, ensure_ascii=False, sort_keys=True),
                 system_prompt=(
@@ -4487,18 +4488,43 @@ class ConversationalFlowPlugin(Star):
         return ""
 
     def _get_plugin_instance(self, plugin_name: str) -> Any | None:
+        """解析其他插件实例：先试集成层快捷入口，再走 AstrBot 官方注册表。"""
         getter = getattr(self.context, "get_star_instance", None)
-        if not callable(getter):
-            return None
-        try:
-            return getter(plugin_name)
-        except Exception as exc:
-            self.logger.debug(
-                "[conv-flow] plugin lookup failed: plugin=%s error=%s",
-                plugin_name,
-                exc,
-            )
-            return None
+        if callable(getter):
+            try:
+                instance = getter(plugin_name)
+            except Exception as exc:
+                self.logger.debug(
+                    "[conv-flow] plugin lookup failed: plugin=%s error=%s",
+                    plugin_name,
+                    exc,
+                )
+                instance = None
+            if instance is not None and not isinstance(instance, type):
+                return instance
+        # AstrBot 4.x 官方接口：get_registered_star 返回 StarMetadata，
+        # 运行实例挂在 star_cls 上（class 值要跳过）。
+        registry = getattr(self.context, "get_registered_star", None)
+        if callable(registry):
+            try:
+                meta = registry(plugin_name)
+            except Exception:
+                meta = None
+            if meta is not None:
+                for attr in (
+                    "star_cls",
+                    "star",
+                    "instance",
+                    "star_instance",
+                    "plugin",
+                ):
+                    try:
+                        candidate = getattr(meta, attr, None)
+                    except Exception:
+                        continue
+                    if candidate is not None and not isinstance(candidate, type):
+                        return candidate
+        return None
 
     def _record_contract_link(
         self,

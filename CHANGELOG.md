@@ -1,4 +1,16 @@
 ## [Unreleased]
+## 0.12.13 - 2026-09-21
+
+### 修复
+
+- 模型路由适配层与插件间发现改用 AstrBot 官方接口：先试 ``get_star_instance``，失败回退 ``get_registered_star`` → ``StarMetadata.star_cls``。此前官方 AstrBot 下拿不到核实例，核统一模型路由从未生效；与「序 / 情 / 声」的联动（共 7 处调用点）同样一直静默失效。
+- 显式指定的 provider 失效时不再直接跳到 AstrBot 会话默认（那会绕过核路由与本地配置链），改为继续走完整解析链并记录告警。
+- 第 5 层同步兜底改用真实存在的 ``get_using_provider()``（原用的 ``get_using_provider_id`` / ``get_default_provider_id`` 在 AstrBot 中不存在），并对异步返回值做协程关闭防御。
+
+### 新增
+
+- 核路由命中时消费核里配置的具体模型（``text_chat(model=...)``，带 ``TypeError`` 兜底）；本地显式配置命中时不附带核模型。
+
 ## 0.12.12 - 2026-09-19
 
 ### 变更

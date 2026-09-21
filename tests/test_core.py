@@ -653,6 +653,85 @@ class _LLM:
         return ""
 
 
+class _RouteProvider:
+    """记录 text_chat 调用参数的假 Provider。"""
+
+    def __init__(self, provider_id: str, *, supports_model: bool = True) -> None:
+        self.provider_config = {"id": provider_id}
+        self.supports_model = supports_model
+        self.calls: list[dict[str, object]] = []
+
+    async def text_chat(self, **kwargs):
+        self.calls.append(dict(kwargs))
+        if "model" in kwargs and not self.supports_model:
+            raise TypeError("text_chat() got an unexpected keyword argument 'model'")
+        return types.SimpleNamespace(
+            completion_text=f"{self.provider_config['id']}-ok"
+        )
+
+    @property
+    def models(self) -> list[object]:
+        return [call.get("model") for call in self.calls]
+
+
+class _RouteManager:
+    def __init__(self, providers) -> None:
+        self.provider_insts = list(providers)
+        self.inst_map = {item.provider_config["id"]: item for item in providers}
+
+
+class _CoreRouter:
+    """核路由桩：返回固定 route，并记录被查询次数。"""
+
+    def __init__(self, route) -> None:
+        self.route = route
+        self.calls = 0
+
+    def series_model_router_contract(self):
+        return {
+            "name": "series.model_router@1.0",
+            "version": "1.1",
+            "read_only": True,
+            "capabilities": ("resolve", "status"),
+        }
+
+    def resolve_model_route(self, kind, **_kwargs):
+        self.calls += 1
+        return {**self.route, "kind": kind}
+
+
+class _RoutingContext:
+    """同时提供 Provider 管理器、核路由、事件 scope 与会话默认。"""
+
+    def __init__(
+        self,
+        providers,
+        *,
+        router=None,
+        session_default=None,
+        scope_provider_id: str = "",
+    ) -> None:
+        self.provider_manager = _RouteManager(providers)
+        self._ids = {item.provider_config["id"] for item in providers}
+        self.router = router
+        self.session_default = session_default
+        self.scope_provider_id = scope_provider_id
+
+    def get_star_instance(self, plugin_name):
+        if plugin_name != "astrbot_plugin_update_manager":
+            return None
+        return self.router
+
+    def get_provider_by_id(self, provider_id):
+        return object() if provider_id in self._ids else None
+
+    async def get_using_provider(self, **_kwargs):
+        return self.session_default
+
+    async def get_current_chat_provider_id(self, **_kwargs):
+        return self.scope_provider_id
+
+
 class LLMServiceProviderTests(unittest.IsolatedAsyncioTestCase):
     async def test_explicit_provider_uses_provider_config_id(self) -> None:
         """AstrBot 4.26+ 的 Provider id 在 provider_config，而不是 .id。"""
@@ -685,6 +764,146 @@ class LLMServiceProviderTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(await service.chat("hi"), "fast-ok")
         self.assertEqual(fast.calls, 1)
         self.assertEqual(main.calls, 0)
+
+    async def test_valid_explicit_provider_skips_core_route(self) -> None:
+        """显式 provider 仍存在时保持“显式优先”，且不附核里的 model。"""
+        from astrbot_plugin_conversation_flow.core.llm_service import LLMService
+
+        fast = _RouteProvider("fast")
+        router = _CoreRouter(
+            {
+                "source": "core",
+                "provider_id": "core",
+                "model": "core-model",
+                "available": True,
+            }
+        )
+        context = _RoutingContext([fast], router=router)
+        service = LLMService(context)
+        self.assertEqual(await service.chat("hi", provider_id="fast"), "fast-ok")
+        self.assertEqual(router.calls, 0)
+        self.assertEqual(fast.models, [None])
+
+    async def test_missing_explicit_provider_falls_back_to_core_route(self) -> None:
+        """显式 provider 失效时继续走完整解析链，核路由仍有机会生效。"""
+        from unittest.mock import Mock
+
+        from astrbot_plugin_conversation_flow.core.llm_service import LLMService
+
+        core = _RouteProvider("core")
+        session = _RouteProvider("session")
+        router = _CoreRouter(
+            {
+                "source": "core",
+                "provider_id": "core",
+                "model": "core-model",
+                "available": True,
+            }
+        )
+        context = _RoutingContext(
+            [core, session], router=router, session_default=session
+        )
+        service = LLMService(context)
+        service.logger = Mock()
+        self.assertEqual(
+            await service.chat("hi", provider_id="retired", kind="fast"), "core-ok"
+        )
+        self.assertEqual(router.calls, 1)
+        self.assertEqual(core.models, ["core-model"])
+        self.assertEqual(session.calls, [])
+        warnings = " ".join(str(call) for call in service.logger.warning.call_args_list)
+        self.assertIn("retired", warnings)
+
+    async def test_missing_explicit_provider_keeps_session_fallback(self) -> None:
+        """核不可用时仍保留 chat() 的会话默认兜底。"""
+        from astrbot_plugin_conversation_flow.core.llm_service import LLMService
+
+        session = _RouteProvider("session")
+        context = _RoutingContext([session], session_default=session)
+        service = LLMService(context)
+        self.assertEqual(await service.chat("hi", provider_id="retired"), "session-ok")
+        self.assertEqual(session.models, [None])
+
+    async def test_core_route_model_is_forwarded_to_text_chat(self) -> None:
+        from astrbot_plugin_conversation_flow.core.llm_service import LLMService
+
+        core = _RouteProvider("core")
+        router = _CoreRouter(
+            {
+                "source": "core",
+                "provider_id": "core",
+                "model": "route-model",
+                "available": True,
+            }
+        )
+        context = _RoutingContext([core], router=router)
+        service = LLMService(context)
+        self.assertEqual(await service.chat("hi", kind="fast"), "core-ok")
+        self.assertEqual(core.models, ["route-model"])
+
+    async def test_local_provider_hit_ignores_core_model(self) -> None:
+        """本地显式配置命中时，核里的 model 不得覆盖过去。"""
+        from astrbot_plugin_conversation_flow.core.llm_service import LLMService
+
+        local = _RouteProvider("local")
+        router = _CoreRouter(
+            {
+                "source": "core",
+                "provider_id": "local",
+                "model": "core-model",
+                "available": True,
+            }
+        )
+        service = LLMService(
+            _RoutingContext([local], router=router), cfg_llm_provider_id="local"
+        )
+        self.assertEqual(await service.chat("hi"), "local-ok")
+        self.assertEqual(local.models, [None])
+        self.assertEqual(router.calls, 0)
+
+        dash = _RouteProvider("dash")
+        dash_router = _CoreRouter(
+            {
+                "source": "core",
+                "provider_id": "dash",
+                "model": "core-model",
+                "available": True,
+            }
+        )
+        dash_service = LLMService(_RoutingContext([dash], router=dash_router))
+        dash_service.update_settings({"llm_provider_id": "dash"})
+        self.assertEqual(await dash_service.chat("hi"), "dash-ok")
+        self.assertEqual(dash.models, [None])
+        self.assertEqual(dash_router.calls, 0)
+
+    async def test_scope_provider_hit_ignores_core_model(self) -> None:
+        from astrbot_plugin_conversation_flow.core.llm_service import LLMService
+
+        scoped = _RouteProvider("scoped")
+        context = _RoutingContext([scoped], scope_provider_id="scoped")
+        service = LLMService(context)
+        self.assertEqual(
+            await service.chat("hi", umo="qq:FriendMessage:owner"), "scoped-ok"
+        )
+        self.assertEqual(scoped.models, [None])
+
+    async def test_provider_without_model_kwarg_retries_once(self) -> None:
+        """provider 不支持 model 参数时去掉后重试，而不是整次失败。"""
+        from astrbot_plugin_conversation_flow.core.llm_service import LLMService
+
+        core = _RouteProvider("core", supports_model=False)
+        router = _CoreRouter(
+            {
+                "source": "core",
+                "provider_id": "core",
+                "model": "route-model",
+                "available": True,
+            }
+        )
+        context = _RoutingContext([core], router=router)
+        service = LLMService(context)
+        self.assertEqual(await service.chat("hi"), "core-ok")
+        self.assertEqual(core.models, ["route-model", None])
 
 
 class ChunkerTests(unittest.TestCase):
