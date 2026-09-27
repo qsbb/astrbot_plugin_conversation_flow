@@ -2,9 +2,9 @@
 
 > 状态：已按本文实现，并随 `0.8.0` 于 2026-07-31 发布。
 >
-> 目标插件：`astrbot_plugin_conversation_flow`（凝心溯溪-言）
+> 目标插件：`astrbot_plugin_conversation_flow`（言）
 >
-> 协作插件：`astrbot_plugin_relationship`（凝心溯溪-情）提供人工验证的匿名自然人等价身份；`astrbot_plugin_identity_guardian`（凝心溯溪-序）逐轮裁定跨作用域读取。
+> 协作插件：`astrbot_plugin_relationship`（情）提供人工验证的匿名自然人等价身份；`astrbot_plugin_identity_guardian`（序）逐轮裁定跨作用域读取。
 >
 > 本文描述 `0.8.0` 的实现；功能默认关闭。
 

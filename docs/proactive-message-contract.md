@@ -1,6 +1,6 @@
 # `conversation.proactive_message@1.0`
 
-这是“凝心溯溪-言”提供的通用主动文本交付契约。它只接收调用方已经生成好的文本，不调用 LLM，不创建或伪造 `AstrMessageEvent`，也不修改 AstrBot 全局发送函数。
+这是“言”提供的通用主动文本交付契约。它只接收调用方已经生成好的文本，不调用 LLM，不创建或伪造 `AstrMessageEvent`，也不修改 AstrBot 全局发送函数。
 
 ## 调用方
 

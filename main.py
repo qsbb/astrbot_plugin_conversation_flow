@@ -131,7 +131,7 @@ from .series_diagnostics import (
     record_link_state as record_diagnostic_link,
 )
 
-__version__ = "0.12.13"
+__version__ = "0.13.0"
 PLUGIN_NAME = "astrbot_plugin_conversation_flow"
 # 契约前缀 -> 对端插件 id（用于联动健康链路标识）
 _LINK_PEER_BY_CONTRACT_PREFIX = {
@@ -256,7 +256,7 @@ def _optional_event_filter(name: str):
 @register(
     "astrbot_plugin_conversation_flow",
     "凌溪",
-    "凝心溯溪-言，沉默判断、智能分段、插话衔接与群聊上下文",
+    "言，沉默判断、智能分段、插话衔接与群聊上下文",
     __version__,
 )
 class ConversationalFlowPlugin(Star):
@@ -300,7 +300,7 @@ class ConversationalFlowPlugin(Star):
     # 场景/情绪指令允许模型输出 silence_marker，响应阶段需据此检测 marker。
     SCENE_INJECTED_KEY = "conv_flow_scene_injected"
     MOOD_INJECTED_KEY = "conv_flow_mood_injected"
-    # 具身桥接（凝心溯溪-临）创建的 EventBus 事件标记。
+    # 具身桥接（临）创建的 EventBus 事件标记。
     # 契约来源：astrbot_plugin_embodiment_bridge/core/plugin_identity.py 的
     # BRIDGE_EVENT_MARKER / LEGACY_BRIDGE_EVENT_MARKER。跨插件只经 event extras
     # 字符串传递，不引入 import 依赖；Quest/伴夏会话没有群聊与引用 UI，
@@ -4775,7 +4775,7 @@ class ConversationalFlowPlugin(Star):
         self.logger.warning("[conv-flow] incompatible contract %s: %s", name, detail)
 
     def _is_embodiment_event(self, event: Any) -> bool:
-        """判断当前事件是否来自凝心溯溪-临创建的具身（Quest/伴夏）会话。"""
+        """判断当前事件是否来自「临」创建的具身（Quest/伴夏）会话。"""
         try:
             return (
                 event.get_extra(self.EMBODIMENT_EVENT_MARKER) is True
