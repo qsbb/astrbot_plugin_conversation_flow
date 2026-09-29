@@ -5699,6 +5699,60 @@ class PromptCompositionTests(unittest.TestCase):
         self.assertEqual(artifact["fragment_count"], 2)
         self.assertEqual(artifact["removed_direct_injections"], 2)
 
+    def test_composer_dedupes_relationship_direct_inject_and_registered_fragment(self) -> None:
+        """情同时登记 fragment 并直接注入时，言只保留一份，避免重复/历史污染。"""
+        from astrbot_plugin_conversation_flow.main import ConversationalFlowPlugin
+
+        # 与情的 INJECT_MARKER 保持同一字面量，避免测试跨仓 import 依赖。
+        INJECT_MARKER = "[关系表达约束]"
+
+        class Part:
+            def __init__(self, text):
+                self.text = text
+
+        block = (
+            f"{INJECT_MARKER}\n以下要求只用于调整你这一轮的表达方式：\n"
+            "- 语气自然，贴合当前对话氛围。\n请直接开始回复。"
+        )
+        old_block = (
+            f"{INJECT_MARKER}\n以下要求只用于调整你这一轮的表达方式：\n"
+            "- 关系状态只表示互动中的熟悉、好感和信任，不等于恋爱。\n"
+            "- 语气自然，贴合当前对话氛围。\n请直接开始回复。"
+        )
+        # 情走降级路径：直接注入旧版 parts；同时登记当前 fragment。
+        req = types.SimpleNamespace(
+            extra_user_content_parts=[Part(old_block)],
+            system_prompt="base",
+        )
+        context = request_context.new_context()
+        request_context.add_prompt_fragment(
+            context,
+            request_context.OWNER_RELATIONSHIP,
+            "relationship.expression",
+            block,
+            priority=300,
+            source="astrbot_plugin_relationship",
+        )
+        plugin = ConversationalFlowPlugin.__new__(ConversationalFlowPlugin)
+        plugin.logger = _Logger()
+
+        self.assertTrue(plugin._compose_series_prompt_fragments(context, req))
+
+        texts = [
+            part.get("text") if isinstance(part, dict) else part.text
+            for part in req.extra_user_content_parts
+        ]
+        composed = "\n".join(texts)
+        self.assertEqual(len(texts), 1)
+        # 只保留一份关系约束块。
+        self.assertEqual(composed.count(INJECT_MARKER), 1)
+        artifact = request_context.get_artifact(
+            context,
+            request_context.OWNER_CONVERSATION_FLOW,
+            "prompt_composition",
+        )
+        self.assertEqual(artifact["removed_direct_injections"], 1)
+
     def test_composer_ignores_malformed_foreign_owner_section(self) -> None:
         from astrbot_plugin_conversation_flow.main import ConversationalFlowPlugin
 

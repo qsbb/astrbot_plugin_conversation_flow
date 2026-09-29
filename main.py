@@ -131,7 +131,7 @@ from .series_diagnostics import (
     record_link_state as record_diagnostic_link,
 )
 
-__version__ = "0.13.1"
+__version__ = "0.13.2"
 PLUGIN_NAME = "astrbot_plugin_conversation_flow"
 # 契约前缀 -> 对端插件 id（用于联动健康链路标识）
 _LINK_PEER_BY_CONTRACT_PREFIX = {
@@ -3307,7 +3307,15 @@ class ConversationalFlowPlugin(Star):
                 part_text = getattr(part, "text", None)
                 if part_text is None and isinstance(part, dict):
                     part_text = part.get("text")
-                if isinstance(part_text, str) and part_text.strip() in contents:
+                if (
+                    isinstance(part_text, str)
+                    and (
+                        part_text.strip() in contents
+                        # 情的旧版直接注入可能与当前登记 fragment 不同，
+                        # 但唯一标记仍可安全识别并移除，避免关系块叠加。
+                        or part_text.lstrip().startswith("[关系表达约束]")
+                    )
+                ):
                     removed += 1
                     continue
                 kept.append(part)
