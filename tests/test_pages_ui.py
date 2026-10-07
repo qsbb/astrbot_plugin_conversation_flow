@@ -33,6 +33,15 @@ def test_conversation_page_surfaces_grouped_stats_and_stale_state() -> None:
     assert "justify-content: space-between" in css
 
 
+def test_current_channel_setting_is_visible_in_page_status_and_schema() -> None:
+    import json
+
+    schema = json.loads((PAGE_DIR.parent.parent / "_conf_schema.json").read_text(encoding="utf-8"))
+    js = (PAGE_DIR / "app.js").read_text(encoding="utf-8")
+    assert schema["current_channel_context_enabled"]["default"] is True
+    assert "current_channel_context: \"当前身份与聊天场景\"" in js
+
+
 def test_conversation_page_has_loading_skeleton_contract() -> None:
     js = (PAGE_DIR / "app.js").read_text(encoding="utf-8")
     css = (PAGE_DIR / "style.css").read_text(encoding="utf-8")

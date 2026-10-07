@@ -8,7 +8,8 @@ const featureLabels = {
   image_intent: "图片意图",
   interrupt: "插话中断",
   steering: "插话引导",
-  group_context: "群聊上下文"
+  group_context: "群聊上下文",
+  current_channel_context: "当前身份与聊天场景"
 };
 const statLabels = {
   total_requests: "总请求",

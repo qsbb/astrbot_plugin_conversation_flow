@@ -84,6 +84,8 @@ DEFAULTS: dict[str, Any] = {
     "scene_awareness_hint_to_group": False,
     "scene_awareness_self_names": [],
     "scene_awareness_recent_speakers": 8,
+    # 注入当前渠道分类及可获得的平台称呼、群名、Bot 群名片；仅作本轮理解背景。
+    "current_channel_context_enabled": True,
     "mood_enabled": True,
     "mood_private_enabled": False,
     "mood_window_seconds": 300,
@@ -519,6 +521,10 @@ def normalize_config(raw: dict[str, Any] | None) -> dict[str, Any]:
             DEFAULTS["scene_awareness_recent_speakers"],
         ),
     )
+    out["current_channel_context_enabled"] = _coerce_bool(
+        raw.get("current_channel_context_enabled"),
+        DEFAULTS["current_channel_context_enabled"],
+    )
     out["mood_enabled"] = _coerce_bool(
         raw.get("mood_enabled"), DEFAULTS["mood_enabled"]
     )
@@ -738,6 +744,7 @@ class PluginConfig:
     scene_awareness_hint_to_group: bool = False
     scene_awareness_self_names: list[str] = field(default_factory=list)
     scene_awareness_recent_speakers: int = 8
+    current_channel_context_enabled: bool = True
     mood_enabled: bool = True
     mood_private_enabled: bool = False
     mood_window_seconds: int = 300

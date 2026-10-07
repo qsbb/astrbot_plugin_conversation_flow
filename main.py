@@ -41,6 +41,7 @@ from .core.context_budget import (
 )
 from .core.delay import calculate_segment_delay_ms
 from .core.group_context import GroupContextManager
+from .core.current_channel import CurrentSocialContextResolver
 from .core.followup_guard import FollowupGuard, is_followup_offer
 from .core.intercept import InterceptJudge
 from .core.interrupt_tracker import ConversationTracker
@@ -131,7 +132,7 @@ from .series_diagnostics import (
     record_link_state as record_diagnostic_link,
 )
 
-__version__ = "0.13.2"
+__version__ = "0.13.3"
 PLUGIN_NAME = "astrbot_plugin_conversation_flow"
 # 契约前缀 -> 对端插件 id（用于联动健康链路标识）
 _LINK_PEER_BY_CONTRACT_PREFIX = {
@@ -331,6 +332,7 @@ class ConversationalFlowPlugin(Star):
             )
 
         self.config: PluginConfig = build_plugin_config(self._raw_config)
+        self.current_social_context_resolver = CurrentSocialContextResolver()
         self._series_control = SeriesControlAdapter(self)
         self._apply_log_level()
         # 引用回复：llm_decides 模式改用 LLM 工具调用（替代末尾文本标记，杜绝泄漏）
@@ -475,6 +477,9 @@ class ConversationalFlowPlugin(Star):
                 "image_intent": bool(self.config.image_intent_mode),
                 "interrupt": bool(self.config.interrupt_enabled),
                 "group_context": bool(self.config.group_context_enabled),
+                "current_channel_context": bool(
+                    self.config.current_channel_context_enabled
+                ),
                 "steering": self.config.interrupt_mode == "steering",
             },
             "stats": dict(self._stats),
@@ -1790,6 +1795,9 @@ class ConversationalFlowPlugin(Star):
         # 序、知、情都保留独立注入作为缺少“言”时的降级路径。言在这里把已登记
         # 片段事务性收敛为一次稳定注入，避免重复内容和插件加载顺序漂移。
         self._compose_series_prompt_fragments(request_context, req)
+
+        # 当前渠道、账号称呼与群环境只作本轮背景，不改变唤醒或回复规则。
+        await self._inject_current_channel_context(event, req, seq)
 
         # 图片意图必须在空文本判断前执行，纯图片消息的 user_text 通常为空
         self._inject_image_intent_instruction(event, req, seq)
@@ -3182,6 +3190,40 @@ class ConversationalFlowPlugin(Star):
         except Exception as exc:
             self.logger.warning(
                 "[conv-flow] %s inject via system_prompt failed: %s", label, exc
+            )
+            return False
+
+    async def _inject_current_channel_context(
+        self, event: AstrMessageEvent, req: Any, seq: Any
+    ) -> bool:
+        """注入本轮渠道分类及可获取的平台称呼、群环境信息。"""
+        if not getattr(self.config, "current_channel_context_enabled", True):
+            return False
+        try:
+            social_context = await self.current_social_context_resolver.resolve(event)
+            instruction = social_context.to_instruction()
+            if not instruction:
+                return False
+            injected = self._inject_instruction(
+                req, instruction, "current social context"
+            )
+            if injected:
+                add_reason(
+                    ensure_context(event, PHASE_LLM_REQUEST),
+                    OWNER_CONVERSATION_FLOW,
+                    "CURRENT_CHANNEL_CONTEXT_INJECTED",
+                )
+                self.logger.debug(
+                    "[conv-flow] seq=%s current social context injected",
+                    seq,
+                )
+            return injected
+        except Exception as exc:
+            # 当前渠道与显示称呼只是辅助背景，任何平台差异都不得阻断回复。
+            self.logger.debug(
+                "[conv-flow] seq=%s current social context detection failed: %s",
+                seq,
+                type(exc).__name__,
             )
             return False
 

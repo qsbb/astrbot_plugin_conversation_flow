@@ -114,6 +114,7 @@ _FIELDS.update(
             "type": "int", "default": 900, "minimum": 60, "maximum": 7200
         },
         "scene_awareness_enabled": {"type": "bool", "default": True},
+        "current_channel_context_enabled": {"type": "bool", "default": True},
         "mood_enabled": {"type": "bool", "default": True},
         "mood_private_enabled": {"type": "bool", "default": False},
         "mood_window_seconds": {

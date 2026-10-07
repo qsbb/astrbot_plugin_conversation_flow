@@ -460,6 +460,12 @@
     "default": 8,
     "minimum": 0
   },
+  "current_channel_context_enabled": {
+    "type": "bool",
+    "description": "[身份与场景] 注入当前聊天环境",
+    "hint": "开启后，让模型知道本轮来自 QQ、微信、临的具身、电话等哪个场景，并在平台能提供时附上 Bot 账号昵称、当前群名和 Bot 群名片，帮助理解别人是否在称呼它。只作本轮背景，不主动播报、不改变唤醒规则；名称不可用时会省略。默认开启。",
+    "default": true
+  },
   "mood_enabled": {
     "type": "bool",
     "description": "[拟人化情绪] 启用回复意愿变化",
