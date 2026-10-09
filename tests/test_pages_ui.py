@@ -107,3 +107,29 @@ def test_conversation_page_settings_center_edits_config_without_kernel() -> None
     assert ".settings-grid" in css
     assert ".settings-row.dirty" in css
     assert "@media (max-width: 760px)" in css
+
+
+def test_settings_conditional_visibility_for_mode_dependent_fields():
+    """收起项按真实运行依赖判断，父开关和嵌套模式均覆盖。"""
+    js = (PAGE_DIR / "app.js").read_text(encoding="utf-8")
+    css = (PAGE_DIR / "style.css").read_text(encoding="utf-8")
+    assert "const settingsDependencies" in js
+    assert "function applySettingsVisibility(" in js
+    assert "function settingsConditionMatches(" in js
+    # 分段字段先受总开关控制，再按延迟模式互斥。
+    assert 'chunking_segment_interval_ms: { all: [{ key: "chunking_enabled", on: true }, { key: "chunking_delay_mode", values: ["fixed"] }] }' in js
+    assert 'chunking_delay_per_char_ms: { all: [{ key: "chunking_enabled", on: true }, { key: "chunking_delay_mode", values: ["per_char"] }] }' in js
+    assert 'chunking_short_line_chars: { all: [{ key: "chunking_enabled", on: true }, { key: "chunking_newline_mode", values: ["auto"] }] }' in js
+    # 插话作用域/窗口同时用于两种模式，不能错误限定成 window。
+    assert 'interrupt_scope: { key: "interrupt_enabled", on: true }' in js
+    assert 'interrupt_window_ms: { key: "interrupt_enabled", on: true }' in js
+    assert 'steering_open_hold_ms: { all: [{ key: "interrupt_enabled", on: true }, { key: "interrupt_mode", values: ["steering"] }] }' in js
+    assert 'experimental_thinking_merge_enabled: { all: [{ key: "interrupt_enabled", on: true }, { key: "interrupt_mode", values: ["window"] }] }' in js
+    # 对话上下文、情绪、引用与话题设置的父开关。
+    assert 'private_context_bridge_max_turns: { key: "private_context_bridge_enabled", on: true }' in js
+    assert 'mood_window_seconds: { key: "mood_enabled", on: true }' in js
+    assert 'reply_quote_probability: { key: "reply_quote_mode", values: ["probability"] }' in js
+    assert 'topic_context_max_messages: { key: "topic_context_enabled", on: true }' in js
+    assert "applySettingsVisibility();\n  updateSettingsToolbar();" in js
+    assert "markSettingsDirty(node);\n  applySettingsVisibility();" in js
+    assert ".settings-row[hidden]" in css

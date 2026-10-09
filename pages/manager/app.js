@@ -239,6 +239,111 @@ function applySchemaPayload(data) {
   renderSettings();
 }
 
+// 条件展示只按运行时真实依赖收起暂时无效的字段；保存仍保留字段原值。
+const settingsDependencies = {
+  // 智能分段总开关与子模式
+  chunking_min_length: { key: "chunking_enabled", on: true },
+  chunking_max_segments: { key: "chunking_enabled", on: true },
+  chunking_preserve_paragraphs: { key: "chunking_enabled", on: true },
+  chunking_long_paragraph_threshold: { all: [{ key: "chunking_enabled", on: true }, { key: "chunking_preserve_paragraphs", on: true }] },
+  chunking_protect_code_block: { key: "chunking_enabled", on: true },
+  chunking_llm_assist: { key: "chunking_enabled", on: true },
+  chunking_llm_assist_min_length: { all: [{ key: "chunking_enabled", on: true }, { key: "chunking_llm_assist", on: true }] },
+  chunking_newline_mode: { key: "chunking_enabled", on: true },
+  chunking_short_line_chars: { all: [{ key: "chunking_enabled", on: true }, { key: "chunking_newline_mode", values: ["auto"] }] },
+  chunking_segment_interval_ms: { all: [{ key: "chunking_enabled", on: true }, { key: "chunking_delay_mode", values: ["fixed"] }] },
+  chunking_delay_per_char_ms: { all: [{ key: "chunking_enabled", on: true }, { key: "chunking_delay_mode", values: ["per_char"] }] },
+  chunking_delay_min_ms: { all: [{ key: "chunking_enabled", on: true }, { key: "chunking_delay_mode", values: ["per_char"] }] },
+  chunking_delay_max_ms: { all: [{ key: "chunking_enabled", on: true }, { key: "chunking_delay_mode", values: ["per_char"] }] },
+  chunking_delay_mode: { key: "chunking_enabled", on: true },
+  // 沉默预判参数只在预判通道开启时使用；marker 是多种提示共用，保持可见。
+  silence_strategy: { key: "silence_enabled", on: true },
+  silence_prejudge_provider_id: { all: [{ key: "silence_enabled", on: true }, { key: "silence_strategy", values: ["prejudge", "both"] }] },
+  silence_prejudge_max_chars: { all: [{ key: "silence_enabled", on: true }, { key: "silence_strategy", values: ["prejudge", "both"] }] },
+  // 插话中断总开关；窗口和作用域同时用于 steering/window，不按二者误收窄。
+  interrupt_mode: { key: "interrupt_enabled", on: true },
+  interrupt_window_ms: { key: "interrupt_enabled", on: true },
+  interrupt_scope: { key: "interrupt_enabled", on: true },
+  interrupt_merge_strategy: { key: "interrupt_enabled", on: true },
+  steering_open_hold_ms: { all: [{ key: "interrupt_enabled", on: true }, { key: "interrupt_mode", values: ["steering"] }] },
+  merge_settle_enabled: { all: [{ key: "interrupt_enabled", on: true }, { key: "interrupt_mode", values: ["steering"] }] },
+  merge_settle_ms: { all: [{ key: "interrupt_enabled", on: true }, { key: "interrupt_mode", values: ["steering"] }, { key: "merge_settle_enabled", on: true }] },
+  merge_settle_max_ms: { all: [{ key: "interrupt_enabled", on: true }, { key: "interrupt_mode", values: ["steering"] }, { key: "merge_settle_enabled", on: true }] },
+  experimental_thinking_merge_enabled: { all: [{ key: "interrupt_enabled", on: true }, { key: "interrupt_mode", values: ["window"] }] },
+  interrupt_thinking_merge_context_count: { all: [{ key: "interrupt_enabled", on: true }, { key: "interrupt_mode", values: ["window"] }, { key: "experimental_thinking_merge_enabled", on: true }] },
+  // 各上下文和保护能力的总开关及子选项
+  private_context_bridge_max_turns: { key: "private_context_bridge_enabled", on: true },
+  private_context_bridge_short_max_chars: { key: "private_context_bridge_enabled", on: true },
+  dynamic_context_max_turns: { key: "dynamic_context_enabled", on: true },
+  dynamic_context_max_chars: { key: "dynamic_context_enabled", on: true },
+  recent_activity_retention_minutes: { key: "recent_activity_context_enabled", on: true },
+  recent_activity_private_to_private_enabled: { key: "recent_activity_context_enabled", on: true },
+  recent_activity_group_to_private_enabled: { key: "recent_activity_context_enabled", on: true },
+  recent_activity_private_to_group_enabled: { key: "recent_activity_context_enabled", on: true },
+  group_context_max_messages: { key: "group_context_enabled", on: true },
+  group_context_only_when_woken: { key: "group_context_enabled", on: true },
+  group_context_reverse_wake_enabled: { key: "group_context_enabled", on: true },
+  group_context_reverse_wake_seconds: { all: [{ key: "group_context_enabled", on: true }, { key: "group_context_reverse_wake_enabled", on: true }] },
+  group_context_record_bot: { key: "group_context_enabled", on: true },
+  group_context_bot_label: { all: [{ key: "group_context_enabled", on: true }, { key: "group_context_record_bot", on: true }] },
+  group_air_guard_window_seconds: { key: "group_air_guard_enabled", on: true },
+  group_air_guard_max_bot_replies: { key: "group_air_guard_enabled", on: true },
+  group_air_guard_polite_loop_limit: { key: "group_air_guard_enabled", on: true },
+  followup_streak_limit: { key: "followup_guard_enabled", on: true },
+  followup_window_seconds: { key: "followup_guard_enabled", on: true },
+  scene_awareness_guard_to_other: { key: "scene_awareness_enabled", on: true },
+  scene_awareness_hint_to_group: { key: "scene_awareness_enabled", on: true },
+  scene_awareness_self_names: { key: "scene_awareness_enabled", on: true },
+  scene_awareness_recent_speakers: { key: "scene_awareness_enabled", on: true },
+  mood_private_enabled: { key: "mood_enabled", on: true },
+  mood_window_seconds: { key: "mood_enabled", on: true },
+  mood_frequent_after: { key: "mood_enabled", on: true },
+  mood_streak_after: { key: "mood_enabled", on: true },
+  mood_streak_gap_seconds: { key: "mood_enabled", on: true },
+  mood_lazy_score: { key: "mood_enabled", on: true },
+  mood_annoyed_score: { key: "mood_enabled", on: true },
+  mood_silence_score: { key: "mood_enabled", on: true },
+  mood_silence_chance_percent: { key: "mood_enabled", on: true },
+  mood_max_consecutive_silences: { key: "mood_enabled", on: true },
+  reply_context_api_fallback: { key: "reply_context_enabled", on: true },
+  reply_quote_private_enabled: { key: "reply_quote_mode", values: ["probability"] },
+  reply_quote_probability: { key: "reply_quote_mode", values: ["probability"] },
+  topic_context_max_messages: { key: "topic_context_enabled", on: true },
+};
+
+function isTruthyToggle(value) {
+  return value === true || value === "true" || value === "on" || value === 1 || value === "1";
+}
+
+function settingsConditionMatches(condition, readValue) {
+  if (!condition) return true;
+  if (Array.isArray(condition.all) && !condition.all.every((item) => settingsConditionMatches(item, readValue))) return false;
+  if (Array.isArray(condition.any) && !condition.any.some((item) => settingsConditionMatches(item, readValue))) return false;
+  const value = readValue(condition.key);
+  if (Object.prototype.hasOwnProperty.call(condition, "on")) return isTruthyToggle(value) === condition.on;
+  if (Array.isArray(condition.values)) return condition.values.some((item) => String(value ?? "") === String(item));
+  return true;
+}
+
+function applySettingsVisibility() {
+  if (!settingsGroupsNode) return;
+  const cache = new Map();
+  const readValue = (key) => {
+    if (!key) return undefined;
+    if (cache.has(key)) return cache.get(key);
+    const node = findControl(key);
+    const value = node ? controlValue(node) : schemaValues[key];
+    cache.set(key, value);
+    return value;
+  };
+  settingsGroupsNode.querySelectorAll("[data-row]").forEach((row) => {
+    const dep = settingsDependencies[row.dataset.row];
+    const visible = settingsConditionMatches(dep, readValue);
+    row.hidden = !visible;
+    row.classList.toggle("is-inactive", !visible);
+  });
+}
+
 function renderSettings() {
   if (!settingsGroupsNode) return;
   if (!schemaFields.length) {
@@ -280,6 +385,7 @@ function renderSettings() {
       </details>`;
     })
     .join("");
+  applySettingsVisibility();
   updateSettingsToolbar();
 }
 
@@ -387,6 +493,7 @@ settingsGroupsNode?.addEventListener("input", (event) => {
 settingsGroupsNode?.addEventListener("change", (event) => {
   const node = event.target.closest?.("[data-key]");
   if (node) markSettingsDirty(node);
+  applySettingsVisibility();
 });
 settingsSaveButton?.addEventListener("click", saveSettings);
 settingsResetButton?.addEventListener("click", resetSettings);

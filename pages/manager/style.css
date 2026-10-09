@@ -330,6 +330,10 @@
   background: var(--si-primary-soft);
 }
 
+.settings-row[hidden] {
+  display: none;
+}
+
 .settings-label {
   display: grid;
   gap: 4px;
