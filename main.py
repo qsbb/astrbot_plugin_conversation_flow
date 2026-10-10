@@ -2638,6 +2638,20 @@ class ConversationalFlowPlugin(Star):
                 )
                 return
 
+        # 4.5) 中间帧生命周期（关键）：Agent 尚未结束时（例如模型在调用工具/检索
+        #      前先给了一段面向用户的正文）产出的正文，属于**中间可见表达**，
+        #      不是本轮最终答复。此时：
+        #        - 不做 finish_response（否则 pending 提前清空、缓存只剩前言）；
+        #        - 不 stop_event（否则宿主 process 生成器被提前截断，真正的工具
+        #          执行与最终答复都到不了）。
+        #      中间正文按现有分段/纯文本路径正常**发送**（它是给用户看的），只是
+        #      不结束本轮；最终帧（on_llm_response 已把终态标志置真）再走
+        #      finish_response 与缓存最终答案。判据用真实终态标志（宿主只在无工具
+        #      调用的收尾帧触发 on_agent_done），不使用关键词。
+        intermediate_frame = not bool(
+            self._get_extra(event, self.LLM_RESPONSE_TERMINAL_KEY)
+        )
+
         # 5) 检查是否有非文本组件（图片、音频等），有则跳过分段和文本替换。
         #    这同时覆盖 CONVENTIONS.md 3.3 的顺序约束：若声（voice_hub）或其他
         #    链路已先加入音频组件，本插件不再分段、不清空结果、不 stop_event()。
@@ -2661,11 +2675,14 @@ class ConversationalFlowPlugin(Star):
             if text_modified:
                 self._update_result_plain_text(event, text)
             self._prepend_reply_quote_to_result(event, should_quote_reply)
+            self._publish_delivery_plan(event, [text], text, voice_requested)
+            if intermediate_frame:
+                # 中间帧：正文按默认发送权交付，但不结束本轮、不入最终缓存。
+                return
             self._record_bot_message(event, text)
             self._record_air_reply(event, text)
             self._record_followup_reply(event, text)
             self._record_mood_reply(event)
-            self._publish_delivery_plan(event, [text], text, voice_requested)
             if not voice_requested:
                 self.tracker.finish_response(event, bot_text=text)
             return
@@ -2689,11 +2706,14 @@ class ConversationalFlowPlugin(Star):
             if text_modified:
                 self._update_result_plain_text(event, text)
             self._prepend_reply_quote_to_result(event, should_quote_reply)
+            self._publish_delivery_plan(event, [text], text, voice_requested)
+            if intermediate_frame:
+                # 中间帧：保留默认发送权，正文照常发出；不结束本轮、不入最终缓存。
+                return
             self._record_bot_message(event, text)
             self._record_air_reply(event, text)
             self._record_followup_reply(event, text)
             self._record_mood_reply(event)
-            self._publish_delivery_plan(event, [text], text, voice_requested)
             if not voice_requested:
                 self.tracker.finish_response(event, bot_text=text)
             return
@@ -2711,13 +2731,18 @@ class ConversationalFlowPlugin(Star):
         # 保存原始文本用于发送失败回退
         original_text = text
 
-        # 清空原结果，主动发送多段
+        # 清空原结果，主动发送多段。
+        # 中间帧不设 SENT_CHUNKS_KEY（否则会挡住同一 event 的最终帧），也不
+        # stop_event（否则宿主 process 生成器提前结束，后续工具执行与最终答复
+        # 都到不了）；中间正文本身仍照常发出（用户可见），仅靠 clear_result
+        # 阻止默认重复发送。终态帧才设守卫并 stop_event 阻止默认重复发送。
         self._clear_result(event)
-        self._set_extra(event, self.SENT_CHUNKS_KEY, True)
-        try:
-            event.stop_event()
-        except Exception:
-            pass
+        if not intermediate_frame:
+            self._set_extra(event, self.SENT_CHUNKS_KEY, True)
+            try:
+                event.stop_event()
+            except Exception:
+                pass
 
         sent_text_parts: list[str] = []
         quote_pending = should_quote_reply
@@ -2776,6 +2801,14 @@ class ConversationalFlowPlugin(Star):
         self.logger.info(
             "[conv-flow] seq=%s chunked into %s segments", seq, len(sent_text_parts)
         )
+        if intermediate_frame:
+            # 中间帧：分段正文已发出；不记录为本轮最终回复，也不结束本轮。
+            add_reason(
+                request_context,
+                OWNER_CONVERSATION_FLOW,
+                "INTERMEDIATE_VISIBLE_FRAME_DELIVERED",
+            )
+            return
         # 分段发送时按整段合并记录，避免上下文里出现多条零碎的 bot 发言
         final_text = "\n".join(sent_text_parts) or original_text
         self._record_bot_message(event, final_text)

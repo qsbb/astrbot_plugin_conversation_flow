@@ -5360,6 +5360,8 @@ class AgentTerminalFrameTests(unittest.IsolatedAsyncioTestCase):
         event.is_private_chat = lambda: True
         event.set_extra(plugin.REPLY_QUOTE_INSTRUCTION_KEY, True)
         plugin.tracker.begin_request(event, detect_interrupt=False)
+        # 这是收尾帧：宿主在无工具调用的收尾会触发 on_llm_response，言据此置终态标志。
+        event.set_extra(plugin.LLM_RESPONSE_TERMINAL_KEY, True)
 
         await plugin.on_decorating_result(event)
 
