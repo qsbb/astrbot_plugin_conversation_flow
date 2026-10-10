@@ -4850,10 +4850,23 @@ class NaturalToolCallPromptTests(unittest.TestCase):
         for word in ("工具名", "函数名", "接口名"):
             self.assertIn(word, text)
 
-    def test_instruction_suppresses_pre_call_status_messages(self) -> None:
+    def test_instruction_allows_optional_natural_pre_call_voice(self) -> None:
+        """澄清（2026-10-11）：不再绝对禁言；允许模型按人设自主短接话。
+
+        仍保留纪律：不机械逐步骤报备、不暴露工具名/JSON/报错、不复述结果。
+        """
         text = NATURAL_TOOL_CALL_INSTRUCTION
-        self.assertIn("只发起工具调用，不输出给用户看的文字", text)
-        self.assertIn('不要先发送"好，我弄一下"', text)
+        # 允许调用前自然说话（自主、非强制）。
+        self.assertIn("调用前可以正常说话", text)
+        self.assertIn("自主决定", text)
+        self.assertIn("不强制", text)
+        # 旧的“绝对禁言 / 整轮只能一次”硬限制必须移除。
+        self.assertNotIn("不输出给用户看的文字", text)
+        self.assertNotIn("整轮只给用户一次最终回复", text)
+        # 保留反机械播报与不暴露实现细节的纪律。
+        self.assertIn('不要发"好，我弄一下"', text)
+        self.assertIn("机械", text)
+        self.assertIn("工具名", text)
         self.assertIn("两段式播报", text)
         self.assertNotIn("用第一人称的自然动作描述你正在做什么", text)
 
