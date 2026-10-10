@@ -22,7 +22,12 @@ class PendingRequest:
 
     seq: int
     user_text: str
+    # **运行期**单调语义的窗口起点（本地 time.time()），仅供安静期/合并窗口/
+    # 预算等本地计时使用；不得写入平台时钟，避免平台时间偏移影响窗口判定。
     started_at: float
+    # 本 event 的**平台语义时刻**（优先消息时间戳，其次接收时间）；仅用于
+    # 对用户展示的时间标签/间隔，不参与任何本地窗口/预算计算。
+    event_time: float = 0.0
     # 发送者 ID：room 作用域下不同发送者不得合并文本。
     sender_id: str = ""
     finished: bool = False
@@ -160,9 +165,7 @@ class ConversationTracker:
         if open_hold_ms is not None:
             self._steering_open_hold_ms = max(0, int(open_hold_ms))
 
-    def update_settle_config(
-        self, enabled: bool, settle_ms: int, max_ms: int
-    ) -> None:
+    def update_settle_config(self, enabled: bool, settle_ms: int, max_ms: int) -> None:
         """更新打断后安静合并参数。"""
         self._settle_enabled = bool(enabled)
         self._settle_ms = max(0, int(settle_ms))
@@ -213,11 +216,7 @@ class ConversationTracker:
     ) -> str:
         """判断新消息相对 pending 的任务归属。"""
         current_sender = self._get_sender_id(event)
-        if (
-            pending.sender_id
-            and current_sender
-            and pending.sender_id != current_sender
-        ):
+        if pending.sender_id and current_sender and pending.sender_id != current_sender:
             # room 作用域只共享会话 key；不同发送者允许抢占停止，
             # 但绝不能继承/合并对方的文本。
             return "preempt_only"
@@ -310,9 +309,7 @@ class ConversationTracker:
         state.discarded.add(primary.seq)
         primary.interrupt_token["cancelled"] = True
         return (
-            [primary]
-            if (primary.user_texts or primary.media.has_content())
-            else [],
+            [primary] if (primary.user_texts or primary.media.has_content()) else [],
             relation,
         )
 
@@ -491,9 +488,8 @@ class ConversationTracker:
                 meaningful_user_text.strip() or self._event_has_message_chain(event)
             )
             if (
-                (old_texts or old_image_urls or old_audio_urls or old_captions)
-                and has_current_content
-            ):
+                old_texts or old_image_urls or old_audio_urls or old_captions
+            ) and has_current_content:
                 merge_hint = self._build_merge_hint(
                     old_texts,
                     meaningful_user_text,
@@ -541,7 +537,8 @@ class ConversationTracker:
         state.pending[seq] = PendingRequest(
             seq=seq,
             user_text=user_text,
-            started_at=event_ts if event_ts is not None else time.time(),
+            started_at=time.time(),
+            event_time=(event_ts if event_ts is not None else 0.0),
             sender_id=self._get_sender_id(event),
             burst_open=text_completeness(meaningful_user_text) == "open",
             task_relation=relation,
@@ -708,7 +705,10 @@ class ConversationTracker:
             return []
         captions: list[str] = []
         try:
-            from .image_intent import _IMAGE_CAPTION_PATTERN, _is_meaningful_image_caption
+            from .image_intent import (
+                _IMAGE_CAPTION_PATTERN,
+                _is_meaningful_image_caption,
+            )
         except Exception:
             return captions
         for part in parts:
@@ -723,7 +723,9 @@ class ConversationTracker:
             if not text:
                 continue
             matches = _IMAGE_CAPTION_PATTERN.findall(text)
-            if matches and all(_is_meaningful_image_caption(match) for match in matches):
+            if matches and all(
+                _is_meaningful_image_caption(match) for match in matches
+            ):
                 if text not in captions:
                     captions.append(text)
         return captions
@@ -858,7 +860,11 @@ class ConversationTracker:
         times = pending.user_text_times
         pairs: list[tuple[str, float]] = []
         for index, text in enumerate(pending.user_texts):
-            text_ts = times[index] if index < len(times) else pending.started_at
+            text_ts = (
+                times[index]
+                if index < len(times)
+                else (pending.event_time or pending.started_at)
+            )
             pairs.append((text, text_ts))
         return pairs
 

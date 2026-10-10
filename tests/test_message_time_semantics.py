@@ -178,3 +178,61 @@ class TimezoneTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class RuntimeWindowVsPlatformClockTests(unittest.TestCase):
+    """P2：运行窗口用本地时刻，平台时间只做语义标签。
+
+    平台钟偏移不得改变“已开口旧轮是否在合并窗口内”的判定。
+    """
+
+    def _continuation_with_offset(self, offset):
+        from unittest.mock import patch
+
+        from astrbot_plugin_conversation_flow.core.interrupt_tracker import (
+            ConversationTracker,
+        )
+
+        tracker = ConversationTracker()
+        a = _Ev("Friend:clock", "正在回应的消息", platform_ts=1000 + offset)
+        b = _Ev("Friend:clock", "新补充")
+        with patch(
+            "astrbot_plugin_conversation_flow.core.interrupt_tracker.time.time",
+            return_value=1000,
+        ):
+            tracker.begin_request(a)
+            tracker.mark_response_started(a)
+        with patch(
+            "astrbot_plugin_conversation_flow.core.interrupt_tracker.time.time",
+            return_value=1002,
+        ):
+            tracker.begin_request(b)
+        return b.get_extra(tracker.CONTINUATION_EXTRA_KEY)
+
+    def test_platform_clock_offset_does_not_change_continuation(self):
+        on_time = self._continuation_with_offset(0)
+        slow_clock = self._continuation_with_offset(-60)
+        self.assertIsNotNone(on_time, "同一到达间隔应产生衔接提示")
+        self.assertIsNotNone(
+            slow_clock,
+            "平台钟慢 60 秒不得让已开口旧轮掉出本地运行窗口",
+        )
+        self.assertEqual(on_time["new_text"], slow_clock["new_text"])
+
+    def test_started_at_is_local_runtime_time_not_platform(self):
+        from unittest.mock import patch
+
+        from astrbot_plugin_conversation_flow.core.interrupt_tracker import (
+            ConversationTracker,
+        )
+
+        tracker = ConversationTracker()
+        ev = _Ev("Friend:started", "文本", platform_ts=1000 + -60)
+        with patch(
+            "astrbot_plugin_conversation_flow.core.interrupt_tracker.time.time",
+            return_value=5000,
+        ):
+            seq = tracker.begin_request(ev)
+        pending = tracker.get_state(ev.unified_msg_origin).pending[seq]
+        self.assertEqual(pending.started_at, 5000, "窗口起点必须是本地运行时刻")
+        self.assertEqual(pending.event_time, 940, "平台语义时刻单独保存")
