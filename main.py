@@ -2682,6 +2682,7 @@ class ConversationalFlowPlugin(Star):
                 should_quote_reply,
                 seq,
                 request_context,
+                intermediate_frame=intermediate_frame,
             )
             return
 
@@ -2737,6 +2738,15 @@ class ConversationalFlowPlugin(Star):
         if voice_requested:
             if text_modified:
                 self._update_result_plain_text(event, text)
+            if intermediate_frame:
+                # 中间帧 + 声交付：正文/音频交给下游交付链，但不写入最终缓存、
+                # 不结束本轮（否则后续最终答案会被 history_recorded 挡住更新）。
+                add_reason(
+                    request_context,
+                    OWNER_CONVERSATION_FLOW,
+                    "INTERMEDIATE_VOICE_FRAME_DEFERRED",
+                )
+                return
             self._record_bot_message(event, text)
             self._record_air_reply(event, text)
             self._record_followup_reply(event, text)
@@ -6008,7 +6018,16 @@ class ConversationalFlowPlugin(Star):
         should_quote_reply: bool,
         seq: Any,
         request_context: dict[str, Any],
+        *,
+        intermediate_frame: bool = False,
     ) -> None:
+        """处理含非文本组件的交付链。
+
+        ``intermediate_frame``（Agent 未结束的中间帧）语义与纯文本路径一致：
+        中间帧照常交付文本/媒体、保留组件顺序，但**不 finish_response、不
+        stop_event、不设 SENT_CHUNKS_KEY**，也不把中间正文写入最终缓存；
+        终态帧才收尾。判据来自宿主真实终态标志（见 on_decorating_result）。
+        """
         try:
             from astrbot.api.message_components import Plain
 
@@ -6027,11 +6046,13 @@ class ConversationalFlowPlugin(Star):
             )
         except Exception as exc:
             self.logger.debug("[conv-flow] component delivery planning failed: %s", exc)
+            self._publish_delivery_plan(event, [text], text, voice_requested)
+            if intermediate_frame:
+                return
             self._record_bot_message(event, text)
             self._record_air_reply(event, text)
             self._record_followup_reply(event, text)
             self._record_mood_reply(event)
-            self._publish_delivery_plan(event, [text], text, voice_requested)
             if not voice_requested:
                 self.tracker.finish_response(event, bot_text=text)
             return
@@ -6061,6 +6082,15 @@ class ConversationalFlowPlugin(Star):
                     pass
             if not voice_requested:
                 self._prepend_reply_quote_to_result(event, should_quote_reply)
+            if intermediate_frame:
+                # 中间帧：保留默认发送权与组件顺序，照常交付；不记录最终缓存、
+                # 不结束本轮（声/默认链仍可发出正文）。
+                add_reason(
+                    request_context,
+                    OWNER_CONVERSATION_FLOW,
+                    "INTERMEDIATE_COMPONENT_FRAME_PRESERVED",
+                )
+                return
             self._record_bot_message(event, text)
             self._record_air_reply(event, text)
             self._record_followup_reply(event, text)
@@ -6075,11 +6105,15 @@ class ConversationalFlowPlugin(Star):
             return
 
         self._clear_result(event)
-        self._set_extra(event, self.SENT_CHUNKS_KEY, True)
-        try:
-            event.stop_event()
-        except Exception:
-            pass
+        # 中间帧不设 SENT_CHUNKS_KEY（否则挡住同一 event 的最终帧），也不
+        # stop_event（否则宿主 process 生成器提前结束，工具执行与最终答复都
+        # 到不了）；中间正文/媒体仍照常逐个发出。终态帧才设守卫并 stop。
+        if not intermediate_frame:
+            self._set_extra(event, self.SENT_CHUNKS_KEY, True)
+            try:
+                event.stop_event()
+            except Exception:
+                pass
 
         sent_text: list[str] = []
         sent_units = 0
@@ -6141,6 +6175,14 @@ class ConversationalFlowPlugin(Star):
 
         final_text = "\n".join(sent_text)
         self._stats["chunked"] += 1
+        if intermediate_frame:
+            # 中间帧：组件已按序交付；不写入最终缓存、不结束本轮。
+            add_reason(
+                request_context,
+                OWNER_CONVERSATION_FLOW,
+                "INTERMEDIATE_COMPONENT_FRAME_DELIVERED",
+            )
+            return
         if sent_units:
             self._record_bot_message(event, final_text)
             self._record_air_reply(event, final_text)

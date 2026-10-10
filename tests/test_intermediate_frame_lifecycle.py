@@ -242,3 +242,94 @@ class IntermediateFrameGuardsTests(unittest.IsolatedAsyncioTestCase):
         state = plugin.tracker.get_state(event.unified_msg_origin)
         self.assertIn(event.get_extra(plugin.tracker.SEQ_EXTRA_KEY), state.pending)
         self.assertEqual(plugin.tracker.get_recent_turns(event), [])
+
+
+class IntermediateMediaAndVoiceTests(unittest.IsolatedAsyncioTestCase):
+    """同族遗漏：中间帧的图片/媒体与 voice_requested 分支也必须走一致的
+    中间-终态原则（不提前 finish/缓存/stop；下游 token.completed 不得提前完结）。"""
+
+    def _event(self, mode, text, *, with_image=False):
+        ev = T._TerminalFrameEvent(f"PrivateMessage:qq:{mode}", "帮我查下", text)
+        ev.chain_result = lambda chain: types.SimpleNamespace(
+            text="".join(getattr(c, "text", "") for c in chain), chain=chain
+        )
+        if with_image:
+            ev.get_result().chain.append(T._MockImage(url="https://example.test/i.png"))
+        return ev
+
+    async def test_mixed_single_intermediate_keeps_pending_and_no_cache(self) -> None:
+        plugin = T.AgentTerminalFrameTests._plugin()
+        ev = self._event("mixed_one", "我看看这个图。", with_image=True)
+        plugin.tracker.begin_request(ev, detect_interrupt=False)
+
+        await plugin.on_decorating_result(ev)
+
+        state = plugin.tracker.get_state(ev.unified_msg_origin)
+        self.assertIn(ev.get_extra(plugin.tracker.SEQ_EXTRA_KEY), state.pending)
+        self.assertFalse(ev.stopped)
+        self.assertEqual(
+            plugin.tracker.get_recent_turns(ev), [], "中间帧前言不得入最终缓存"
+        )
+
+    async def test_mixed_multi_intermediate_does_not_stop_agent(self) -> None:
+        plugin = T.AgentTerminalFrameTests._plugin()
+        ev = self._event("mixed_two", "这里有个细节。\n\n我核对一下。", with_image=True)
+        plugin.tracker.begin_request(ev, detect_interrupt=False)
+
+        await plugin.on_decorating_result(ev)
+
+        self.assertFalse(ev.stopped, "带图片的中间帧不得 stop 整个 Agent")
+        self.assertFalse(
+            bool(ev.get_extra(plugin.SENT_CHUNKS_KEY)),
+            "带图片的中间帧不得设已发送守卫",
+        )
+        state = plugin.tracker.get_state(ev.unified_msg_origin)
+        self.assertIn(ev.get_extra(plugin.tracker.SEQ_EXTRA_KEY), state.pending)
+        self.assertEqual(plugin.tracker.get_recent_turns(ev), [])
+
+    async def test_voice_intermediate_does_not_cache_preamble(self) -> None:
+        plugin = T.AgentTerminalFrameTests._plugin()
+
+        async def yes_voice(_event, _result):
+            return True
+
+        plugin._voice_delivery_requested = yes_voice
+        ev = self._event("plain_two_voice", "这里有个细节。\n\n我核对一下。")
+        plugin.tracker.begin_request(ev, detect_interrupt=False)
+
+        await plugin.on_decorating_result(ev)
+
+        self.assertEqual(
+            plugin.tracker.get_recent_turns(ev),
+            [],
+            "voice_requested 中间帧不得把前言写入最终缓存",
+        )
+        state = plugin.tracker.get_state(ev.unified_msg_origin)
+        self.assertIn(ev.get_extra(plugin.tracker.SEQ_EXTRA_KEY), state.pending)
+
+    async def test_downstream_completed_token_does_not_finalize_turn(self) -> None:
+        """声等下游把共享 token 的 completed 置真，不得让整轮 pending 被清理。"""
+        plugin = T.AgentTerminalFrameTests._plugin()
+
+        async def yes_voice(_event, _result):
+            return True
+
+        plugin._voice_delivery_requested = yes_voice
+        ev = self._event("voice_token", "这里有个细节。\n\n我核对一下。")
+        plugin.tracker.begin_request(ev, detect_interrupt=False)
+        await plugin.on_decorating_result(ev)
+
+        seq = ev.get_extra(plugin.tracker.SEQ_EXTRA_KEY)
+        state = plugin.tracker.get_state(ev.unified_msg_origin)
+        self.assertIn(seq, state.pending)
+        # 模拟下游交付完成写回同一个共享 token。
+        state.pending[seq].interrupt_token["completed"] = True
+        state.cleanup_finished()
+        self.assertIn(
+            seq,
+            plugin.tracker.get_state(ev.unified_msg_origin).pending,
+            "下游 token.completed 不得提前完结整轮任务",
+        )
+        # 真正终态收尾（言侧 finish_response）才允许收敛。
+        plugin.tracker.finish_response(ev, bot_text="")
+        self.assertNotIn(seq, plugin.tracker.get_state(ev.unified_msg_origin).pending)
