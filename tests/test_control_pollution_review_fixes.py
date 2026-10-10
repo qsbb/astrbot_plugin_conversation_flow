@@ -100,10 +100,11 @@ class RealStructureScrubTests(unittest.TestCase):
         )
         removed = scrub_message_list(messages)
         self.assertGreaterEqual(removed, 2, "TextPart 列表型控制对必须被清理")
-        remaining = [
-            T._text_of(m) if hasattr(T, "_text_of") else m.get("content")
-            for m in messages
-        ]
+        from astrbot_plugin_conversation_flow.core.control_recovery import (
+            message_text,
+        )
+
+        remaining = [message_text(m) for m in messages]
         flat = str(remaining)
         self.assertNotIn("Stop output.", flat)
         self.assertNotIn("Output stopped.", flat)

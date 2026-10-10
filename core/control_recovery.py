@@ -82,10 +82,6 @@ def message_text(message: Any) -> str:
     return "".join(parts)
 
 
-def _text_of(message: Any) -> str:  # 兼容旧名
-    return message_text(message)
-
-
 def _set_message_text(message: Any, text: str) -> None:
     """把一条消息的文本替换为 text（尽量保留非文本结构）。"""
     content = _content_of(message)
