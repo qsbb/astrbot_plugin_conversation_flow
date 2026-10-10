@@ -25,12 +25,15 @@ from astrbot_plugin_conversation_flow.core.prompts import (
 class NaturalToolVoiceTests(unittest.TestCase):
     def test_pre_call_voice_allowed_and_optional(self):
         text = NATURAL_TOOL_CALL_INSTRUCTION
-        self.assertIn("调用前可以正常说话", text)
         self.assertIn("不确定", text)
         self.assertIn("不强制", text)
         # 动作意图表达允许；边界是“空泛、机械、重复”而非字面封禁。
         self.assertIn("我搜一下看看", text)
         self.assertIn("动作意图", text)
+        # 已知就直接答、不装不懂、不按耗时触发。
+        self.assertIn("直接给最终结果", text)
+        self.assertIn("不要装不懂", text)
+        self.assertIn("不按任务耗时", text)
 
     def test_absolute_ban_removed(self):
         text = NATURAL_TOOL_CALL_INSTRUCTION
@@ -39,7 +42,7 @@ class NaturalToolVoiceTests(unittest.TestCase):
 
     def test_still_forbids_mechanical_reporting_and_leaks(self):
         text = NATURAL_TOOL_CALL_INSTRUCTION
-        for needle in ("机械", "工具名", "JSON", "两段式播报", "权限"):
+        for needle in ("机械", "工具名", "JSON", "两段式播报", "报错原文"):
             self.assertIn(needle, text)
 
     def test_no_fixed_phrase_template(self):

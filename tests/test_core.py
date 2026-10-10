@@ -4853,77 +4853,95 @@ class MoodConfigTests(unittest.TestCase):
 
 
 class NaturalToolCallPromptTests(unittest.TestCase):
-    def test_instruction_forbids_mechanism_words(self) -> None:
-        text = NATURAL_TOOL_CALL_INSTRUCTION
+    """自然工具调用指令的**语义**纪律（不逐字锁死长文）。"""
+
+    def _text(self) -> str:
+        return NATURAL_TOOL_CALL_INSTRUCTION
+
+    def test_no_mechanism_leak(self) -> None:
+        text = self._text()
         for word in ("工具名", "函数名", "接口名"):
             self.assertIn(word, text)
+        self.assertIn("JSON", text)
 
-    def test_instruction_allows_optional_natural_pre_call_voice(self) -> None:
-        """澄清（2026-10-11）：不再绝对禁言；允许模型按人设自主短接话。
-
-        仍保留纪律：不机械逐步骤报备、不暴露工具名/JSON/报错、不复述结果。
-        """
-        text = NATURAL_TOOL_CALL_INSTRUCTION
-        # 允许调用前自然说话（自主、非强制），并能表达“不确定 + 查证意图”。
-        self.assertIn("调用前可以正常说话", text)
-        self.assertIn("不确定", text)
+    def test_allows_optional_natural_pre_call_voice(self) -> None:
+        """不再绝对禁言：允许按人设自主表达不确定/查证意图，非强制。"""
+        text = self._text()
         self.assertIn("不强制", text)
-        # 明确允许动作意图表达，且把边界定在“空泛机械重复”而非字面封禁。
+        self.assertIn("不确定", text)
+        # 允许动作意图（如“我搜一下看看”），边界是空泛机械重复。
         self.assertIn("我搜一下看看", text)
         self.assertIn("动作意图", text)
         self.assertIn("机械", text)
         # 旧的“绝对禁言 / 整轮只能一次”硬限制必须移除。
         self.assertNotIn("不输出给用户看的文字", text)
         self.assertNotIn("整轮只给用户一次最终回复", text)
-        # 保留不暴露实现细节与反机械播报的纪律。
-        self.assertIn("工具名", text)
-        self.assertIn("两段式播报", text)
         self.assertNotIn("用第一人称的自然动作描述你正在做什么", text)
 
-    def test_instruction_handles_sticker_collection_naturally(self) -> None:
-        text = NATURAL_TOOL_CALL_INSTRUCTION
-        self.assertIn("收藏、保存或收下表情包", text)
-        self.assertIn("不要重新描述、分类或评价表情内容", text)
-        self.assertIn("如果工具已经直接向用户发送结果", text)
+    def test_direct_answer_and_no_pretend_ignorance(self) -> None:
+        text = self._text()
+        self.assertIn("直接给最终结果", text)
+        self.assertIn("不要装不懂", text)
 
-    def test_instruction_covers_failure_wording(self) -> None:
-        text = NATURAL_TOOL_CALL_INSTRUCTION
-        self.assertIn("权限", text)
-        self.assertIn("不要编原因", text)
+    def test_handles_sticker_collection_naturally(self) -> None:
+        text = self._text()
+        self.assertIn("收藏", text)
+        self.assertIn("表情", text)
+        self.assertIn("不要重新描述", text)
+        self.assertIn("已经直接向用户发送结果", text)
 
-    def test_instruction_keeps_followup_rules_in_dedicated_block(self) -> None:
+    def test_failure_wording_not_raw_errors(self) -> None:
+        text = self._text()
+        # 不念原始报错/权限提示，失败不编原因、查不到不编造。
+        self.assertIn("报错原文", text)
+        self.assertIn("不编原因", text)
+        self.assertIn("直说不知道", text)
+
+    def test_keeps_followup_rules_in_dedicated_block(self) -> None:
         text = build_followup_guard_instruction()
         self.assertIn("不要用服务式征询收尾", text)
         self.assertIn("随时待命", text)
-        self.assertNotIn("收尾方式", NATURAL_TOOL_CALL_INSTRUCTION)
+        self.assertNotIn("收尾方式", self._text())
 
-    def test_instruction_forbids_asking_permission_before_searching(self) -> None:
+    def test_forbids_permission_asking_but_allows_action_intent(self) -> None:
         """禁止的是“征询许可”式问句，而非字面禁止动作意图表达。"""
-        text = NATURAL_TOOL_CALL_INSTRUCTION
+        text = self._text()
         self.assertIn("要不我帮你搜搜看", text)
-        # 允许“我搜一下看看”这类动作意图，不算多余许可反问。
         self.assertIn("我搜一下看看", text)
-        # 只读操作不需要事先征求同意
-        self.assertIn("只读操作直接做", text)
+        self.assertIn("不要先征求同意", text)
 
-    def test_instruction_limits_confirmation_to_side_effect_actions(self) -> None:
-        """收紧"等待用户确认"的口径，避免被当成"该查先问"的借口。"""
-        text = NATURAL_TOOL_CALL_INSTRUCTION
+    def test_limits_confirmation_to_side_effect_actions(self) -> None:
+        text = self._text()
         self.assertIn("副作用", text)
         self.assertNotIn("必须等待用户确认，或操作会持续较久", text)
 
-    def test_instruction_forbids_fabricating_when_lookup_fails(self) -> None:
-        """查不到要说不清楚，不能凭印象补细节。"""
-        text = NATURAL_TOOL_CALL_INSTRUCTION
-        self.assertIn("直说这块你不清楚", text)
-        self.assertIn("不要用印象里的内容补全细节", text)
+    def test_forbids_fabricating_when_lookup_fails(self) -> None:
+        text = self._text()
+        self.assertIn("查不到就直说不知道", text)
+        self.assertIn("不凭印象补细节", text)
 
-    def test_instruction_allows_explicit_plugin_development_questions(self) -> None:
-        """用户明确问插件列表/实现时，不能再被“插件名禁说”误伤。"""
-        text = NATURAL_TOOL_CALL_INSTRUCTION
-        self.assertIn("用户明确询问已安装插件", text)
-        self.assertIn("可以直接回答真实名称与状态", text)
-        self.assertIn("不能假装检查过", text)
+    def test_allows_explicit_plugin_development_questions(self) -> None:
+        """用户明确问插件列表/可用工具/实现时，不能被“禁说名称”误伤。"""
+        text = self._text()
+        for scene in ("装了哪些插件", "有哪些可用工具", "开发实现"):
+            self.assertIn(scene, text)
+        self.assertIn("真实名称、状态与实现说明", text)
+        self.assertIn("不编造", text)
+
+    def test_development_question_exception_does_not_cover_reasoning_or_logs(
+        self,
+    ) -> None:
+        """例外仅限真实工具/插件名称与实现说明；内部推理/原始日志不受影响。"""
+        text = self._text()
+        self.assertIn("任何情况下都不展示内部推理", text)
+        self.assertIn("该例外", text)
+        self.assertIn("不含", text)
+        self.assertIn("内部推理与原始日志", text)
+
+    def test_no_duplicate_mechanism_ban(self) -> None:
+        """同一禁令不应在同一指令里重复出现多次（瘦身目标）。"""
+        text = self._text()
+        self.assertEqual(text.count("调用/执行/接口/功能/API/指令"), 1)
 
 
 class AtTargetsTests(unittest.TestCase):
