@@ -83,7 +83,9 @@ def relative_label(ts: float, now: float | None = None, tzname: Any = None) -> s
     if delta < 86400:
         return f"{int(delta // 3600)}小时前"
     tz = resolve_timezone(tzname)
-    moment = datetime.fromtimestamp(value, tz=tz) if tz else datetime.fromtimestamp(value)
+    moment = (
+        datetime.fromtimestamp(value, tz=tz) if tz else datetime.fromtimestamp(value)
+    )
     current_moment = (
         datetime.fromtimestamp(current, tz=tz)
         if tz

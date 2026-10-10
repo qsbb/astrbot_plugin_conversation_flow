@@ -44,6 +44,7 @@ requires_snapshot = unittest.skipUnless(
 # 阻断 1：合法多行翻译正文被误删
 # ---------------------------------------------------------------------------
 
+
 class NoFalseDeletionTests(unittest.TestCase):
     def test_translation_body_with_control_phrase_line_is_preserved(self) -> None:
         from astrbot_plugin_conversation_flow.core.control_recovery import (
@@ -58,9 +59,7 @@ class NoFalseDeletionTests(unittest.TestCase):
         ]
         before = messages[0]["content"]
         scrub_message_list(messages)
-        self.assertEqual(
-            messages[0]["content"], before, "真实用户翻译正文不得被删除"
-        )
+        self.assertEqual(messages[0]["content"], before, "真实用户翻译正文不得被删除")
 
     def test_quoted_discussion_and_code_block_are_preserved(self) -> None:
         from astrbot_plugin_conversation_flow.core.control_recovery import (
@@ -81,6 +80,7 @@ class NoFalseDeletionTests(unittest.TestCase):
 # 阻断 2：真实 TextPart 列表型控制对必须清掉（且只在有来源证明时）
 # ---------------------------------------------------------------------------
 
+
 class RealStructureScrubTests(unittest.TestCase):
     def test_text_parts_host_abort_pair_is_cleaned(self) -> None:
         from astrbot_plugin_conversation_flow.core.control_recovery import (
@@ -92,7 +92,10 @@ class RealStructureScrubTests(unittest.TestCase):
             {"role": "system", "content": [{"type": "text", "text": "[persona]"}]},
             {"role": "user", "content": [{"type": "text", "text": "今晚吃什么"}]},
             {"role": "user", "content": [{"type": "text", "text": "Stop output."}]},
-            {"role": "assistant", "content": [{"type": "text", "text": "Output stopped."}]},
+            {
+                "role": "assistant",
+                "content": [{"type": "text", "text": "Output stopped."}],
+            },
         ]
         self.assertTrue(
             detect_host_abort_pair(messages), "TextPart 列表型控制对应可识别"
@@ -129,11 +132,10 @@ class RealStructureScrubTests(unittest.TestCase):
 # 阻断 3：真实 call_event_hook 分发 —— stopped 后新钩子必须可达
 # ---------------------------------------------------------------------------
 
+
 def _load_real_call_event_hook(namespace: dict) -> object:
     """从 v4.28.1 快照加载真实 call_event_hook，只替换其外部依赖。"""
-    src = (CORE_SNAPSHOT / "core/pipeline/context_utils.py").read_text(
-        encoding="utf-8"
-    )
+    src = (CORE_SNAPSHOT / "core/pipeline/context_utils.py").read_text(encoding="utf-8")
     module = ast.parse(src)
     node = next(
         n
@@ -143,7 +145,10 @@ def _load_real_call_event_hook(namespace: dict) -> object:
     node.returns = None
     for a in node.args.args:
         a.annotation = None
-    exec(compile(ast.Module(body=[node], type_ignores=[]), "host_dispatcher", "exec"), namespace)
+    exec(
+        compile(ast.Module(body=[node], type_ignores=[]), "host_dispatcher", "exec"),
+        namespace,
+    )
     return namespace["call_event_hook"]
 
 
@@ -156,7 +161,9 @@ class RealDispatchTests(unittest.IsolatedAsyncioTestCase):
         return _load_real_call_event_hook(namespace)
 
     @requires_snapshot
-    async def test_event_stopped_by_higher_priority_handler_still_triggers_cleanup(self) -> None:
+    async def test_event_stopped_by_higher_priority_handler_still_triggers_cleanup(
+        self,
+    ) -> None:
         from astrbot_plugin_conversation_flow.core.control_recovery import (
             detect_host_abort_pair,
         )
@@ -291,6 +298,7 @@ class RealDispatchTests(unittest.IsolatedAsyncioTestCase):
 # 阻断 4：result_chain 与 completion_text 必须同步
 # ---------------------------------------------------------------------------
 
+
 class ResultChainSyncTests(unittest.TestCase):
     def test_apply_recovered_answer_updates_result_chain(self) -> None:
         from astrbot_plugin_conversation_flow.core.control_recovery import (
@@ -317,7 +325,9 @@ class ResultChainSyncTests(unittest.TestCase):
         ok = apply_recovered_answer(messages, response, "这是重新生成的真实回答")
         self.assertTrue(ok)
         # 宿主优先用 result_chain 发送，必须同步。
-        self.assertEqual(response.result_chain.get_plain_text(), "这是重新生成的真实回答")
+        self.assertEqual(
+            response.result_chain.get_plain_text(), "这是重新生成的真实回答"
+        )
         self.assertEqual(messages[-1]["content"], "这是重新生成的真实回答")
 
     def test_result_chain_non_text_components_are_preserved(self) -> None:
@@ -350,7 +360,9 @@ class ResultChainSyncTests(unittest.TestCase):
         apply_recovered_answer(messages, response, "真实答案")
         kinds = [getattr(c, "type", None) for c in response.result_chain.chain]
         self.assertIn("image", kinds, "非文本资源必须保留")
-        self.assertIn("真实答案", [getattr(c, "text", "") for c in response.result_chain.chain])
+        self.assertIn(
+            "真实答案", [getattr(c, "text", "") for c in response.result_chain.chain]
+        )
 
 
 if __name__ == "__main__":
@@ -360,6 +372,7 @@ if __name__ == "__main__":
 # ---------------------------------------------------------------------------
 # 复核项：恢复必须复用「本轮实际 provider/model」
 # ---------------------------------------------------------------------------
+
 
 class ProviderReuseTests(unittest.IsolatedAsyncioTestCase):
     async def test_recovery_uses_runner_provider_not_session_default(self) -> None:
@@ -429,6 +442,7 @@ class ProviderReuseTests(unittest.IsolatedAsyncioTestCase):
 # 复核项：带「你:」前缀的承接污染（来源=言自己的注入块）
 # ---------------------------------------------------------------------------
 
+
 class InjectionBlockScrubTests(unittest.TestCase):
     def test_injection_block_you_prefix_line_is_scrubbed(self) -> None:
         from astrbot_plugin_conversation_flow.core.control_recovery import (
@@ -485,7 +499,9 @@ class UserLiteralStopGuardTests(unittest.IsolatedAsyncioTestCase):
 
 
 class IdempotencyTests(unittest.IsolatedAsyncioTestCase):
-    async def test_double_invocation_does_not_overwrite_successful_recovery(self) -> None:
+    async def test_double_invocation_does_not_overwrite_successful_recovery(
+        self,
+    ) -> None:
         """宿主先 on_llm_response 再 on_agent_done：第二次不得覆盖已恢复答案。"""
         from astrbot.core.pipeline.process_stage.follow_up import (
             _ACTIVE_AGENT_RUNNERS,
@@ -521,9 +537,7 @@ class IdempotencyTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(response.completion_text, "真实答案")
             self.assertEqual(ctx.calls, 1)
             # 第二次：on_agent_done 兜底（不得再调用、不得覆盖）
-            await plugin.on_agent_done_tool_state(
-                event, runner.run_context, response
-            )
+            await plugin.on_agent_done_tool_state(event, runner.run_context, response)
             self.assertEqual(response.completion_text, "真实答案")
             self.assertEqual(ctx.calls, 1, "第二次不得再次调用模型")
         finally:

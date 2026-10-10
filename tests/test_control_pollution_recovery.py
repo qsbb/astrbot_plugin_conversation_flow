@@ -39,6 +39,7 @@ from astrbot_plugin_conversation_flow.core.control_recovery import (
 # 纯函数层：分类与净化
 # --------------------------------------------------------------------------
 
+
 class ControlPollutionClassificationTests(unittest.TestCase):
     def test_whole_line_control_artifacts_are_detected(self) -> None:
         for text in (
@@ -93,7 +94,9 @@ class ControlPollutionClassificationTests(unittest.TestCase):
         # 宿主中断对优先于 stop 标记：真实时序里 stop 标记要到 aborted 响应
         # 返回后才复位，不能让它挡掉控制产物的历史剔除。
         self.assertEqual(
-            decide_recovery(**{**base, "host_abort_pair": True, "stop_requested": True}),
+            decide_recovery(
+                **{**base, "host_abort_pair": True, "stop_requested": True}
+            ),
             "host_abort_pair",
         )
         self.assertEqual(decide_recovery(**base), "recover")
@@ -129,7 +132,11 @@ class ControlRecoveryHelpersTests(unittest.TestCase):
         ]
         self.assertEqual(strip_host_abort_pair(messages), 2)
         self.assertEqual(
-            messages, [{"role": "system", "content": "[p]"}, {"role": "user", "content": "真实问题"}]
+            messages,
+            [
+                {"role": "system", "content": "[p]"},
+                {"role": "user", "content": "真实问题"},
+            ],
         )
 
     def test_build_recovery_request_keeps_system_and_real_user(self) -> None:
@@ -167,6 +174,7 @@ class ControlRecoveryHelpersTests(unittest.TestCase):
 # --------------------------------------------------------------------------
 # 插件层：端到端（模拟宿主时序）
 # --------------------------------------------------------------------------
+
 
 class _Logger:
     def __getattr__(self, name):
@@ -253,7 +261,9 @@ def _plugin(ctx=None):
     plugin.logger = _Logger()
     plugin.context = ctx if ctx is not None else _Ctx()
     plugin._stats = {}
-    from astrbot_plugin_conversation_flow.core.interrupt_tracker import ConversationTracker
+    from astrbot_plugin_conversation_flow.core.interrupt_tracker import (
+        ConversationTracker,
+    )
 
     plugin.tracker = ConversationTracker(max_history_turns=3)
     return plugin
@@ -274,7 +284,9 @@ class _Runner:
     async def run(self):
         # 1) assistant 先入 run_context.messages（宿主中断对已自带末尾 assistant）
         if not getattr(self, "_skip_append", False):
-            self.messages.append({"role": "assistant", "content": self.response.completion_text})
+            self.messages.append(
+                {"role": "assistant", "content": self.response.completion_text}
+            )
         # 1.5) 宿主 register_active_runner（internal.py:388），on_agent_done 期间仍在册。
         from astrbot.core.pipeline.process_stage.follow_up import _ACTIVE_AGENT_RUNNERS
 
@@ -336,7 +348,9 @@ class ControlRecoveryIntegrationTests(unittest.IsolatedAsyncioTestCase):
         sent, saved, _ = await self._run_turn(plugin, event, "Output stopped")
 
         self.assertEqual(sent, "要不煮点番茄鸡蛋面？", "实际发送必须是真实答案")
-        self.assertEqual(saved[-1], ("assistant", "要不煮点番茄鸡蛋面？"), "落盘必须与发送一致")
+        self.assertEqual(
+            saved[-1], ("assistant", "要不煮点番茄鸡蛋面？"), "落盘必须与发送一致"
+        )
         self.assertEqual(ctx.calls, 1, "最多恢复一次")
 
     async def test_normal_reply_does_not_add_llm_call(self) -> None:
@@ -411,7 +425,9 @@ class ControlRecoveryIntegrationTests(unittest.IsolatedAsyncioTestCase):
         ]
         runner = _Runner(plugin, event, messages, "Output stopped")
         # 去掉 runner 自追加，模拟上面已含末尾 assistant
-        runner.messages = messages[:4] + [{"role": "assistant", "content": "Output stopped"}]
+        runner.messages = messages[:4] + [
+            {"role": "assistant", "content": "Output stopped"}
+        ]
         await plugin.on_agent_done_control_recovery(
             event, runner.messages, runner.response, None
         )
@@ -463,7 +479,9 @@ class ControlRecoveryIntegrationTests(unittest.IsolatedAsyncioTestCase):
         turns = plugin.tracker.get_recent_turns(event)
         self.assertEqual([t.bot_text for t in turns], [], "控制产物不得进入承接缓存")
 
-    async def test_control_lines_in_leaked_history_are_scrubbed_from_request_copy(self) -> None:
+    async def test_control_lines_in_leaked_history_are_scrubbed_from_request_copy(
+        self,
+    ) -> None:
         plugin = _plugin()
         event = _Event("default:FriendMessage:100000001", "在呢")
         req = types.SimpleNamespace(
@@ -565,9 +583,7 @@ class ConfigAndWiringTests(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertIs(DEFAULTS["control_pollution_recovery_enabled"], True)
-        self.assertTrue(
-            build_plugin_config({}).control_pollution_recovery_enabled
-        )
+        self.assertTrue(build_plugin_config({}).control_pollution_recovery_enabled)
         self.assertFalse(
             build_plugin_config(
                 {"control_pollution_recovery_enabled": False}
@@ -605,7 +621,11 @@ class ScrubMessageListTests(unittest.TestCase):
 
         messages = [
             {"role": "user", "content": "帮我查一下"},
-            {"role": "assistant", "content": "Stop output.", "tool_calls": [{"id": "1"}]},
+            {
+                "role": "assistant",
+                "content": "Stop output.",
+                "tool_calls": [{"id": "1"}],
+            },
             {"role": "tool", "content": "结果", "tool_call_id": "1"},
             {"role": "assistant", "content": "Output stopped."},
         ]

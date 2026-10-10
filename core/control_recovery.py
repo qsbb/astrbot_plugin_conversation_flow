@@ -43,6 +43,7 @@ INJECTION_SOURCE_MARKERS = (
 # 通用读取：兼容 dict / Message / list[TextPart] / list[dict]
 # ---------------------------------------------------------------------------
 
+
 def _content_of(message: Any) -> Any:
     if isinstance(message, dict):
         return message.get("content")
@@ -50,7 +51,11 @@ def _content_of(message: Any) -> Any:
 
 
 def _role_of(message: Any) -> str:
-    role = message.get("role") if isinstance(message, dict) else getattr(message, "role", "")
+    role = (
+        message.get("role")
+        if isinstance(message, dict)
+        else getattr(message, "role", "")
+    )
     return str(role or "")
 
 
@@ -67,7 +72,11 @@ def message_text(message: Any) -> str:
             if isinstance(part, str):
                 parts.append(part)
                 continue
-            text = part.get("text") if isinstance(part, dict) else getattr(part, "text", None)
+            text = (
+                part.get("text")
+                if isinstance(part, dict)
+                else getattr(part, "text", None)
+            )
             if isinstance(text, str):
                 parts.append(text)
     return "".join(parts)
@@ -89,17 +98,29 @@ def _set_message_text(message: Any, text: str) -> None:
                     new_parts.append(text)
                     inserted = True
                 continue
-            ptype = part.get("type") if isinstance(part, dict) else getattr(part, "type", "")
+            ptype = (
+                part.get("type")
+                if isinstance(part, dict)
+                else getattr(part, "type", "")
+            )
             if str(ptype) in ("text", "plain"):
                 if not inserted:
-                    new_parts.append({"type": "text", "text": text} if isinstance(part, dict)
-                                     else _make_text_part(text))
+                    new_parts.append(
+                        {"type": "text", "text": text}
+                        if isinstance(part, dict)
+                        else _make_text_part(text)
+                    )
                     inserted = True
                 continue
             new_parts.append(part)
         if not inserted:
-            new_parts.append({"type": "text", "text": text} if isinstance(content, list) and content and isinstance(content[0], dict)
-                             else _make_text_part(text))
+            new_parts.append(
+                {"type": "text", "text": text}
+                if isinstance(content, list)
+                and content
+                and isinstance(content[0], dict)
+                else _make_text_part(text)
+            )
         _assign_content(message, new_parts)
         return
     _assign_content(message, text)
@@ -126,6 +147,7 @@ def _make_text_part(text: str) -> Any:
 # ---------------------------------------------------------------------------
 # 来源治理（只做可证来源的清理，绝不做无来源的关键词删除）
 # ---------------------------------------------------------------------------
+
 
 def detect_host_abort_pair(messages: list[Any]) -> bool:
     """run_context.messages 末尾是否为宿主中断控制对。
@@ -159,8 +181,10 @@ def _find_host_abort_pair(messages: list[Any]) -> int:
     ):
         return -1
     # 允许末尾存在连续的控制产物 assistant（不改变来源结构）。
-    while idx - 1 >= 0 and _role_of(messages[idx - 1]) == "assistant" and is_control_stop_message(
-        message_text(messages[idx - 1])
+    while (
+        idx - 1 >= 0
+        and _role_of(messages[idx - 1]) == "assistant"
+        and is_control_stop_message(message_text(messages[idx - 1]))
     ):
         idx -= 1
     if idx - 1 < 0:
@@ -217,7 +241,11 @@ def _scrub_message(message: Any) -> int:
         for part in content:
             if isinstance(part, str):
                 continue
-            text = part.get("text") if isinstance(part, dict) else getattr(part, "text", None)
+            text = (
+                part.get("text")
+                if isinstance(part, dict)
+                else getattr(part, "text", None)
+            )
             if isinstance(text, str):
                 cleaned, count = _strip_control_lines_in_injection_block(text)
                 if count:
@@ -253,6 +281,7 @@ def scrub_message_list(messages: list[Any]) -> int:
 # ---------------------------------------------------------------------------
 # 工具副作用 / 用户讨论判定
 # ---------------------------------------------------------------------------
+
 
 def has_tool_side_effects(messages: list[Any], *, since_index: int = 0) -> bool:
     """本轮是否出现过工具消息（可能已产生副作用）。"""
@@ -292,6 +321,7 @@ def user_mentions_control_phrase(messages: list[Any]) -> bool:
 # 恢复请求装配与结果回写
 # ---------------------------------------------------------------------------
 
+
 def _normalize_context(message: Any) -> Any:
     if isinstance(message, dict):
         return message
@@ -321,8 +351,10 @@ def build_recovery_request(messages: list[Any]) -> dict[str, Any]:
     # 当前轮的模型回声（末尾纯控制产物 assistant）属于本轮结果，恢复请求里
     # 不再把它当上下文喂回模型（避免继续模仿）；这是对本轮结果的显式处理，
     # 不是对历史正文的关键词删除。
-    while cleaned and _role_of(cleaned[-1]) == "assistant" and is_control_stop_message(
-        message_text(cleaned[-1])
+    while (
+        cleaned
+        and _role_of(cleaned[-1]) == "assistant"
+        and is_control_stop_message(message_text(cleaned[-1]))
     ):
         cleaned.pop()
     scrub_message_list(cleaned)
@@ -350,8 +382,11 @@ def _sync_result_chain(response: Any, text: str) -> None:
         container = comps
     if not isinstance(comps, list):
         return
+
     def _is_plain(comp: Any) -> bool:
-        ptype = comp.get("type") if isinstance(comp, dict) else getattr(comp, "type", None)
+        ptype = (
+            comp.get("type") if isinstance(comp, dict) else getattr(comp, "type", None)
+        )
         if str(ptype or "").lower() in ("plain", "text"):
             return True
         name = type(comp).__name__.lower()

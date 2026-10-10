@@ -75,12 +75,22 @@ def analyze(messages: list[dict]) -> dict:
             continue
         text = _text(message)
         if classify_control_line(text) is not None:
-            isolated.append({"index": i, "role": message.get("role"), "kind": classify_control_line(text)})
+            isolated.append(
+                {
+                    "index": i,
+                    "role": message.get("role"),
+                    "kind": classify_control_line(text),
+                }
+            )
             continue
         if text and ("Output stopped" in text or "Stop output" in text):
             # 短语出现在正文中间：不自动判定为污染，列为需人工确认。
-            embedded.append({"index": i, "role": message.get("role"), "preview": text[:80]})
-            ambiguous.append({"index": i, "reason": "embedded_phrase", "preview": text[:80]})
+            embedded.append(
+                {"index": i, "role": message.get("role"), "preview": text[:80]}
+            )
+            ambiguous.append(
+                {"index": i, "reason": "embedded_phrase", "preview": text[:80]}
+            )
 
     return {
         "total_messages": n,
@@ -117,7 +127,9 @@ def main() -> int:
     print(f"总消息数: {report['total_messages']}")
     print(f"完整控制对: {report['summary']['complete_pairs']}")
     for item in report["complete_control_pairs"]:
-        print(f"  - index {item['index']}: user Stop output. + assistant Output stopped.")
+        print(
+            f"  - index {item['index']}: user Stop output. + assistant Output stopped."
+        )
     print(f"孤立控制行: {report['summary']['isolated']}")
     for item in report["isolated_control_lines"]:
         print(f"  - index {item['index']} ({item['role']}): {item['kind']}")

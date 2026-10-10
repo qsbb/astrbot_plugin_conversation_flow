@@ -122,7 +122,9 @@ class PerMessageTimeTests(unittest.TestCase):
             PendingRequest,
         )
 
-        pending = PendingRequest(seq=1, user_text="a", started_at=1000.0, user_texts=["a"])
+        pending = PendingRequest(
+            seq=1, user_text="a", started_at=1000.0, user_texts=["a"]
+        )
         self.assertEqual(ConversationTracker._pending_user_times(pending), (0.0,))
 
     def test_completed_turn_keeps_user_times_and_delivery_time(self):
