@@ -51,11 +51,6 @@ class PendingRequest:
     # 与 user_texts 平行的逐条到达时间；继承旧文本时连同各自时间一起继承。
     user_text_times: list[float] = field(default_factory=list)
     history_recorded: bool = False
-    # 本轮**逻辑任务**是否已在言侧收尾（finish_response 或终态交付）。
-    # 与下游（声等）交付 token 的 completed 区分：下游把共享 token 的
-    # completed 置真只表示“这条交付完成”，不表示整轮任务结束；只有这里为真，
-    # cleanup_finished 才把 pending 收敛掉，避免中间帧被下游提前完结。
-    turn_finalized: bool = False
     # 本轮**最终答案**的交付计划是否已发布（等待下游交付完成信号）。
     # 与中间帧区分：只有最终帧发布交付计划后置真，其交付完成（token.completed）
     # 才允许收敛整轮；中间帧的交付完成不得收敛。
@@ -120,7 +115,7 @@ class ConversationState:
         """清理已完成的 pending，保留 discarded 一小段时间避免重复检测。
 
         收敛条件区分“最终答案已产生”与“本条交付已完成”：
-        - 言侧已收尾（``finish_response`` → ``finished``/**turn_finalized**）：直接收敛；
+        - 言侧已收尾（``finish_response`` 置 ``finished``）：直接收敛；
         - 或将交付交给下游的**最终帧**已发布交付计划（``final_delivery_pending``）
           且该交付已完成（``interrupt_token["completed"]``）：收敛。
 
@@ -130,8 +125,7 @@ class ConversationState:
         completed = {
             seq
             for seq, pending in self.pending.items()
-            if pending.turn_finalized
-            or pending.finished
+            if pending.finished
             or (
                 pending.final_delivery_pending
                 and pending.interrupt_token.get("completed")
@@ -790,7 +784,6 @@ class ConversationTracker:
             self.record_response(event, bot_text)
         if pending:
             pending.finished = True
-            pending.turn_finalized = True
             pending.interrupt_token["completed"] = True
         state.discarded.discard(seq)
         state.cleanup_finished()
