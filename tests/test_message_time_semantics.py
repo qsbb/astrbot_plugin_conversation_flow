@@ -126,7 +126,7 @@ class PerMessageTimeTests(unittest.TestCase):
         )
         self.assertEqual(ConversationTracker._pending_user_times(pending), (0.0,))
 
-    def test_completed_turn_keeps_user_times_and_delivery_time(self):
+    def test_completed_turn_keeps_user_times_and_record_time(self):
         from astrbot_plugin_conversation_flow.core.interrupt_tracker import (
             CompletedTurn,
         )
@@ -136,11 +136,10 @@ class PerMessageTimeTests(unittest.TestCase):
             bot_text="答",
             completed_at=2000.0,
             user_text_times=(1000.0, 1001.0),
-            delivered_at=1500.0,
         )
         self.assertEqual(ConversationTracker.turn_user_time(turn, 0), 1000.0)
         self.assertEqual(ConversationTracker.turn_user_time(turn, 1), 1001.0)
-        # 用户时间 ≠ bot 完成时间
+        # 用户事件时间 ≠ bot 回复记录时刻
         self.assertNotEqual(turn.completed_at, turn.user_text_times[0])
 
     def test_old_completed_turn_without_times_is_compatible(self):

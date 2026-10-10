@@ -87,15 +87,14 @@ class CompletedTurn:
     时间语义分离：
     - ``user_text_times``：与 ``user_texts`` 平行的**逐条用户消息事件时间**
       （可能缺省/为 0，表示无可靠来源）；
-    - ``completed_at``：bot 交付/记录该轮的时刻（沿用原字段名，旧记录兼容）；
-    - ``delivered_at``：显式记录实际交付时刻，无可靠来源时为 0。
+    - ``completed_at``：bot **回复记录时刻**（本插件记录该轮实际回复的时间，
+      非平台送达回执）；旧内存记录兼容。
     """
 
     user_texts: tuple[str, ...]
     bot_text: str
     completed_at: float
     user_text_times: tuple[float, ...] = ()
-    delivered_at: float = 0.0
 
 
 @dataclass
@@ -817,14 +816,12 @@ class ConversationTracker:
         if not user_texts:
             return False
         user_times = self._pending_user_times(pending)
-        delivered = time.time()
         state.recent_turns.append(
             CompletedTurn(
                 user_texts=user_texts,
                 bot_text=text,
-                completed_at=delivered,
+                completed_at=time.time(),
                 user_text_times=user_times,
-                delivered_at=delivered,
             )
         )
         if len(state.recent_turns) > self._max_history_turns:

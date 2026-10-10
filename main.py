@@ -4796,10 +4796,9 @@ class ConversationalFlowPlugin(Star):
         tzname = self._session_timezone_name(event)
         lines: list[str] = []
         for turn in turns:
-            # 用户原话用各自的事件时间；bot 回复用实际交付时间。缺可靠来源时
-            # 退回该轮 completed_at，绝不把长生成耗时刻成用户刚说。
-            delivered = getattr(turn, "delivered_at", 0.0) or turn.completed_at
-            bot_label = relative_label(delivered, now_ts, tzname)
+            # 用户原话用各自的事件时间；bot 回复用其记录时刻（completed_at）。
+            # 绝不把长生成耗时刻成用户刚说。
+            bot_label = relative_label(turn.completed_at, now_ts, tzname)
             for index, text in enumerate(turn.user_texts):
                 preview = self._context_bridge_preview(text)
                 if not preview:
@@ -4895,8 +4894,7 @@ class ConversationalFlowPlugin(Star):
         now_ts = time.time()
         tzname = self._session_timezone_name(event)
         for turn in reversed(missing_turns):
-            delivered = getattr(turn, "delivered_at", 0.0) or turn.completed_at
-            bot_label = relative_label(delivered, now_ts, tzname)
+            bot_label = relative_label(turn.completed_at, now_ts, tzname)
             lines = []
             body_chars = 0
             for index, text in enumerate(turn.user_texts):
