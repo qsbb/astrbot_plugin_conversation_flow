@@ -333,3 +333,122 @@ class IntermediateMediaAndVoiceTests(unittest.IsolatedAsyncioTestCase):
         # 真正终态收尾（言侧 finish_response）才允许收敛。
         plugin.tracker.finish_response(ev, bot_text="")
         self.assertNotIn(seq, plugin.tracker.get_state(ev.unified_msg_origin).pending)
+
+
+class VoiceFinalizationTests(unittest.IsolatedAsyncioTestCase):
+    """终态语音交付的收敛：只用下游 token.completed，不手动 finish_response。
+
+    覆盖报告 /tmp/yan-voice-finalization-review.py 的回归：区分“最终答案已产生”
+    与“本条交付已完成”；中间 completed 不收敛，最终 completed 才收敛；
+    每条交付 token 各自从未完成开始（不串号）；取消时保留取消资格。
+    """
+
+    async def _voice_plugin(self):
+        plugin = T.AgentTerminalFrameTests._plugin()
+
+        async def yes_voice(_event, _result):
+            return True
+
+        plugin._voice_delivery_requested = yes_voice
+        # 宿主在无工具调用的收尾帧会触发 on_llm_response，这里如实模拟。
+        return plugin
+
+    async def test_final_only_voice_completes_without_manual_finish(self) -> None:
+        plugin = await self._voice_plugin()
+        ev = T._TerminalFrameEvent(
+            "PrivateMessage:qq:voicefinal_only",
+            "帮我查一下",
+            "结果查到了，这个更合适。",
+        )
+        plugin.tracker.begin_request(ev, detect_interrupt=False)
+        seq = ev.get_extra(plugin.tracker.SEQ_EXTRA_KEY)
+        state = plugin.tracker.get_state(ev.unified_msg_origin)
+        await plugin.on_llm_response(
+            ev, types.SimpleNamespace(completion_text="结果查到了，这个更合适。")
+        )
+        await plugin.on_decorating_result(ev)
+
+        token = ev.get_extra("conversation_flow.delivery_plan")["interrupt_token"]
+        self.assertFalse(token.get("completed"), "每条交付应从未完成开始")
+        # 模拟声写回完成；不做任何手动 finish_response。
+        token["completed"] = True
+        state.cleanup_finished()
+
+        self.assertNotIn(seq, state.pending, "最终语音交付完成应收敛整轮")
+        nxt = T._Event(ev.unified_msg_origin, "下一个问题")
+        self.assertFalse(
+            plugin.tracker.has_interrupt_candidate(nxt),
+            "已完成的旧轮不应对下一条消息显示为 pending",
+        )
+
+    async def test_intermediate_then_final_voice_completes(self) -> None:
+        plugin = await self._voice_plugin()
+        ev = T._TerminalFrameEvent(
+            "PrivateMessage:qq:voicetf", "帮我查一下", "我看看。"
+        )
+        plugin.tracker.begin_request(ev, detect_interrupt=False)
+        seq = ev.get_extra(plugin.tracker.SEQ_EXTRA_KEY)
+        state = plugin.tracker.get_state(ev.unified_msg_origin)
+
+        # 中间帧：voice 分支只 defer，不发最终缓存。
+        await plugin.on_decorating_result(ev)
+        self.assertIn(seq, state.pending)
+        plugin.tracker.get_interrupt_token(ev)["completed"] = True
+        state.cleanup_finished()
+        self.assertIn(seq, state.pending, "中间交付完成不得收敛整轮")
+
+        # 最终帧：交付计划 token 应从未完成开始（不沿用中间 completed）。
+        ev.set_result_text("结果查到了，这个更合适。")
+        await plugin.on_llm_response(
+            ev, types.SimpleNamespace(completion_text="结果查到了，这个更合适。")
+        )
+        await plugin.on_decorating_result(ev)
+        token = ev.get_extra("conversation_flow.delivery_plan")["interrupt_token"]
+        self.assertFalse(token.get("completed"), "最终帧交付不得沿用中间帧的 completed")
+        token["completed"] = True
+        state.cleanup_finished()
+        self.assertNotIn(seq, state.pending)
+
+    async def test_final_voice_cancelled_keeps_cancel_eligibility(self) -> None:
+        """最终语音尚未发完时（token 未完成），不得提前 finish，保留取消资格。"""
+        plugin = await self._voice_plugin()
+        ev = T._TerminalFrameEvent(
+            "PrivateMessage:qq:voicecancel", "帮我查一下", "结果在这。"
+        )
+        plugin.tracker.begin_request(ev, detect_interrupt=False)
+        seq = ev.get_extra(plugin.tracker.SEQ_EXTRA_KEY)
+        state = plugin.tracker.get_state(ev.unified_msg_origin)
+        await plugin.on_llm_response(
+            ev, types.SimpleNamespace(completion_text="结果在这。")
+        )
+        await plugin.on_decorating_result(ev)
+
+        token = ev.get_extra("conversation_flow.delivery_plan")["interrupt_token"]
+        # 尚未完成：pending 仍在（等待交付完成），可被取消。
+        self.assertIn(seq, state.pending, "语音未发完不得提前收敛")
+        token["cancelled"] = True
+        state.cleanup_finished()  # 取消不收敛，交由 cancellation 流程处理
+        # 取消标记可被下游读到。
+        self.assertTrue(plugin.tracker.get_interrupt_token(ev).get("cancelled"))
+
+    async def test_next_message_does_not_see_completed_final_as_pending(self) -> None:
+        plugin = await self._voice_plugin()
+        ev = T._TerminalFrameEvent(
+            "PrivateMessage:qq:voicenext", "帮我查一下", "结果在这。"
+        )
+        plugin.tracker.begin_request(ev, detect_interrupt=False)
+        state = plugin.tracker.get_state(ev.unified_msg_origin)
+        await plugin.on_llm_response(
+            ev, types.SimpleNamespace(completion_text="结果在这。")
+        )
+        await plugin.on_decorating_result(ev)
+        ev.get_extra("conversation_flow.delivery_plan")["interrupt_token"][
+            "completed"
+        ] = True
+        state.cleanup_finished()
+
+        nxt = T._Event(ev.unified_msg_origin, "下一句")
+        self.assertFalse(plugin.tracker.has_interrupt_candidate(nxt))
+        # 新轮登记不应把旧轮当可合并候选。
+        seq2 = plugin.tracker.begin_request(nxt)
+        self.assertNotEqual(seq2, ev.get_extra(plugin.tracker.SEQ_EXTRA_KEY))

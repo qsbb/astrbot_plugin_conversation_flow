@@ -56,6 +56,10 @@ class PendingRequest:
     # completed 置真只表示“这条交付完成”，不表示整轮任务结束；只有这里为真，
     # cleanup_finished 才把 pending 收敛掉，避免中间帧被下游提前完结。
     turn_finalized: bool = False
+    # 本轮**最终答案**的交付计划是否已发布（等待下游交付完成信号）。
+    # 与中间帧区分：只有最终帧发布交付计划后置真，其交付完成（token.completed）
+    # 才允许收敛整轮；中间帧的交付完成不得收敛。
+    final_delivery_pending: bool = False
     interrupt_token: dict[str, Any] = field(
         default_factory=lambda: {"cancelled": False, "completed": False}
     )
@@ -115,15 +119,23 @@ class ConversationState:
     def cleanup_finished(self) -> None:
         """清理已完成的 pending，保留 discarded 一小段时间避免重复检测。
 
-        收敛条件是**本轮逻辑任务已在言侧收尾**（``turn_finalized``），而不是
-        下游交付 token 的 ``completed``——后者只代表某条交付完成。否则中间帧
-        一旦被声等下游标 ``completed``，pending 会被提前清掉，丢掉最终答案。
-        兼容旧状态：若历史上有 ``finished`` 已置真，也一并清除。
+        收敛条件区分“最终答案已产生”与“本条交付已完成”：
+        - 言侧已收尾（``finish_response`` → ``finished``/**turn_finalized**）：直接收敛；
+        - 或将交付交给下游的**最终帧**已发布交付计划（``final_delivery_pending``）
+          且该交付已完成（``interrupt_token["completed"]``）：收敛。
+
+        **中间帧**（``final_delivery_pending`` 尚为假）的交付完成**不**收敛整轮，
+        避免前言交付完成就把 pending 清掉、丢掉最终答案。
         """
         completed = {
             seq
             for seq, pending in self.pending.items()
-            if pending.turn_finalized or pending.finished
+            if pending.turn_finalized
+            or pending.finished
+            or (
+                pending.final_delivery_pending
+                and pending.interrupt_token.get("completed")
+            )
         }
         for seq in completed:
             self.pending[seq].finished = True
@@ -640,6 +652,29 @@ class ConversationTracker:
         state = self._states.get(self._get_umo(event)) if seq is not None else None
         pending = state.pending.get(seq) if state is not None else None
         return pending.interrupt_token if pending is not None else {}
+
+    def begin_delivery(self, event: Any, *, final_frame: bool) -> dict[str, Any]:
+        """开始一次交付：为**本条**交付重置完成标记，并登记是否为最终帧。
+
+        - 每条交付（中间帧或最终帧）各自从未完成状态开始，不复用上一条的
+          ``completed``（避免“中间完成”被最终帧沿用作已完成）；
+        - ``final_frame`` 为真时置 ``final_delivery_pending``，使其交付完成
+          具备收敛整轮的资格；中间帧不置位，交付完成不收敛整轮。
+        返回本轮共享的 interrupt_token（下游据此写 completed）。
+        """
+        seq = self._get_extra(event, self.SEQ_EXTRA_KEY)
+        state = self._states.get(self._get_umo(event)) if seq is not None else None
+        pending = state.pending.get(seq) if state is not None else None
+        if pending is None:
+            return {}
+        # 本条交付从未完成开始（不沿用上一条 completed）。
+        pending.interrupt_token["completed"] = False
+        if final_frame:
+            pending.final_delivery_pending = True
+        else:
+            # 中间帧：本帧交付完成不收敛整轮。
+            pending.final_delivery_pending = False
+        return pending.interrupt_token
 
     def has_continuation_hint(self, event: Any) -> bool:
         """新消息是否在"她正在说话"时到达、需要下一轮自然衔接。"""

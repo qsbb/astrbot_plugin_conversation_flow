@@ -2529,6 +2529,12 @@ class ConversationalFlowPlugin(Star):
             await self._submit_relationship_offense_marker(event, confidence, severity)
             self._strip_relationship_offense_from_result(event)
 
+        # 中间帧判据（见下方 4.5 说明）：宿主只在无工具调用的收尾帧触发
+        # on_llm_response，故尚未置终态标志即为中间帧。提前计算，供后续所有
+        # 交付分支（含 stealer 直发）使用。
+        intermediate_frame = not bool(
+            self._get_extra(event, self.LLM_RESPONSE_TERMINAL_KEY)
+        )
         voice_requested = await self._voice_delivery_requested(event, result)
         # Quest/伴夏具身会话：无群聊与引用 UI；语音交付时分段仅用于发布
         # delivery plan，不逐段发送，因此可跳过 QQ 导向的引用与分段开销。
@@ -2618,6 +2624,7 @@ class ConversationalFlowPlugin(Star):
                 [visible_text] if visible_text else [],
                 visible_text,
                 voice_requested,
+                final_frame=not intermediate_frame,
             )
             if visible_text:
                 self._record_bot_message(event, visible_text)
@@ -2653,19 +2660,9 @@ class ConversationalFlowPlugin(Star):
                 )
                 return
 
-        # 4.5) 中间帧生命周期（关键）：Agent 尚未结束时（例如模型在调用工具/检索
-        #      前先给了一段面向用户的正文）产出的正文，属于**中间可见表达**，
-        #      不是本轮最终答复。此时：
-        #        - 不做 finish_response（否则 pending 提前清空、缓存只剩前言）；
-        #        - 不 stop_event（否则宿主 process 生成器被提前截断，真正的工具
-        #          执行与最终答复都到不了）。
-        #      中间正文按现有分段/纯文本路径正常**发送**（它是给用户看的），只是
-        #      不结束本轮；最终帧（on_llm_response 已把终态标志置真）再走
-        #      finish_response 与缓存最终答案。判据用真实终态标志（宿主只在无工具
-        #      调用的收尾帧触发 on_agent_done），不使用关键词。
-        intermediate_frame = not bool(
-            self._get_extra(event, self.LLM_RESPONSE_TERMINAL_KEY)
-        )
+        # 4.5) 中间帧生命周期（关键）：见方法开头的 intermediate_frame 判据。
+        #      中间帧照常发送可见正文，但不 finish_response、不 stop_event、
+        #      不写最终缓存；终态帧才收尾。判据使用宿主真实终态标志，不用关键词。
 
         # 5) 检查是否有非文本组件（图片、音频等），有则跳过分段和文本替换。
         #    这同时覆盖 CONVENTIONS.md 3.3 的顺序约束：若声（voice_hub）或其他
@@ -2691,7 +2688,9 @@ class ConversationalFlowPlugin(Star):
             if text_modified:
                 self._update_result_plain_text(event, text)
             self._prepend_reply_quote_to_result(event, should_quote_reply)
-            self._publish_delivery_plan(event, [text], text, voice_requested)
+            self._publish_delivery_plan(
+                event, [text], text, voice_requested, final_frame=not intermediate_frame
+            )
             if intermediate_frame:
                 # 中间帧：正文按默认发送权交付，但不结束本轮、不入最终缓存。
                 return
@@ -2722,7 +2721,9 @@ class ConversationalFlowPlugin(Star):
             if text_modified:
                 self._update_result_plain_text(event, text)
             self._prepend_reply_quote_to_result(event, should_quote_reply)
-            self._publish_delivery_plan(event, [text], text, voice_requested)
+            self._publish_delivery_plan(
+                event, [text], text, voice_requested, final_frame=not intermediate_frame
+            )
             if intermediate_frame:
                 # 中间帧：保留默认发送权，正文照常发出；不结束本轮、不入最终缓存。
                 return
@@ -2734,7 +2735,9 @@ class ConversationalFlowPlugin(Star):
                 self.tracker.finish_response(event, bot_text=text)
             return
 
-        self._publish_delivery_plan(event, segments, text, voice_requested)
+        self._publish_delivery_plan(
+            event, segments, text, voice_requested, final_frame=not intermediate_frame
+        )
         if voice_requested:
             if text_modified:
                 self._update_result_plain_text(event, text)
@@ -5406,14 +5409,26 @@ class ConversationalFlowPlugin(Star):
         segments: list[str],
         original_text: str,
         voice_requested: bool,
+        *,
+        final_frame: bool = True,
     ) -> None:
+        """发布本条交付计划。
+
+        ``final_frame`` 区分“最终答案已产生”与“本条交付已完成”：
+        - 最终帧（默认）登记 ``final_delivery_pending``，其交付完成可收敛整轮；
+        - 中间帧登记为非最终，其交付完成不收敛整轮，且每条交付的 ``completed``
+          各自从未完成开始，避免中间完成被最终帧沿用。
+        返回的共享 token 供下游（如声）写 ``completed``/``cancelled``。
+        """
         cleaned_segments = [str(item).strip() for item in segments if str(item).strip()]
         plan = {
             "version": DELIVERY_PLAN_VERSION,
             "segments": cleaned_segments or [original_text],
             "original_text": original_text,
             "voice_requested": bool(voice_requested),
-            "interrupt_token": self.tracker.get_interrupt_token(event),
+            "interrupt_token": self.tracker.begin_delivery(
+                event, final_frame=final_frame
+            ),
         }
         self._set_extra(event, DELIVERY_PLAN_EXTRA_KEY, plan)
         request_context = ensure_context(event, PHASE_DECORATING_RESULT)
@@ -6046,7 +6061,9 @@ class ConversationalFlowPlugin(Star):
             )
         except Exception as exc:
             self.logger.debug("[conv-flow] component delivery planning failed: %s", exc)
-            self._publish_delivery_plan(event, [text], text, voice_requested)
+            self._publish_delivery_plan(
+                event, [text], text, voice_requested, final_frame=not intermediate_frame
+            )
             if intermediate_frame:
                 return
             self._record_bot_message(event, text)
@@ -6058,7 +6075,9 @@ class ConversationalFlowPlugin(Star):
             return
 
         text_segments = list(plan.text_segments) or [text]
-        self._publish_delivery_plan(event, text_segments, text, voice_requested)
+        self._publish_delivery_plan(
+            event, text_segments, text, voice_requested, final_frame=not intermediate_frame
+        )
         set_artifact(
             request_context,
             OWNER_CONVERSATION_FLOW,
