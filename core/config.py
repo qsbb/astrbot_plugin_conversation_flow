@@ -34,6 +34,9 @@ DEFAULTS: dict[str, Any] = {
     "chunking_llm_assist_min_length": 120,
     "plain_text_mode": True,
     "image_intent_mode": True,
+    # 控制提示污染（Stop output. / Output stopped.）专用恢复：仅当当前有效轮
+    # 整流确为控制产物且未交付时，净化后最多恢复一次真实答案。
+    "control_pollution_recovery_enabled": True,
     "interrupt_enabled": True,
     "experimental_thinking_merge_enabled": False,
     "interrupt_thinking_merge_context_count": 5,
@@ -282,6 +285,10 @@ def normalize_config(raw: dict[str, Any] | None) -> dict[str, Any]:
     )
     out["image_intent_mode"] = _coerce_bool(
         raw.get("image_intent_mode"), DEFAULTS["image_intent_mode"]
+    )
+    out["control_pollution_recovery_enabled"] = _coerce_bool(
+        raw.get("control_pollution_recovery_enabled"),
+        DEFAULTS["control_pollution_recovery_enabled"],
     )
     out["interrupt_enabled"] = _coerce_bool(
         raw.get("interrupt_enabled"), DEFAULTS["interrupt_enabled"]
@@ -702,6 +709,7 @@ class PluginConfig:
     chunking_llm_assist_min_length: int = 120
     plain_text_mode: bool = True
     image_intent_mode: bool = True
+    control_pollution_recovery_enabled: bool = True
     interrupt_enabled: bool = True
     experimental_thinking_merge_enabled: bool = False
     interrupt_thinking_merge_context_count: int = 5

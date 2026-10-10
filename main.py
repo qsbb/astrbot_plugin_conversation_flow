@@ -40,6 +40,28 @@ from .core.context_budget import (
     budget_summary,
 )
 from .core.delay import calculate_segment_delay_ms
+from .core.control_recovery import (
+    RECOVERY_FAILED_NOTICE,
+    apply_recovered_answer,
+    build_recovery_request,
+    detect_host_abort_pair,
+    has_tool_side_effects,
+    last_real_user_index,
+    message_text,
+    scrub_message_list,
+    strip_host_abort_pair,
+    suppress_control_artifact,
+    user_mentions_control_phrase,
+)
+from .core.control_pollution import (
+    HOST_ABORT_PAIR,
+    NOT_CONTROL,
+    RECOVER,
+    RECOVER_EXHAUSTED,
+    RESPECT_STOP,
+    decide_recovery,
+    is_control_artifact,
+)
 from .core.group_context import GroupContextManager
 from .core.current_channel import CurrentSocialContextResolver
 from .core.followup_guard import FollowupGuard, is_followup_offer
@@ -210,6 +232,9 @@ VOICE_DELIVERY_CONTRACT_NAME = "voice.delivery"
 VOICE_DELIVERY_CONTRACT_MAJOR = "1"
 DELIVERY_PLAN_EXTRA_KEY = "conversation_flow.delivery_plan"
 DELIVERY_PLAN_VERSION = "1.0"
+
+# 控制提示污染恢复的单次调用超时（秒）；失败即明确状态，不做无限重试。
+CONTROL_RECOVERY_TIMEOUT_SECONDS = 60.0
 SERIES_PROMPT_MARKER = "[凝心溯溪协同上下文]"
 PRIVATE_CONTEXT_BRIDGE_MARKER = "[对话流控制指令 - 最近私聊承接]"
 DYNAMIC_CONTEXT_MARKER = "[对话流控制指令 - 动态话题续接]"
@@ -239,12 +264,15 @@ _PANEL_INTERRUPT_SCOPE_LABELS = {
 }
 
 
-def _optional_event_filter(name: str):
-    """在旧版 AstrBot 上安全跳过不存在的生命周期 hook。"""
+def _optional_event_filter(name: str, **kwargs: Any):
+    """在旧版 AstrBot 上安全跳过不存在的生命周期 hook。
+
+    kwargs 透传给宿主的具体装饰器（例如 ``priority``），保证钩子顺序可声明。
+    """
     decorator = getattr(filter, name, None)
     if callable(decorator):
         try:
-            return decorator()
+            return decorator(**kwargs)
         except Exception:
             pass
 
@@ -252,6 +280,17 @@ def _optional_event_filter(name: str):
         return func
 
     return _noop
+
+
+def _is_control_phrase_discussion(text: str) -> bool:
+    """文本是否在讨论/翻译/引用控制短语（而非整条恰为控制产物）。"""
+    lowered = str(text or "").casefold()
+    if "output stopped" not in lowered and "stop output" not in lowered:
+        return False
+    from .core.control_pollution import is_control_artifact
+
+    # 整条恰为控制产物不算“讨论”，其余含该短语的正文视为讨论。
+    return not is_control_artifact(text)
 
 
 @register(
@@ -306,6 +345,13 @@ class ConversationalFlowPlugin(Star):
     # BRIDGE_EVENT_MARKER / LEGACY_BRIDGE_EVENT_MARKER。跨插件只经 event extras
     # 字符串传递，不引入 import 依赖；Quest/伴夏会话没有群聊与引用 UI，
     # 语音交付时分段结果只用于发布 delivery plan，不逐段发送。
+    # 控制提示污染（Stop output. / Output stopped.）专用恢复的状态键。
+    # 仅当“当前有效、未交付、且整流为确认控制产物”时恢复一次；
+    # 用户/插件已请求停止或事件已停止时一律尊重停止，不恢复。
+    CONTROL_RECOVERY_ATTEMPT_KEY = "conv_flow_control_recovery_attempted"
+    # on_agent_done 形态调用时暂存本轮 run_context.messages（供 on_llm_response
+    # 主动取数，不依赖脆弱的分发顺序）。
+    CONTROL_RUN_MESSAGES_KEY = "conv_flow_control_run_messages"
     EMBODIMENT_EVENT_MARKER = "embodiment_bridge"
     LEGACY_EMBODIMENT_EVENT_MARKER = "quest_avatar_bridge"
 
@@ -412,6 +458,9 @@ class ConversationalFlowPlugin(Star):
             "mood_silenced": 0,
             "mood_hinted": 0,
             "private_context_bridged": 0,
+            "control_artifacts_suppressed": 0,
+            "control_recoveries": 0,
+            "control_recovery_failed": 0,
             "dynamic_context_injected": 0,
             "time_annotated_injections": 0,
             "context_budget_shadow": 0,
@@ -1819,6 +1868,11 @@ class ConversationalFlowPlugin(Star):
                 "[conv-flow] recent activity context failed: %s",
                 type(exc).__name__,
             )
+        # 历史污染净化（只作用于请求副本）：宿主中断控制对或模型复读的
+        # "Output stopped" 若已被写入公开历史，会在本轮再次进入上下文。
+        # 这里仅剔除“整行恰为控制产物”的行，保留真实问题与工具调用/结果配对；
+        # 不做正文子串替换，用户在讨论该短语时不受影响。
+        self._strip_control_pollution_from_request(event, req)
         # 私聊短消息承接：补回分段/主动发送后可能未进入框架历史的最近轮次
         self._inject_private_context_bridge(event, req, seq, user_text)
         # 私聊长消息仅在公开历史确实缺页时补回更早轮次，并由当前主模型判断
@@ -1966,6 +2020,15 @@ class ConversationalFlowPlugin(Star):
         seq = event.get_extra(ConversationTracker.SEQ_EXTRA_KEY)
         self.tracker.mark_response_started(event)
 
+        # 0) 控制提示污染治理必须最先执行（在任何 stop_event 之前）：
+        #    宿主 context_utils.call_event_hook 每执行完一个 handler 后遇
+        #    event.is_stopped() 即 return，若放到事件的 on_agent_done 链里，
+        #    会被同链更早的 handler stop 后跳过。这里利用言 on_llm_response
+        #    自身就在「将停止事件」的那条路径上，先做来源治理与本轮恢复。
+        #    通过 _ACTIVE_AGENT_RUNNERS（言在 follow-up 兼容路径已在用）拿
+        #    run_context 与本轮实际 provider，避免依赖 on_agent_done 分发。
+        await self._handle_control_pollution(event, response, request_context)
+
         # 1) 检查是否被插话取代
         if self.config.interrupt_enabled and self.tracker.is_discarded(event):
             self.logger.info("[conv-flow] seq=%s response discarded (interrupted)", seq)
@@ -2032,13 +2095,350 @@ class ConversationalFlowPlugin(Star):
         key = self._tool_scope_key(event)
         inflight[key] = max(0, inflight.get(key, 0) - 1)
 
-    @_optional_event_filter("on_agent_done")
+    # 明确声明优先级（CONVENTIONS.md 3.3 / 本次验收）：控制提示污染治理必须在
+    # 本插件内**最先**执行。宿主 context_utils.call_event_hook 每执行一个
+    # handler 后遇 event.is_stopped() 即 return，所以本 handler 既要清工具生命周期
+    # 状态，也要在同一处完成控制对治理——保证「本插件第一个被调用的钩子」就做
+    # 清理，不依赖同插件后续 handler 是否可达。
+    # 真实主路径仍在 on_llm_response（言就是停止事件的那一步）；此处是对
+    # on_agent_done 事件的兜底与兼容，两处幂等。
+    @_optional_event_filter("on_agent_done", priority=10000)
     async def on_agent_done_tool_state(
         self, event: AstrMessageEvent, *args: Any, **kwargs: Any
     ) -> None:
         inflight = getattr(self, "_tool_inflight", None)
         if isinstance(inflight, dict):
             inflight.pop(self._tool_scope_key(event), None)
+        # 同处兜底控制提示治理：从 args 里取 run_context / response（宿主签名
+        # 为 event, run_context, response）。
+        run_context, response = self._split_agent_done_args(args)
+        if response is not None:
+            if isinstance(getattr(run_context, "messages", None), list):
+                self._set_extra(event, self.CONTROL_RUN_MESSAGES_KEY, run_context.messages)
+            await self._handle_control_pollution(
+                event, response, ensure_context(event, PHASE_LLM_RESPONSE)
+            )
+
+    async def _handle_control_pollution(
+        self, event: AstrMessageEvent, response: Any, request_context: Any
+    ) -> None:
+        """控制提示污染（Stop output. / Output stopped.）的来源治理与本轮恢复。
+
+        入口选择依据（v4.28.1 只读源码）：
+        - 宿主 ``step()`` 先把 assistant 消息 append 进 ``run_context.messages``，
+          再触发 ``on_agent_done`` → ``OnLLMResponseEvent``/``OnAgentDoneEvent``，
+          之后才产出 ``llm_result``、最后 ``internal.py`` 落盘；
+        - 但 ``context_utils.call_event_hook`` 每执行一个 handler 后遇
+          ``event.is_stopped()`` 即 return。生产 OnAgentDoneEvent 链上有更高
+          优先级 handler，一旦停止事件，放到那里的清理根本不可达。
+        - 言自己的 ``on_llm_response`` 正是「将被取代时停止事件」的那条路径，
+          在其内部先做治理可保证可达；``run_context`` 与本轮实际 provider 通过
+          ``_ACTIVE_AGENT_RUNNERS`` 获取（言在 follow-up 兼容路径已在用）。
+
+        因此本方法在 ``on_llm_response`` 内最先调用；``on_agent_done_control_recovery``
+        仅作为同一逻辑的薄委托（便于老版本兼容与测试直接调用）。
+        """
+        if not getattr(self.config, "control_pollution_recovery_enabled", True):
+            return
+        messages = self._active_run_messages(event)
+        if not isinstance(messages, list):
+            return
+
+        response_text = self._extract_response_text(response)
+        stop_requested = bool(event.get_extra("agent_stop_requested"))
+        event_stopped = bool(event.is_stopped())
+        host_abort_pair = detect_host_abort_pair(messages)
+        user_discussing = user_mentions_control_phrase(messages)
+
+        decision = decide_recovery(
+            result_text=response_text,
+            stop_requested=stop_requested,
+            event_stopped=event_stopped,
+            host_abort_pair=host_abort_pair,
+            already_attempted=bool(
+                event.get_extra(self.CONTROL_RECOVERY_ATTEMPT_KEY)
+            ),
+        )
+
+        if decision == NOT_CONTROL:
+            return
+
+        seq = self._get_extra(event, ConversationTracker.SEQ_EXTRA_KEY)
+
+        if decision == HOST_ABORT_PAIR:
+            # 纯来源治理：从将要落盘的消息里移除宿主中断控制对。
+            removed = strip_host_abort_pair(messages)
+            if removed:
+                self._stats["control_artifacts_suppressed"] = (
+                    self._stats.get("control_artifacts_suppressed", 0) + removed
+                )
+                add_reason(
+                    request_context, OWNER_CONVERSATION_FLOW,
+                    "CONTROL_ABORT_PAIR_STRIPPED",
+                )
+            self.logger.info(
+                "[conv-flow] seq=%s host abort control pair stripped (no recovery)",
+                seq,
+            )
+            return
+
+        if user_discussing:
+            return
+
+        if decision == RESPECT_STOP:
+            # 用户/插件已请求停止，或事件已被停止：尊重停止，不恢复。
+            return
+
+        if self._event_has_partial_delivery(event):
+            # 已有实际交付：保留已有交付，抑制控制产物，不补发、不重跑。
+            suppress_control_artifact(messages, response)
+            self._stats["control_artifacts_suppressed"] = (
+                self._stats.get("control_artifacts_suppressed", 0) + 1
+            )
+            add_reason(
+                request_context, OWNER_CONVERSATION_FLOW,
+                "CONTROL_RECOVERY_SKIPPED_PARTIAL_DELIVERY",
+            )
+            diagnostic_event(
+                "conv_flow.control_suppressed_partial_delivery",
+                "已有交付，抑制控制产物且不重跑",
+                level="WARN",
+                details={"seq": seq},
+            )
+            return
+
+        if decision == RECOVER_EXHAUSTED:
+            self._mark_recovery_failed(event, response, messages, request_context)
+            return
+
+        await self._attempt_control_recovery(
+            event, response, messages, seq, request_context
+        )
+
+    @staticmethod
+    def _split_agent_done_args(args: tuple[Any, ...]) -> tuple[Any, Any]:
+        """从 on_agent_done 的 *args 里取出 (run_context, response)。
+
+        宿主调用签名为 ``handler(event, run_context, response)``；言用
+        ``*args`` 接收以兼容缺失旧版本，这里按位置解析。
+        """
+        run_context = args[0] if len(args) >= 1 else None
+        response = args[1] if len(args) >= 2 else None
+        return run_context, response
+
+    def _active_run_messages(self, event: AstrMessageEvent) -> Any:
+        """取本轮 ``run_context.messages``：先看暂存，再查活动 runner 注册表。"""
+        stashed = self._get_extra(event, self.CONTROL_RUN_MESSAGES_KEY)
+        if isinstance(stashed, list):
+            return stashed
+        try:
+            from astrbot.core.pipeline.process_stage.follow_up import (
+                _ACTIVE_AGENT_RUNNERS,
+            )
+
+            runner = _ACTIVE_AGENT_RUNNERS.get(event.unified_msg_origin)
+        except Exception:
+            runner = None
+        run_context = getattr(runner, "run_context", None)
+        return getattr(run_context, "messages", None)
+
+    @_optional_event_filter("on_agent_done", priority=20000)
+    async def on_agent_done_control_recovery(
+        self, event: AstrMessageEvent, run_context: Any = None, response: Any = None,
+        *args: Any, **kwargs: Any,
+    ) -> None:
+        """薄委托：兼容旧版本或测试直接以 on_agent_done 形态调用。"""
+        if response is None:
+            return
+        # 若事件已被更早的 handler 停止，本钩子通常到不了；但仍做一次尝试。
+        messages = (
+            run_context
+            if isinstance(run_context, list)
+            else getattr(run_context, "messages", None)
+        )
+        if isinstance(messages, list):
+            self._set_extra(event, self.CONTROL_RUN_MESSAGES_KEY, messages)
+        request_context = ensure_context(event, PHASE_LLM_RESPONSE)
+        await self._handle_control_pollution(event, response, request_context)
+
+    @staticmethod
+    def _resolve_recovery_provider(event: AstrMessageEvent) -> tuple[str, str]:
+        """解析本轮实际服务的 provider id 与 model。
+
+        返回 ``(provider_id, model_name)``；无法确认本轮 provider 时返回
+        ``("", "")``，由调用方明确降级为受限失败，绝不静默改用其它模型。
+        """
+        try:
+            from astrbot.core.pipeline.process_stage.follow_up import (
+                _ACTIVE_AGENT_RUNNERS,
+            )
+
+            runner = _ACTIVE_AGENT_RUNNERS.get(event.unified_msg_origin)
+        except Exception:
+            runner = None
+        provider = getattr(runner, "provider", None)
+        if provider is None:
+            return "", ""
+        config = getattr(provider, "provider_config", {}) or {}
+        provider_id = str(config.get("id", "") or "")
+        model_name = ""
+        getter = getattr(provider, "get_model", None)
+        if callable(getter):
+            try:
+                model_name = str(getter() or "")
+            except Exception:
+                model_name = ""
+        return provider_id, model_name
+
+    async def _llm_generate_with_provider(self, provider_id: str, kwargs: dict[str, Any]):
+        """单次调用 context.llm_generate（不因 TypeError 去 model 重试）。
+
+        ``Context.llm_generate`` 的签名是 ``**kwargs``，OpenAI provider 的
+        ``text_chat`` 明确支持 ``model``；因此不存在“去 model 再调一次”的必要。
+        TypeError 可能发生在请求/计费之后，盲重试会违反“恢复至多一次”。任何
+        异常（含 TypeError）直接上抛，由调用方走既有受限通知。
+        """
+        return await self.context.llm_generate(**kwargs)
+
+    @staticmethod
+    def _event_has_partial_delivery(event: AstrMessageEvent) -> bool:
+        """事件是否已发生过实际发送（含分段/媒体），用于避免重复交付。"""
+        if bool(getattr(event, "_has_send_oper", False)):
+            return True
+        getter = getattr(event, "get_extra", None)
+        if callable(getter):
+            try:
+                if getter("conv_flow_sent_chunks"):
+                    return True
+            except Exception:
+                pass
+        return False
+
+    def _mark_recovery_failed(
+        self, event: AstrMessageEvent, response: Any, messages: list[Any], request_context: Any
+    ) -> None:
+        """恢复最终失败：把本轮结果替换为受限通知，并记诊断。"""
+        self._stats["control_recovery_failed"] = (
+            self._stats.get("control_recovery_failed", 0) + 1
+        )
+        add_reason(
+            request_context, OWNER_CONVERSATION_FLOW, "CONTROL_RECOVERY_FAILED"
+        )
+        diagnostic_event(
+            "conv_flow.control_recovery_failed",
+            "控制提示污染恢复失败",
+            level="WARN",
+            details={"seq": self._get_extra(event, ConversationTracker.SEQ_EXTRA_KEY)},
+        )
+        try:
+            apply_recovered_answer(messages, response, RECOVERY_FAILED_NOTICE)
+        except Exception as exc:
+            self.logger.debug("[conv-flow] mark recovery failed error: %s", exc)
+
+    async def _attempt_control_recovery(
+        self, event: AstrMessageEvent, response: Any, messages: list[Any],
+        seq: Any, request_context: Any,
+    ) -> None:
+        """净化请求副本后复用当前对话模型恢复一次真实答案。"""
+        # 先置位，保证无论成功失败本逻辑轮只恢复一次。
+        self._set_extra(event, self.CONTROL_RECOVERY_ATTEMPT_KEY, True)
+
+        start = last_real_user_index(messages)
+        if has_tool_side_effects(messages, since_index=start):
+            # 本轮已产生工具副作用：不重跑工具，也不能安全续接 -> 明确失败。
+            add_reason(
+                request_context, OWNER_CONVERSATION_FLOW,
+                "CONTROL_RECOVERY_SKIPPED_TOOL_SIDE_EFFECT",
+            )
+            self._mark_recovery_failed(event, response, messages, request_context)
+            return
+
+        payload = build_recovery_request(messages)
+
+        # 复用「本轮实际服务」的 provider 与 model：
+        # 生产存在主模型 400/403 后回退 fallback 的情况，get_current_chat_provider_id
+        # 只能拿到会话默认模型，可能与本轮真正答复的 provider 不同。internal.py 在
+        # 启动 Agent 后即 register_active_runner(umo, runner)，且在 on_agent_done 期间
+        # 仍未 unregister；runner.provider 就是 _iter_llm_responses_with_fallback 里
+        # 最终选中的那一个。言在原生 follow-up 兼容路径已使用同一注册表。
+        provider_id, model_name = self._resolve_recovery_provider(event)
+        if not provider_id:
+            # 公开/半公开能力不足以证明能复用本轮 provider：不静默退回其它模型，
+            # 明确记为受限并给出有界提示。
+            add_reason(
+                request_context, OWNER_CONVERSATION_FLOW,
+                "CONTROL_RECOVERY_PROVIDER_UNRESOLVED",
+            )
+            diagnostic_event(
+                "conv_flow.control_provider_unresolved",
+                "无法解析本轮实际 provider，跳过恢复",
+                level="WARN",
+                details={"seq": seq},
+            )
+            self.logger.warning(
+                "[conv-flow] seq=%s recovery provider unresolved; skip", seq
+            )
+            self._mark_recovery_failed(event, response, messages, request_context)
+            return
+
+        answer = ""
+        try:
+            generate_kwargs: dict[str, Any] = {
+                "chat_provider_id": provider_id,
+                "prompt": payload.get("prompt"),
+                "contexts": payload.get("contexts") or [],
+                "system_prompt": payload.get("system_prompt") or "",
+            }
+            if model_name:
+                # 显式携带本轮实际模型，避免退回 provider 默认模型。
+                generate_kwargs["model"] = model_name
+            llm_resp = await asyncio.wait_for(
+                self._llm_generate_with_provider(provider_id, generate_kwargs),
+                timeout=CONTROL_RECOVERY_TIMEOUT_SECONDS,
+            )
+            answer = self._extract_response_text(llm_resp)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            self.logger.warning(
+                "[conv-flow] seq=%s control recovery call failed: %s", seq, exc
+            )
+            answer = ""
+
+        # 恢复期间若被新消息替代/用户停止，则不发过期答案；同时抑制原污染
+        # 结果，避免「旧恢复不发、旧控制产物照发」的双重错误。
+        if (
+            self.config.interrupt_enabled and self.tracker.is_discarded(event)
+        ) or bool(event.get_extra("agent_stop_requested")) or event.is_stopped():
+            suppress_control_artifact(messages, response)
+            add_reason(
+                request_context, OWNER_CONVERSATION_FLOW,
+                "CONTROL_RECOVERY_SUPERSEDED",
+            )
+            self.logger.info(
+                "[conv-flow] seq=%s recovery superseded; discard stale answer", seq
+            )
+            return
+
+        # 纯控制产物不算真实答案；仍无效则按失败处理（不超过一次调用）。
+        if not answer.strip() or is_control_artifact(answer):
+            self._mark_recovery_failed(event, response, messages, request_context)
+            return
+
+        if not apply_recovered_answer(messages, response, answer):
+            self._mark_recovery_failed(event, response, messages, request_context)
+            return
+
+        self._stats["control_recoveries"] = (
+            self._stats.get("control_recoveries", 0) + 1
+        )
+        add_reason(request_context, OWNER_CONVERSATION_FLOW, "CONTROL_RECOVERED")
+        diagnostic_event(
+            "conv_flow.control_recovered",
+            "控制提示污染已恢复真实应答",
+            details={"seq": seq},
+        )
+        self.logger.info("[conv-flow] seq=%s control artifact recovered", seq)
 
     # ------------------------------------------------------------------
     # 主钩子：on_decorating_result
@@ -3120,6 +3520,44 @@ class ConversationalFlowPlugin(Star):
                 "[conv-flow] prepend interrupted captions failed: %s",
                 type(exc).__name__,
             )
+
+    def _strip_control_pollution_from_request(
+        self, event: AstrMessageEvent, req: Any
+    ) -> int:
+        """在主请求副本上剔除宿主控制产物整行，返回剔除行数。
+
+        只处理公开请求结构（``contexts`` / ``extra_user_content_parts``），
+        保留真实用户问题与工具调用/结果配对；禁止全局字符串替换，避免误删
+        用户在翻译/讨论/引用该短语时的正文。
+        """
+        # 若「当前这一轮用户输入本身」就是在翻译/讨论该短语（例如整条就是
+        # “Stop output.”），结构上可能与宿主签名相同；此时不做任何清理，
+        # 尊重真实用户输入。
+        contexts = getattr(req, "contexts", None)
+        current_text = str(extract_plain_text(event) or "")
+        if current_text.strip() and _is_control_phrase_discussion(current_text):
+            return 0
+        removed = 0
+        try:
+            if isinstance(contexts, list):
+                # 只做来源可证治理：宿主中断控制对 + 言自己注入块内的控制行；
+                # 绝不逐行删除任意正文（翻译/引用/代码块/讨论）。
+                removed += scrub_message_list(contexts)
+        except Exception as exc:
+            self.logger.debug(
+                "[conv-flow] control pollution scrub failed: %s", exc
+            )
+            return 0
+        if removed:
+            self._stats["control_artifacts_suppressed"] = (
+                self._stats.get("control_artifacts_suppressed", 0) + removed
+            )
+            request_context = ensure_context(event, PHASE_LLM_REQUEST)
+            add_reason(
+                request_context, OWNER_CONVERSATION_FLOW,
+                "CONTROL_POLLUTION_SCRUBBED",
+            )
+        return removed
 
     def _request_context_contains(self, req: Any, old_texts: list[Any]) -> bool:
         """检查 ProviderRequest 公开上下文是否已包含所有旧用户消息。"""
@@ -5245,6 +5683,15 @@ class ConversationalFlowPlugin(Star):
         因此群缓冲记录的 message_id 为空，靠 ``is_bot`` 标记身份。
         """
         if not text or not text.strip():
+            return
+        # 仅当「整流就是已确认的控制产物」时才不写入言自己维护的回复记录
+        # （recent_turns / 群上下文 / 近期活动缓存）。混合正文、翻译、引用
+        # （正文里恰好含 "Output stopped." 一行）一律原样缓存；这里不做逐行
+        # 关键词删除。整条控制产物的常规路径已在 on_llm_response 治理阶段处理。
+        if is_control_artifact(text):
+            self._stats["control_artifacts_suppressed"] = (
+                self._stats.get("control_artifacts_suppressed", 0) + 1
+            )
             return
         self._record_recent_activity_bot(event, text)
         self.tracker.record_response(event, text)

@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import math
 import time
 from dataclasses import dataclass, field
 from typing import Any
 
 from .task_relation import text_completeness
+from .control_pollution import is_control_artifact
 
 # 思考中合并的护栏：连续取消重跑次数与单轮总时长上限。
 # 超过后退化为"排队下一轮"，避免用户连续补话把回复饿死。
@@ -740,6 +742,10 @@ class ConversationTracker:
         text = str(bot_text or "").strip()
         seq = self._get_extra(event, self.SEQ_EXTRA_KEY)
         if seq is None or not text:
+            return False
+        # 仅当「整流就是已确认的控制产物」时才不记录；混合正文/翻译/引用
+        # （含恰好出现过 "Output stopped." 的正常答案）一律原样缓存，绝不逐行删。
+        if is_control_artifact(text):
             return False
         state = self._states.get(self._get_umo(event))
         if state is None:

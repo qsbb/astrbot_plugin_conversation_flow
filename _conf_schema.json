@@ -159,6 +159,12 @@
     "hint": "开启后，bot 还在思考时用户追加消息，旧回复会被抑制或合并到新请求。",
     "default": true
   },
+  "control_pollution_recovery_enabled": {
+    "type": "bool",
+    "description": "[插话中断] 控制提示污染恢复",
+    "hint": "开启后，当某一轮回复整条等于 Stop output. / Output stopped. 这类控制产物时，言会在本轮净化后最多恢复一次真实答案并沿原交付链发送；用户/插件已请求停止、已交付部分正文或已产生工具副作用时不恢复。正常轮次不增加模型调用。",
+    "default": true
+  },
   "interrupt_mode": {
     "type": "string",
     "description": "[插话中断] 处理模式（steering=运行中插话的任务归属判定 / window=旧的固定时间窗）",
