@@ -263,9 +263,9 @@ class RealDispatchTests(unittest.IsolatedAsyncioTestCase):
 
         handlers = [
             types.SimpleNamespace(
-                handler=_make("on_agent_done_control_recovery"),
+                handler=_make("on_agent_done_tool_state"),
                 handler_module_path="yan",
-                handler_name="on_agent_done_control_recovery",
+                handler_name="on_agent_done_tool_state",
             )
         ]
         namespace = {
@@ -288,7 +288,7 @@ class RealDispatchTests(unittest.IsolatedAsyncioTestCase):
             types.SimpleNamespace(messages=messages),
             types.SimpleNamespace(completion_text="Output stopped."),
         )
-        self.assertIn("on_agent_done_control_recovery", ran)
+        self.assertIn("on_agent_done_tool_state", ran)
         self.assertFalse(detect_host_abort_pair(messages))
 
 
@@ -402,7 +402,7 @@ class ProviderReuseTests(unittest.IsolatedAsyncioTestCase):
         _ACTIVE_AGENT_RUNNERS[event.unified_msg_origin] = runner
         try:
             response = types.SimpleNamespace(completion_text="Output stopped")
-            await plugin.on_agent_done_control_recovery(
+            await plugin.on_agent_done_tool_state(
                 event, runner.run_context, response, None
             )
         finally:
@@ -430,7 +430,7 @@ class ProviderReuseTests(unittest.IsolatedAsyncioTestCase):
             {"role": "assistant", "content": "Output stopped"},
         ]
         response = types.SimpleNamespace(completion_text="Output stopped")
-        await plugin.on_agent_done_control_recovery(event, messages, response, None)
+        await plugin.on_agent_done_tool_state(event, messages, response, None)
 
         self.assertEqual(ctx.calls, 0, "无本轮 provider 时不得另用默认模型")
         self.assertEqual(response.completion_text, RECOVERY_FAILED_NOTICE)
@@ -576,7 +576,7 @@ class SingleCallContractTests(unittest.IsolatedAsyncioTestCase):
         _ACTIVE_AGENT_RUNNERS[event.unified_msg_origin] = runner
         try:
             response = types.SimpleNamespace(completion_text="Output stopped")
-            await plugin.on_agent_done_control_recovery(
+            await plugin.on_agent_done_tool_state(
                 event, runner.run_context, response, None
             )
         finally:

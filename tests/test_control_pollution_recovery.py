@@ -298,7 +298,7 @@ class _Runner:
         _ACTIVE_AGENT_RUNNERS[self.event.unified_msg_origin] = runner
         try:
             # 2) 触发 on_agent_done -> 言的恢复钩子
-            await self.plugin.on_agent_done_control_recovery(
+            await self.plugin.on_agent_done_tool_state(
                 self.event, self.messages, self.response, None
             )
             # 3) 宿主用 response（优先 result_chain）产出结果
@@ -425,7 +425,7 @@ class ControlRecoveryIntegrationTests(unittest.IsolatedAsyncioTestCase):
         runner.messages = messages[:4] + [
             {"role": "assistant", "content": "Output stopped"}
         ]
-        await plugin.on_agent_done_control_recovery(
+        await plugin.on_agent_done_tool_state(
             event, runner.messages, runner.response, None
         )
 
@@ -521,7 +521,7 @@ class AbortPairWithPartialDeliveryTests(unittest.IsolatedAsyncioTestCase):
             {"role": "assistant", "content": "Output stopped."},
         ]
         response = types.SimpleNamespace(completion_text="Output stopped.")
-        await plugin.on_agent_done_control_recovery(event, messages, response, None)
+        await plugin.on_agent_done_tool_state(event, messages, response, None)
 
         self.assertNotIn("Stop output.", [m.get("content") for m in messages])
         self.assertNotIn("Output stopped.", [m.get("content") for m in messages])
@@ -542,7 +542,7 @@ class PartialDeliveryTests(unittest.IsolatedAsyncioTestCase):
             {"role": "assistant", "content": "Output stopped"},
         ]
         response = types.SimpleNamespace(completion_text="Output stopped")
-        await plugin.on_agent_done_control_recovery(event, messages, response, None)
+        await plugin.on_agent_done_tool_state(event, messages, response, None)
 
         self.assertEqual(ctx.calls, 0, "已有交付时不得重跑")
         # 已有交付：抑制控制产物且不补发（避免重复）。
@@ -566,7 +566,7 @@ class UserDiscussesPhraseTests(unittest.IsolatedAsyncioTestCase):
             {"role": "assistant", "content": "Output stopped"},
         ]
         response = types.SimpleNamespace(completion_text="Output stopped")
-        await plugin.on_agent_done_control_recovery(event, messages, response, None)
+        await plugin.on_agent_done_tool_state(event, messages, response, None)
 
         self.assertEqual(ctx.calls, 0, "用户讨论该短语时不得触发恢复")
         self.assertEqual(response.completion_text, "Output stopped")
@@ -604,7 +604,7 @@ class ConfigAndWiringTests(unittest.IsolatedAsyncioTestCase):
             {"role": "assistant", "content": "Output stopped"},
         ]
         response = types.SimpleNamespace(completion_text="Output stopped")
-        await plugin.on_agent_done_control_recovery(event, messages, response, None)
+        await plugin.on_agent_done_tool_state(event, messages, response, None)
 
         self.assertEqual(ctx.calls, 0)
         self.assertEqual(response.completion_text, "Output stopped")

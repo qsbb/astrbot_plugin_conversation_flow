@@ -2095,26 +2095,31 @@ class ConversationalFlowPlugin(Star):
         key = self._tool_scope_key(event)
         inflight[key] = max(0, inflight.get(key, 0) - 1)
 
-    # 明确声明优先级（CONVENTIONS.md 3.3 / 本次验收）：控制提示污染治理必须在
-    # 本插件内**最先**执行。宿主 context_utils.call_event_hook 每执行一个
-    # handler 后遇 event.is_stopped() 即 return，所以本 handler 既要清工具生命周期
-    # 状态，也要在同一处完成控制对治理——保证「本插件第一个被调用的钩子」就做
-    # 清理，不依赖同插件后续 handler 是否可达。
-    # 真实主路径仍在 on_llm_response（言就是停止事件的那一步）；此处是对
-    # on_agent_done 事件的兜底与兼容，两处幂等。
+    # on_agent_done 的正式 handler（CONVENTIONS.md 3.3）：显式声明优先级，
+    # 既清理工具生命周期状态，又暂存**公开**传入的 run_context 并做控制提示
+    # 治理兜底。真实 stop 前治理主路径仍在 on_llm_response（言就是停止事件的
+    # 那一步）；本 handler 是同一逻辑在 on_agent_done 链上的正式入口。
+    # 宿主 context_utils.call_event_hook 每执行一个 handler 后遇
+    # event.is_stopped() 即 return，故显式优先级并保持两处幂等。
     @_optional_event_filter("on_agent_done", priority=10000)
     async def on_agent_done_tool_state(
         self, event: AstrMessageEvent, *args: Any, **kwargs: Any
     ) -> None:
+        """on_agent_done：工具状态清理 + 控制提示污染治理（正式入口）。"""
         inflight = getattr(self, "_tool_inflight", None)
         if isinstance(inflight, dict):
             inflight.pop(self._tool_scope_key(event), None)
-        # 同处兜底控制提示治理：从 args 里取 run_context / response（宿主签名
-        # 为 event, run_context, response）。
+        # 宿主签名为 (event, run_context, response)；公开 run_context 优先暂存，
+        # 供 on_llm_response 治理时取用（失败仍可回退私有注册表）。
         run_context, response = self._split_agent_done_args(args)
+        messages = (
+            run_context
+            if isinstance(run_context, list)
+            else getattr(run_context, "messages", None)
+        )
+        if isinstance(messages, list):
+            self._set_extra(event, self.CONTROL_RUN_MESSAGES_KEY, messages)
         if response is not None:
-            if isinstance(getattr(run_context, "messages", None), list):
-                self._set_extra(event, self.CONTROL_RUN_MESSAGES_KEY, run_context.messages)
             await self._handle_control_pollution(
                 event, response, ensure_context(event, PHASE_LLM_RESPONSE)
             )
@@ -2135,8 +2140,8 @@ class ConversationalFlowPlugin(Star):
           在其内部先做治理可保证可达；``run_context`` 与本轮实际 provider 通过
           ``_ACTIVE_AGENT_RUNNERS`` 获取（言在 follow-up 兼容路径已在用）。
 
-        因此本方法在 ``on_llm_response`` 内最先调用；``on_agent_done_control_recovery``
-        仅作为同一逻辑的薄委托（便于老版本兼容与测试直接调用）。
+        因此本方法在 ``on_llm_response`` 内最先调用；``on_agent_done_tool_state``
+        是同一逻辑在 on_agent_done 链上的正式入口（两处幂等）。
         """
         if not getattr(self.config, "control_pollution_recovery_enabled", True):
             return
@@ -2249,25 +2254,6 @@ class ConversationalFlowPlugin(Star):
             runner = None
         run_context = getattr(runner, "run_context", None)
         return getattr(run_context, "messages", None)
-
-    @_optional_event_filter("on_agent_done", priority=20000)
-    async def on_agent_done_control_recovery(
-        self, event: AstrMessageEvent, run_context: Any = None, response: Any = None,
-        *args: Any, **kwargs: Any,
-    ) -> None:
-        """薄委托：兼容旧版本或测试直接以 on_agent_done 形态调用。"""
-        if response is None:
-            return
-        # 若事件已被更早的 handler 停止，本钩子通常到不了；但仍做一次尝试。
-        messages = (
-            run_context
-            if isinstance(run_context, list)
-            else getattr(run_context, "messages", None)
-        )
-        if isinstance(messages, list):
-            self._set_extra(event, self.CONTROL_RUN_MESSAGES_KEY, messages)
-        request_context = ensure_context(event, PHASE_LLM_RESPONSE)
-        await self._handle_control_pollution(event, response, request_context)
 
     @staticmethod
     def _resolve_recovery_provider(event: AstrMessageEvent) -> tuple[str, str]:
