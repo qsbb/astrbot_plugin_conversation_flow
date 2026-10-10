@@ -3278,13 +3278,18 @@ class ConversationalFlowPlugin(Star):
         old_lines = "\n".join(
             labeled_line(text_ts, text, now_ts) for text, text_ts in old_pairs
         )
-        time_note = ""
-        if old_pairs and all(text_ts > 0 for _, text_ts in old_pairs):
-            time_note = burst_note(len(old_pairs) + 1, old_pairs[0][1], now_ts)
         try:
             hint_ts_value = float(raw_hint.get("hint_ts"))
         except (TypeError, ValueError):
             hint_ts_value = now_ts
+        # 连发跨度只由「首条事件时间 → 末条（新消息）事件时间」决定，与等待
+        # 安静期/模型耗时无关；hint_ts 现为新消息事件时间，非提示生成时刻。
+        last_event_ts = hint_ts_value if hint_ts_value > 0 else now_ts
+        time_note = ""
+        if old_pairs and all(text_ts > 0 for _, text_ts in old_pairs):
+            time_note = burst_note(
+                len(old_pairs) + 1, old_pairs[0][1], last_event_ts
+            )
         new_label = relative_label(hint_ts_value, now_ts) or "刚刚"
         old_time_note = (
             f"（{relative_label(old_pairs[-1][1], now_ts)}发出）"
@@ -4727,18 +4732,25 @@ class ConversationalFlowPlugin(Star):
             return
 
         now_ts = time.time()
+        tzname = self._session_timezone_name(event)
         lines: list[str] = []
         for turn in turns:
-            # 每轮标注距现在的真实时间，模型不再自行猜测间隔。
-            turn_label = relative_label(turn.completed_at, now_ts)
-            turn_prefix = f"（{turn_label}）" if turn_label else ""
-            for text in turn.user_texts:
+            # 用户原话用各自的事件时间；bot 回复用实际交付时间。缺可靠来源时
+            # 退回该轮 completed_at，绝不把长生成耗时刻成用户刚说。
+            delivered = getattr(turn, "delivered_at", 0.0) or turn.completed_at
+            bot_label = relative_label(delivered, now_ts, tzname)
+            for index, text in enumerate(turn.user_texts):
                 preview = self._context_bridge_preview(text)
-                if preview:
-                    lines.append(f"{turn_prefix}用户: {preview}")
+                if not preview:
+                    continue
+                user_ts = ConversationTracker.turn_user_time(turn, index)
+                label = relative_label(user_ts, now_ts, tzname) if user_ts > 0 else bot_label
+                prefix = f"（{label}）" if label else ""
+                lines.append(f"{prefix}用户: {preview}")
             bot_preview = self._context_bridge_preview(turn.bot_text)
             if bot_preview:
-                lines.append(f"{turn_prefix}你: {bot_preview}")
+                bot_prefix = f"（{bot_label}）" if bot_label else ""
+                lines.append(f"{bot_prefix}你: {bot_preview}")
         if not lines:
             return
 
@@ -4756,6 +4768,34 @@ class ConversationalFlowPlugin(Star):
             len(turns),
             is_short_followup,
         )
+
+    def _session_timezone_name(self, event: AstrMessageEvent) -> Any:
+        """解析当前会话可信的 IANA 时区名；无则返回 None（调用方回退本地）。
+
+        来源优先级：AstrBot 顶层配置 ``timezone``（宿主 datetime 提示词使用的
+        同一来源），其次 provider_settings 的显式时区。不假定容器本地时区
+        就是用户时区，也不把平台/用户时区强行统一。
+        """
+        candidates: list[Any] = []
+        context = getattr(self, "context", None)
+        getter = getattr(context, "get_config", None)
+        if callable(getter):
+            try:
+                cfg = getter(event.unified_msg_origin)
+            except Exception:
+                try:
+                    cfg = getter()
+                except Exception:
+                    cfg = None
+            if isinstance(cfg, dict):
+                candidates.append(cfg.get("timezone"))
+                ps = cfg.get("provider_settings")
+                if isinstance(ps, dict):
+                    candidates.append(ps.get("timezone"))
+        for raw in candidates:
+            if isinstance(raw, str) and raw.strip():
+                return raw.strip()
+        return None
 
     def _inject_dynamic_context(
         self,
@@ -4792,22 +4832,31 @@ class ConversationalFlowPlugin(Star):
         blocks: list[str] = []
         used = 0
         now_ts = time.time()
+        tzname = self._session_timezone_name(event)
         for turn in reversed(missing_turns):
-            turn_label = relative_label(turn.completed_at, now_ts)
-            turn_prefix = f"（{turn_label}）" if turn_label else ""
-            lines = [
-                f"{turn_prefix}用户: {self._context_bridge_preview(text, 360)}"
-                for text in turn.user_texts
-                if self._context_bridge_preview(text, 360)
-            ]
+            delivered = getattr(turn, "delivered_at", 0.0) or turn.completed_at
+            bot_label = relative_label(delivered, now_ts, tzname)
+            lines = []
+            body_chars = 0
+            for index, text in enumerate(turn.user_texts):
+                preview = self._context_bridge_preview(text, 360)
+                if not preview:
+                    continue
+                user_ts = ConversationTracker.turn_user_time(turn, index)
+                label = relative_label(user_ts, now_ts, tzname) if user_ts > 0 else bot_label
+                prefix = f"（{label}）" if label else ""
+                lines.append(f"{prefix}用户: {preview}")
+                body_chars += len(preview)
             bot_preview = self._context_bridge_preview(turn.bot_text, 480)
             if bot_preview:
-                lines.append(f"{turn_prefix}你: {bot_preview}")
+                bot_prefix = f"（{bot_label}）" if bot_label else ""
+                lines.append(f"{bot_prefix}你: {bot_preview}")
+                body_chars += len(bot_preview)
             block = "\n".join(lines).strip()
             if not block:
                 continue
-            # 时间标注属于结构元数据，不占用内容字符预算。
-            content_len = len(block) - len(turn_prefix) * len(lines)
+            # 时间标注属于结构元数据，不占用内容字符预算：只计正文预览字符。
+            content_len = max(1, body_chars)
             separator = 2 if blocks else 0
             remaining = budget - used - separator
             if remaining <= 0:

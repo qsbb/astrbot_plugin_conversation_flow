@@ -11,9 +11,32 @@ from __future__ import annotations
 
 import time
 from datetime import datetime
+from typing import Any
+
+try:  # Python 3.9+ 标准库
+    from zoneinfo import ZoneInfo
+except Exception:  # pragma: no cover
+    ZoneInfo = None  # type: ignore
 
 # 秒级连发判定阈值：首条到末条不超过该跨度，视为"同一时刻的连续表达"。
 BURST_SPAN_SECONDS = 10.0
+
+
+def resolve_timezone(name: Any):
+    """把可选的 IANA 时区名解析为 tzinfo；无效/不提供时返回 None。
+
+    只有拿到**明确可信**的会话时区名才返回对象；否则返回 None，由调用方
+    退回进程本地时区（保持既有行为），绝不假定容器本地时区就是用户时区。
+    """
+    if not isinstance(name, str):
+        return None
+    key = name.strip()
+    if not key or ZoneInfo is None:
+        return None
+    try:
+        return ZoneInfo(key)
+    except Exception:
+        return None
 
 
 def _daypart_label(hour: int) -> str:
@@ -33,13 +56,15 @@ def _daypart_label(hour: int) -> str:
     return "深夜"
 
 
-def relative_label(ts: float, now: float | None = None) -> str:
+def relative_label(ts: float, now: float | None = None, tzname: Any = None) -> str:
     """把时间戳渲染成相对时间标签。
 
     口径：刚刚（<5s）/ N秒前 / N分钟前 / N小时前（均 <24h）；
     ≥24h 用「日期 + 时段词」（昨天 晚上 / MM-DD 下午 / 跨年
     YYYY-MM-DD 下午），像人一样说时间，不给精确到分钟的机器时刻。
     时间戳无效（<=0 或非数值）时返回空串，调用方据此省略标注。
+    ``tzname`` 用于隔日/时段的**当地时间**换算；缺省或无效时退回进程本地
+    时区（既有行为），不把容器本地时区当成用户时区。
     """
     try:
         value = float(ts)
@@ -57,8 +82,13 @@ def relative_label(ts: float, now: float | None = None) -> str:
         return f"{int(delta // 60)}分钟前"
     if delta < 86400:
         return f"{int(delta // 3600)}小时前"
-    moment = datetime.fromtimestamp(value)
-    current_moment = datetime.fromtimestamp(current)
+    tz = resolve_timezone(tzname)
+    moment = datetime.fromtimestamp(value, tz=tz) if tz else datetime.fromtimestamp(value)
+    current_moment = (
+        datetime.fromtimestamp(current, tz=tz)
+        if tz
+        else datetime.fromtimestamp(current)
+    )
     day_gap = (current_moment.date() - moment.date()).days
     daypart = _daypart_label(moment.hour)
     if day_gap == 1:
@@ -85,8 +115,10 @@ def burst_note(count: int, first_ts: float, last_ts: float) -> str:
     )
 
 
-def labeled_line(ts: float, text: str, now: float | None = None) -> str:
+def labeled_line(
+    ts: float, text: str, now: float | None = None, tzname: Any = None
+) -> str:
     """单行消息的时间标注渲染：`（N分钟前）「内容」`；无有效时间时退回 `「内容」`。"""
-    label = relative_label(ts, now)
+    label = relative_label(ts, now, tzname)
     body = f"「{text}」"
     return f"（{label}）{body}" if label else body

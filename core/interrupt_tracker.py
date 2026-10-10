@@ -73,11 +73,20 @@ class PendingMedia:
 
 @dataclass(frozen=True)
 class CompletedTurn:
-    """一次已经产生实际回复的对话轮次。"""
+    """一次已经产生实际回复的对话轮次。
+
+    时间语义分离：
+    - ``user_text_times``：与 ``user_texts`` 平行的**逐条用户消息事件时间**
+      （可能缺省/为 0，表示无可靠来源）；
+    - ``completed_at``：bot 交付/记录该轮的时刻（沿用原字段名，旧记录兼容）；
+    - ``delivered_at``：显式记录实际交付时刻，无可靠来源时为 0。
+    """
 
     user_texts: tuple[str, ...]
     bot_text: str
     completed_at: float
+    user_text_times: tuple[float, ...] = ()
+    delivered_at: float = 0.0
 
 
 @dataclass
@@ -421,6 +430,9 @@ class ConversationTracker:
         meaningful_user_text = "" if self._is_placeholder_text(user_text) else user_text
         merge_hint: dict[str, Any] | None = None
         old_texts: list[str] = []
+        # 本 event 的稳定事件时间（平台发送时刻优先），贯穿本次登记与时间标注；
+        # 缺失才回退到单调无关的 time.time()。
+        event_ts = self._get_event_time(event)
         now = time.time()
         window_s = self._interrupt_window_ms / 1000.0
         active_pending = self._active_merge_candidates(state, now, window_s)
@@ -496,6 +508,7 @@ class ConversationTracker:
                     old_image_urls=old_image_urls,
                     old_audio_urls=old_audio_urls,
                     old_captions=old_captions,
+                    new_ts=event_ts,
                 )
 
         speaking_primary = (
@@ -528,7 +541,7 @@ class ConversationTracker:
         state.pending[seq] = PendingRequest(
             seq=seq,
             user_text=user_text,
-            started_at=time.time(),
+            started_at=event_ts if event_ts is not None else time.time(),
             sender_id=self._get_sender_id(event),
             burst_open=text_completeness(meaningful_user_text) == "open",
             task_relation=relation,
@@ -538,7 +551,7 @@ class ConversationTracker:
                 else inherited_texts
             ),
             user_text_times=(
-                [*inherited_times, now]
+                [*inherited_times, (event_ts if event_ts is not None else now)]
                 if meaningful_user_text
                 else inherited_times
             ),
@@ -557,7 +570,10 @@ class ConversationTracker:
             self._set_extra(
                 event,
                 self.CONTINUATION_EXTRA_KEY,
-                {"new_text": meaningful_user_text, "hint_ts": now},
+                {
+                    "new_text": meaningful_user_text,
+                    "hint_ts": (event_ts if event_ts is not None else now),
+                },
             )
         return seq
 
@@ -758,11 +774,15 @@ class ConversationTracker:
         )
         if not user_texts:
             return False
+        user_times = self._pending_user_times(pending)
+        delivered = time.time()
         state.recent_turns.append(
             CompletedTurn(
                 user_texts=user_texts,
                 bot_text=text,
-                completed_at=time.time(),
+                completed_at=delivered,
+                user_text_times=user_times,
+                delivered_at=delivered,
             )
         )
         if len(state.recent_turns) > self._max_history_turns:
@@ -771,6 +791,18 @@ class ConversationTracker:
         state.last_bot_text = text
         state.last_active_ts = time.time()
         return True
+
+    @staticmethod
+    def turn_user_time(turn: CompletedTurn, index: int) -> float:
+        """取某条用户消息的事件时间；无可靠来源返回 0。"""
+        times = getattr(turn, "user_text_times", ())
+        if isinstance(times, (list, tuple)) and index < len(times):
+            try:
+                value = float(times[index])
+            except (TypeError, ValueError):
+                return 0.0
+            return value if value > 0 else 0.0
+        return 0.0
 
     def get_recent_turns(self, event: Any, limit: int = 0) -> list[CompletedTurn]:
         """返回当前会话最近已完成的轮次副本，按时间从旧到新排列。"""
@@ -789,6 +821,7 @@ class ConversationTracker:
         old_audio_urls: list[str] | None = None,
         old_captions: list[str] | None = None,
         old_times: list[float] | None = None,
+        new_ts: float | None = None,
     ) -> dict[str, Any]:
         return {
             "old_texts": old_texts,
@@ -797,10 +830,27 @@ class ConversationTracker:
             "old_image_urls": list(old_image_urls or []),
             "old_audio_urls": list(old_audio_urls or []),
             "old_captions": list(old_captions or []),
-            # 逐条到达时间（与 old_texts 平行）和提示生成时刻，供渲染时间标注。
+            # 逐条事件时间（与 old_texts 平行）与**新消息事件时间**，供渲染
+            # 时间标注；不再是提示生成时刻，避免把等待/模型耗时刻成间隔。
             "old_times": list(old_times or []),
-            "hint_ts": time.time(),
+            "hint_ts": new_ts if (new_ts is not None and new_ts > 0) else time.time(),
         }
+
+    @staticmethod
+    def _pending_user_times(pending: PendingRequest) -> tuple[float, ...]:
+        """返回与 user_texts 平行的逐条事件时间（缺省补 0，表示无可靠来源）。"""
+        times = pending.user_text_times
+        out: list[float] = []
+        for index in range(len(pending.user_texts)):
+            if index < len(times):
+                try:
+                    value = float(times[index])
+                except (TypeError, ValueError):
+                    value = 0.0
+                out.append(value if value > 0 else 0.0)
+            else:
+                out.append(0.0)
+        return tuple(out)
 
     @staticmethod
     def _pending_text_times(pending: PendingRequest) -> list[tuple[str, float]]:
@@ -874,6 +924,60 @@ class ConversationTracker:
         except Exception:
             pass
         return ""
+
+    # 事件时间语义：优先平台给出的发送时刻，其次框架的接收时刻；
+    # 一旦取值即缓存到 event，保证同一 event 重入不会重新打戳（避免把
+    # 等待/模型耗时算进用户连发间隔）。缺失/非法返回 None，调用方降级。
+    EVENT_TS_EXTRA_KEY = "conv_flow_event_ts"
+
+    def _get_event_time(self, event: Any) -> float | None:
+        """返回本 event 的稳定“消息时间”（wall-clock 秒），无可靠来源则 None。
+
+        来源优先级：
+        1. 平台消息对象 ``message_obj.timestamp``（如 aiocqhttp 适配器写入的
+           收到时刻）——最接近真实发送时刻；
+        2. 框架 ``event.created_at``（事件创建/接收时刻）；
+        缺失或非法（<=0、NaN/inf、明显未来）时返回 None。
+        """
+        cached = self._get_extra(event, self.EVENT_TS_EXTRA_KEY)
+        if isinstance(cached, (int, float)) and cached > 0:
+            return float(cached)
+        value = self._read_event_time(event)
+        if value is not None:
+            self._set_extra(event, self.EVENT_TS_EXTRA_KEY, value)
+        return value
+
+    @staticmethod
+    def _read_event_time(event: Any) -> float | None:
+        candidates: list[Any] = []
+        message_obj = getattr(event, "message_obj", None)
+        if message_obj is not None:
+            candidates.append(getattr(message_obj, "timestamp", None))
+        candidates.append(getattr(event, "created_at", None))
+        now = time.time()
+        for raw in candidates:
+            ts = ConversationTracker._coerce_wall_time(raw, now)
+            if ts is not None:
+                return ts
+        return None
+
+    @staticmethod
+    def _coerce_wall_time(raw: Any, now: float) -> float | None:
+        try:
+            value = float(raw)
+        except (TypeError, ValueError):
+            return None
+        if not math.isfinite(value) or value <= 0:
+            return None
+        # 秒/毫秒兼容：明显大于当前秒级时间戳的按毫秒折算。
+        if value > now * 10:
+            value = value / 1000.0
+        if not math.isfinite(value) or value <= 0:
+            return None
+        # 异常未来（超过 now + 1 天）不可信，丢弃，交由调用方降级。
+        if value > now + 86400:
+            return None
+        return value
 
     def _get_user_text(self, event: Any) -> str:
         try:
