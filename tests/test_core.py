@@ -90,6 +90,14 @@ class _MockFilter:
         return _identity_decorator()
 
     @staticmethod
+    def on_agent_done(*args, **kwargs):
+        # 记录本插件 on_agent_done handler 的优先级（用于注册结构断言）。
+        HOOK_PRIORITIES.setdefault("on_agent_done_priorities", []).append(
+            kwargs.get("priority")
+        )
+        return _identity_decorator()
+
+    @staticmethod
     def event_message_type(*args, **kwargs):
         def deco(fn):
             HOOK_PRIORITIES[fn.__name__] = kwargs.get("priority")
@@ -6535,6 +6543,20 @@ class TypoInterpretationTests(unittest.TestCase):
         req = self._req()
         plugin._inject_typo_interpretation(_Event("s", "在麻"), req)
         self.assertEqual(req.extra_user_content_parts, [])
+
+
+class OnAgentDoneRegistrationTests(unittest.TestCase):
+    """注册结构：本插件 on_agent_done 只应有一个正式 handler，优先级不降低。"""
+
+    def test_single_on_agent_done_handler_with_top_priority(self):
+        # 触发插件模块导入，使装饰器注册到 HOOK_PRIORITIES。
+        import astrbot_plugin_conversation_flow.main  # noqa: F401
+
+        priorities = HOOK_PRIORITIES.get("on_agent_done_priorities")
+        self.assertIsNotNone(priorities, "应已注册 on_agent_done handler")
+        self.assertEqual(len(priorities), 1, "on_agent_done 只应有一个正式 handler")
+        # 沿用原治理最高优先级 20000，不因合并而降级。
+        self.assertEqual(priorities[0], 20000)
 
 
 if __name__ == "__main__":

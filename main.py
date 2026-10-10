@@ -2095,13 +2095,14 @@ class ConversationalFlowPlugin(Star):
         key = self._tool_scope_key(event)
         inflight[key] = max(0, inflight.get(key, 0) - 1)
 
-    # on_agent_done 的正式 handler（CONVENTIONS.md 3.3）：显式声明优先级，
-    # 既清理工具生命周期状态，又暂存**公开**传入的 run_context 并做控制提示
-    # 治理兜底。真实 stop 前治理主路径仍在 on_llm_response（言就是停止事件的
-    # 那一步）；本 handler 是同一逻辑在 on_agent_done 链上的正式入口。
-    # 宿主 context_utils.call_event_hook 每执行一个 handler 后遇
-    # event.is_stopped() 即 return，故显式优先级并保持两处幂等。
-    @_optional_event_filter("on_agent_done", priority=10000)
+    # on_agent_done 的正式 handler（CONVENTIONS.md 3.3）：显式声明优先级 20000
+    # （沿用原治理 handler 的最高优先级，避免处于 10000~20000 之间的第三方停止
+    # handler 反过来改变本治理的可达性）。既清理工具生命周期状态，又暂存**公开**
+    # 传入的 run_context 并做控制提示治理兜底。真实 stop 前治理主路径仍在
+    # on_llm_response（言就是停止事件的那一步）；本 handler 是同一逻辑在
+    # on_agent_done 链上的正式入口。宿主 context_utils.call_event_hook 每执行
+    # 一个 handler 后遇 event.is_stopped() 即 return，故显式优先级并保持两处幂等。
+    @_optional_event_filter("on_agent_done", priority=20000)
     async def on_agent_done_tool_state(
         self, event: AstrMessageEvent, *args: Any, **kwargs: Any
     ) -> None:
