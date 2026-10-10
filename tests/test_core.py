@@ -4856,16 +4856,18 @@ class NaturalToolCallPromptTests(unittest.TestCase):
         仍保留纪律：不机械逐步骤报备、不暴露工具名/JSON/报错、不复述结果。
         """
         text = NATURAL_TOOL_CALL_INSTRUCTION
-        # 允许调用前自然说话（自主、非强制）。
+        # 允许调用前自然说话（自主、非强制），并能表达“不确定 + 查证意图”。
         self.assertIn("调用前可以正常说话", text)
-        self.assertIn("自主决定", text)
+        self.assertIn("不确定", text)
         self.assertIn("不强制", text)
+        # 明确允许动作意图表达，且把边界定在“空泛机械重复”而非字面封禁。
+        self.assertIn("我搜一下看看", text)
+        self.assertIn("动作意图", text)
+        self.assertIn("机械", text)
         # 旧的“绝对禁言 / 整轮只能一次”硬限制必须移除。
         self.assertNotIn("不输出给用户看的文字", text)
         self.assertNotIn("整轮只给用户一次最终回复", text)
-        # 保留反机械播报与不暴露实现细节的纪律。
-        self.assertIn('不要发"好，我弄一下"', text)
-        self.assertIn("机械", text)
+        # 保留不暴露实现细节与反机械播报的纪律。
         self.assertIn("工具名", text)
         self.assertIn("两段式播报", text)
         self.assertNotIn("用第一人称的自然动作描述你正在做什么", text)
@@ -4888,10 +4890,11 @@ class NaturalToolCallPromptTests(unittest.TestCase):
         self.assertNotIn("收尾方式", NATURAL_TOOL_CALL_INSTRUCTION)
 
     def test_instruction_forbids_asking_permission_before_searching(self) -> None:
-        """不确定时应直接检索，不能把"要不我帮你搜搜看"抛给用户等点头。"""
+        """禁止的是“征询许可”式问句，而非字面禁止动作意图表达。"""
         text = NATURAL_TOOL_CALL_INSTRUCTION
         self.assertIn("要不我帮你搜搜看", text)
-        self.assertIn("直接去查再回答", text)
+        # 允许“我搜一下看看”这类动作意图，不算多余许可反问。
+        self.assertIn("我搜一下看看", text)
         # 只读操作不需要事先征求同意
         self.assertIn("只读操作直接做", text)
 

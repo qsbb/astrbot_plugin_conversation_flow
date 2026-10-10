@@ -27,8 +27,11 @@ class NaturalToolVoiceTests(unittest.TestCase):
     def test_pre_call_voice_allowed_and_optional(self):
         text = NATURAL_TOOL_CALL_INSTRUCTION
         self.assertIn("调用前可以正常说话", text)
-        self.assertIn("自主决定", text)
+        self.assertIn("不确定", text)
         self.assertIn("不强制", text)
+        # 动作意图表达允许；边界是“空泛、机械、重复”而非字面封禁。
+        self.assertIn("我搜一下看看", text)
+        self.assertIn("动作意图", text)
 
     def test_absolute_ban_removed(self):
         text = NATURAL_TOOL_CALL_INSTRUCTION
