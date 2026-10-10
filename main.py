@@ -2238,13 +2238,14 @@ class ConversationalFlowPlugin(Star):
         回调里直接传入 ``run_context``，其 ``.messages`` 即本轮运行时消息；
         该形态已由 ``on_agent_done_tool_state`` 暂存到 event。
         仅当本钩子未收到回调（例如实际走的是 ``on_llm_response`` 且事件链更早
-        被停止）时，才**回退**读取宿主私有 ``_ACTIVE_AGENT_RUNNERS``——该回退
-        属 CONVENTIONS §1 的已知私有依赖，见开发报告“规范阻塞”。
+        被停止）时，才**回退**读取宿主私有 ``_ACTIVE_AGENT_RUNNERS``。这是用户
+        已接受的**限定兼容性例外**（仅此 messages 回退与下方实际 provider 解析
+        两处）；读取失败一律降级，不普遍放开私有依赖。
         """
         stashed = self._get_extra(event, self.CONTROL_RUN_MESSAGES_KEY)
         if isinstance(stashed, list):
             return stashed
-        try:  # 私有回退（见 docstring 的 §1 披露）
+        try:  # 限定兼容性例外：公开 run_context 不可得时的私有回退
             from astrbot.core.pipeline.process_stage.follow_up import (
                 _ACTIVE_AGENT_RUNNERS,
             )
@@ -2262,14 +2263,14 @@ class ConversationalFlowPlugin(Star):
         返回 ``(provider_id, model_name)``；无法确认本轮 provider 时返回
         ``("", "")``，由调用方明确降级为受限失败，绝不静默改用其它模型。
 
-        **规范阻塞（CONVENTIONS §1）**：公开 ``on_agent_done`` 会传入
+        **限定兼容性例外（用户已接受）**：公开 ``on_agent_done`` 会传入
         ``run_context``（可拿 messages），但**不提供**本轮实际服务的 provider/
         model——公开 ``LLMResponse`` 无 provider 字段，``Context`` 只能给会话
         默认 provider。要拿到 fallback 后真正服务的 provider，只能读宿主私有
-        ``_ACTIVE_AGENT_RUNNERS[umo].provider``。这是本插件唯一新增的私有依赖，
-        无法用公开 API 等价替换；已在开发报告中作为 §1 阻塞如实列出。
+        ``_ACTIVE_AGENT_RUNNERS[umo].provider``；仅此一处 provider 解析使用该
+        私有访问，读取失败即降级为受限失败，不普遍放开其它私有依赖。
         """
-        try:  # 私有读取：公开 API 无等价入口（见 docstring 阻塞说明）
+        try:  # 限定兼容性例外：读取本轮实际 provider（失败即降级）
             from astrbot.core.pipeline.process_stage.follow_up import (
                 _ACTIVE_AGENT_RUNNERS,
             )
