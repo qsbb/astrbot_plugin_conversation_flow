@@ -27,7 +27,7 @@ import sys
 
 sys.path.insert(0, str(_p.Path(__file__).resolve().parents[1].parent))
 
-import test_core as T  # noqa: E402,F401
+import test_core as T
 
 
 def _load_real_process_stages():
@@ -57,7 +57,10 @@ def _load_real_process_stages():
         "cast": lambda t, x: x,
         "logger": types.SimpleNamespace(debug=lambda *a, **k: None),
     }
-    exec(compile(ast.Module(body=[cls], type_ignores=[]), "sched", "exec"), ns)
+    exec(  # noqa: S102 - 加载 vetted 本地宿主快照 AST（缺快照时 skip）
+        compile(ast.Module(body=[cls], type_ignores=[]), "sched", "exec"),
+        ns,
+    )
     return ns["PipelineScheduler"]
 
 

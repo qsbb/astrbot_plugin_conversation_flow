@@ -12,7 +12,6 @@
 from __future__ import annotations
 
 import ast
-import asyncio
 import pathlib
 import types
 import unittest
@@ -55,7 +54,10 @@ def _load_real_process_stages():
         "cast": lambda t, x: x,
         "logger": types.SimpleNamespace(debug=lambda *a, **k: None),
     }
-    exec(compile(ast.Module(body=[cls], type_ignores=[]), "sched", "exec"), ns)
+    exec(  # noqa: S102 - 加载 vetted 本地宿主快照 AST（缺快照时 skip）
+        compile(ast.Module(body=[cls], type_ignores=[]), "sched", "exec"),
+        ns,
+    )
     return ns["PipelineScheduler"]
 
 

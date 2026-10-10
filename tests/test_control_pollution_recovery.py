@@ -8,7 +8,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import pathlib
 import sys
 import types
@@ -17,8 +16,7 @@ import unittest
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1].parent))
 
 # 复用 test_core 安装的 astrbot 桩（本机不安装 AstrBot 本体）。
-import test_core  # noqa: E402,F401  （导入即注册 astrbot.* stub 模块）
-
+import test_core  # noqa: F401  （导入即注册 astrbot.* stub 模块）
 from astrbot_plugin_conversation_flow.core.control_pollution import (
     classify_control_line,
     decide_recovery,
@@ -33,7 +31,6 @@ from astrbot_plugin_conversation_flow.core.control_recovery import (
     has_tool_side_effects,
     strip_host_abort_pair,
 )
-
 
 # --------------------------------------------------------------------------
 # 纯函数层：分类与净化
@@ -72,13 +69,13 @@ class ControlPollutionClassificationTests(unittest.TestCase):
         self.assertNotIn("Output stopped.\n", cleaned)
 
     def test_decide_recovery_matrix(self) -> None:
-        base = dict(
-            result_text="Output stopped",
-            stop_requested=False,
-            event_stopped=False,
-            host_abort_pair=False,
-            already_attempted=False,
-        )
+        base = {
+            "result_text": "Output stopped",
+            "stop_requested": False,
+            "event_stopped": False,
+            "host_abort_pair": False,
+            "already_attempted": False,
+        }
         self.assertEqual(
             decide_recovery(**{**base, "result_text": "这是正常回答"}), "not_control"
         )
@@ -253,8 +250,8 @@ _install_active_runner_registry_stub()
 
 
 def _plugin(ctx=None):
-    from astrbot_plugin_conversation_flow.main import ConversationalFlowPlugin
     from astrbot_plugin_conversation_flow.core.config import build_plugin_config
+    from astrbot_plugin_conversation_flow.main import ConversationalFlowPlugin
 
     plugin = object.__new__(ConversationalFlowPlugin)
     plugin.config = build_plugin_config({"interrupt_enabled": True})

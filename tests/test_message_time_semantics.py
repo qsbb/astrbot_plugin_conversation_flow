@@ -12,12 +12,11 @@ import unittest
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1].parent))
 
-import test_core  # noqa: E402,F401  安装 astrbot 桩
-
-from astrbot_plugin_conversation_flow.core.interrupt_tracker import (  # noqa: E402
+import test_core  # noqa: F401  安装 astrbot 桩
+from astrbot_plugin_conversation_flow.core.interrupt_tracker import (
     ConversationTracker,
 )
-from astrbot_plugin_conversation_flow.core.time_labels import (  # noqa: E402
+from astrbot_plugin_conversation_flow.core.time_labels import (
     burst_note,
     relative_label,
     resolve_timezone,

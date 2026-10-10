@@ -11,9 +11,8 @@ import unittest
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1].parent))
 
-import test_core  # noqa: E402,F401
-
-from astrbot_plugin_conversation_flow.core.prompts import (  # noqa: E402
+import test_core  # noqa: F401
+from astrbot_plugin_conversation_flow.core.prompts import (
     INTERRUPT_MERGE_APPEND_TEMPLATE,
     INTERRUPT_MERGE_SAME_TURN_HINT,
     INTERRUPT_THINKING_HISTORY_TEMPLATE,

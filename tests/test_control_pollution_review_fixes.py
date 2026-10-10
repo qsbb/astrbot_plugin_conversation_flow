@@ -13,7 +13,6 @@
 from __future__ import annotations
 
 import ast
-import asyncio
 import inspect
 import pathlib
 import sys
@@ -22,10 +21,9 @@ import unittest
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1].parent))
 
-import test_core  # noqa: E402,F401  安装 astrbot 桩
-
-import test_control_pollution_recovery as T  # noqa: E402
-from astrbot_plugin_conversation_flow.core.control_recovery import (  # noqa: E402
+import test_control_pollution_recovery as T
+import test_core  # noqa: F401  安装 astrbot 桩
+from astrbot_plugin_conversation_flow.core.control_recovery import (
     RECOVERY_FAILED_NOTICE,
 )
 
@@ -145,7 +143,7 @@ def _load_real_call_event_hook(namespace: dict) -> object:
     node.returns = None
     for a in node.args.args:
         a.annotation = None
-    exec(
+    exec(  # noqa: S102 - 加载 vetted 本地宿主快照 AST（缺快照时 skip）
         compile(ast.Module(body=[node], type_ignores=[]), "host_dispatcher", "exec"),
         namespace,
     )

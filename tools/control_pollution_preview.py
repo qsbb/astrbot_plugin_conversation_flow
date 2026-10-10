@@ -24,7 +24,7 @@ import sys
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1].parent))
 
-from astrbot_plugin_conversation_flow.core.control_pollution import (  # noqa: E402
+from astrbot_plugin_conversation_flow.core.control_pollution import (
     classify_control_line,
     is_control_stop_message,
     is_control_stop_request,

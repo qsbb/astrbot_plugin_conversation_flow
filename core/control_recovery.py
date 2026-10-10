@@ -138,7 +138,7 @@ def _make_text_part(text: str) -> Any:
         from astrbot.core.agent.message import TextPart
 
         return TextPart(text=text)
-    except Exception:  # pragma: no cover - 仅无宿主时兜底
+    except Exception:  # noqa: BLE001 - 无宿主时的 duck-typed 兜底
         import types
 
         return types.SimpleNamespace(type="text", text=text)
@@ -228,6 +228,15 @@ def _strip_control_lines_in_injection_block(text: str) -> tuple[str, int]:
     return "\n".join(kept), removed
 
 
+def _try_set_part_text(part: Any, text: str) -> bool:
+    """best-effort 写入单个消息件文本；只读对象返回 False。"""
+    try:
+        part.text = text
+        return True
+    except Exception:  # noqa: BLE001 - 只读属性时跳过
+        return False
+
+
 def _scrub_message(message: Any) -> int:
     """对单条消息做可证来源清理；返回剔除行数。"""
     content = _content_of(message)
@@ -252,10 +261,8 @@ def _scrub_message(message: Any) -> int:
                     if isinstance(part, dict):
                         part["text"] = cleaned
                     else:
-                        try:
-                            part.text = cleaned
-                        except Exception:
-                            pass
+                        # 只读属性时跳过（不影响其它消息件）。
+                        _ = _try_set_part_text(part, cleaned)
                     total += count
         return total
     return 0
@@ -329,8 +336,8 @@ def _normalize_context(message: Any) -> Any:
     if callable(dump):
         try:
             return dump()
-        except Exception:
-            pass
+        except Exception:  # noqa: BLE001 - model_dump 失败时原样返回
+            return message
     return message
 
 
@@ -410,10 +417,32 @@ def _make_plain_component(text: str) -> Any:
         from astrbot.core.message.components import Plain
 
         return Plain(text)
-    except Exception:  # pragma: no cover
+    except Exception:  # noqa: BLE001 - 无宿主时的 duck-typed 兜底
         import types
 
         return types.SimpleNamespace(type="plain", text=text)
+
+
+def _sync_result_chain_safe(response: Any, text: str) -> bool:
+    """best-effort 同步 result_chain；失败返回 False，不抛出、不静默吞掉语义。"""
+    try:
+        _sync_result_chain(response, text)
+        return True
+    except Exception:  # noqa: BLE001 - 同步失败不阻断主流程
+        return False
+
+
+def _clear_result_chain_safe(response: Any) -> bool:
+    """best-effort 清空 result_chain；失败返回 False。"""
+    try:
+        chain = getattr(response, "result_chain", None)
+        if isinstance(chain, list):
+            chain[:] = []
+        elif chain is not None and isinstance(getattr(chain, "chain", None), list):
+            chain.chain = []
+        return True
+    except Exception:  # noqa: BLE001 - 抑制失败不阻断主流程
+        return False
 
 
 def apply_recovered_answer(messages: list[Any], response: Any, answer: str) -> bool:
@@ -425,13 +454,11 @@ def apply_recovered_answer(messages: list[Any], response: Any, answer: str) -> b
         # 宿主 LLMResponse.completion_text 是 property，setter 会同步 result_chain；
         # 对 duck-type 对象则退化为普通字段。
         response.completion_text = text
-    except Exception:
+    except Exception:  # noqa: BLE001 - setter 不可写时按失败处理
         return False
-    # 显式再同步一次，保证宿主优先使用的 result_chain 与 completion_text 一致。
-    try:
-        _sync_result_chain(response, text)
-    except Exception:
-        pass
+    # 显式再同步一次，保证宿主优先使用的 result_chain 与 completion_text 一致；
+    # 同步失败不阻断主流程（正常 LLMResponse 的 setter 已同步过一次）。
+    _ = _sync_result_chain_safe(response, text)
 
     for message in reversed(messages):
         if _role_of(message) == "assistant":
@@ -445,16 +472,9 @@ def suppress_control_artifact(messages: list[Any], response: Any) -> bool:
     try:
         if hasattr(response, "completion_text"):
             response.completion_text = ""
-    except Exception:
+    except Exception:  # noqa: BLE001 - setter 不可写时按失败处理
         return False
-    try:
-        chain = getattr(response, "result_chain", None)
-        if isinstance(chain, list):
-            chain[:] = []
-        elif chain is not None and isinstance(getattr(chain, "chain", None), list):
-            chain.chain = []
-    except Exception:
-        pass
+    _ = _clear_result_chain_safe(response)
     for message in reversed(messages):
         if _role_of(message) == "assistant":
             _set_message_text(message, "")
